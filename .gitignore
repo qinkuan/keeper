@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# keeper 运行时产物
+*.log
+*.pid
+
+# keeper 索引的工作副本
+keeper/.workplace/
+
+# 插件库：已移到 ~/.keeper/plugins（283MB 的 MCP 二进制绝不能进版本库）。
+# 仓库根的 plugins/ 是旧的一份副本，只留作参考、不再被运行时读取。
+plugins/**/mcp/codebase-memory-mcp
+plugins/**/*.zip
+
+# 会话数据库（运行时生成）
+keeper/data/
+
+# 效果评估的产物（运行时生成，现落在 ~/.keeper/evals/）
+# 这两条是**兜底**：产物已移出代码目录，但一旦有人改回本地路径，
+# 不加这两行就会把 17MB 的临时库连同答案原文一起提交进去
+keeper/evals/.runs/
+keeper/evals/baselines/
+
+# 前端构建产物
+node_modules/
+dist/
+
+# IDE
+.idea/
+.DS_Store
+
+*.db

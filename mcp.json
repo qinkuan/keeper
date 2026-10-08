@@ -1,0 +1,18 @@
+{
+  "codebase_memory": {
+    "transport": "stdio",
+    "command": "python",
+    "args": [
+      "-m",
+      "codebase_memory"
+    ],
+    "timeout": 300,
+    "sse_read_timeout": 900,
+    "headers": {
+      "Authorization": "Bearer 123456"
+    },
+    "env": {
+      "CBM_CACHE_DIR": ""
+    }
+  }
+}

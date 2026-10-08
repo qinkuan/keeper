@@ -1,0 +1,408 @@
+/*
+ * 淡色 · 简约主题（全项目统一）
+ *
+ * 取向：白底 + 极淡冷灰分层，强调色用柔和蓝（与会话气泡同一色系）；
+ * 边框、阴影都很淡，靠留白与圆角建立层次，避免重色块。
+ */
+
+:root {
+  /* 主色：与智能体页「已添加」同款的 antd blue，清爽干净；用于按钮 / 图标 / 品牌 */
+  --kp-primary: #1677ff;
+  --kp-primary-hover: #4096ff;
+  --kp-primary-active: #0958d9;
+  --kp-primary-strong: #0958d9;
+  /* 展示类（气泡、选中底）用的淡蓝，与「已添加」标签底色一致 */
+  --kp-primary-soft: #e6f4ff;
+  --kp-primary-ring: rgba(22, 119, 255, 0.18);
+
+  /* 中性色：极淡冷灰阶 */
+  --kp-bg: #ffffff;
+  --kp-bg-app: #f7f8fa;
+  --kp-surface: #f5f7fa;
+  --kp-surface-soft: #f2f5f9;
+  --kp-border: #e2e5ea;
+  --kp-border-soft: #edeff3;
+  /* 正文色；标题 / 项目名称等强调文案用 strong（带一点蓝调，与主题呼应） */
+  --kp-text: #2b2f36;
+  --kp-text-strong: #1f2a37;
+  --kp-text-secondary: #7a8290;
+  --kp-text-muted: #a3aab5;
+
+  /* 圆角：卡片大圆角，控件与按钮胶囊 */
+  --kp-radius: 12px;
+  --kp-radius-lg: 18px;
+  --kp-pill: 980px;
+
+  /* 阴影：极淡、带一点冷调 */
+  --kp-shadow-sm: 0 2px 8px rgba(31, 45, 61, 0.04);
+  --kp-shadow-md: 0 8px 24px rgba(31, 45, 61, 0.07);
+
+  /* Apple 缓动 */
+  --kp-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--kp-bg-app);
+  color: var(--kp-text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 标题：半粗 + 紧字距 */
+h1,
+h2,
+h3,
+h4,
+h5 {
+  color: var(--kp-text);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* 顶栏：毛玻璃 + 极淡底边 */
+.ant-layout-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(255, 255, 255, 0.78) !important;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--kp-border-soft) !important;
+}
+
+/* 细窄滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(31, 45, 61, 0.16);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 45, 61, 0.3);
+  background-clip: content-box;
+}
+
+/* 按钮：胶囊 + Apple 缓动 + 按压反馈 */
+.ant-btn {
+  border-radius: var(--kp-pill) !important;
+  transition: all 0.3s var(--kp-ease) !important;
+}
+
+.ant-btn:active {
+  transform: scale(0.97);
+}
+
+/* 交互元素统一缓动 */
+a,
+.ant-menu-item,
+.ant-select-selector,
+.ant-input,
+.ant-card {
+  transition: all 0.3s var(--kp-ease);
+}
+
+/* 入场动画：淡入 + 轻微上浮 */
+@keyframes kp-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.kp-fade-up {
+  animation: kp-fade-up 0.6s var(--kp-ease) both;
+}
+
+@keyframes kp-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.kp-fade-in {
+  animation: kp-fade-in 0.5s var(--kp-ease) both;
+}
+
+.kp-lift {
+  transition: transform 0.3s var(--kp-ease), box-shadow 0.3s var(--kp-ease),
+    border-color 0.3s var(--kp-ease);
+}
+
+.kp-lift:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(31, 45, 61, 0.1);
+  border-color: var(--kp-border);
+}
+
+/* 卡片内「进入」箭头：hover 微移 */
+.kp-arrow {
+  transition: transform 0.3s var(--kp-ease), opacity 0.3s var(--kp-ease);
+  opacity: 0.5;
+}
+
+.kp-lift:hover .kp-arrow {
+  transform: translateX(3px);
+  opacity: 1;
+}
+
+/* 消息气泡入场：淡入 + 轻微上浮 */
+@keyframes kp-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.kp-bubble-in {
+  animation: kp-bubble-in 0.35s var(--kp-ease) both;
+}
+
+/* 流式输出光标：回答生成中在末尾闪烁 */
+@keyframes kp-caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.kp-caret {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  border-radius: 2px;
+  background: var(--kp-primary);
+  animation: kp-caret-blink 1s steps(1, end) infinite;
+}
+
+/* 输入框拖拽把手：默认浅灰，hover 变主色并微放大，便于发现 */
+.kp-grip {
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 热区加大：细条本身不好抓，上下多留可点区域 */
+  padding: 7px 0;
+  width: 100%;
+  touch-action: none;
+}
+
+.kp-grip i {
+  display: block;
+  width: 56px;
+  height: 6px;
+  border-radius: 999px;
+  background: #c3c9d4;
+  transition: background 0.15s var(--kp-ease), transform 0.15s var(--kp-ease);
+}
+
+.kp-grip:hover i {
+  background: var(--kp-primary);
+  transform: scaleX(1.06);
+}
+
+/* ===== Markdown 渲染（助手回复 / 工作台 .md 预览共用） ===== */
+.kp-md {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--kp-text);
+  word-break: break-word;
+}
+
+.kp-md > *:first-child {
+  margin-top: 0;
+}
+
+.kp-md > *:last-child {
+  margin-bottom: 0;
+}
+
+.kp-md h1,
+.kp-md h2,
+.kp-md h3,
+.kp-md h4 {
+  margin: 18px 0 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--kp-text-strong);
+}
+
+.kp-md h1 {
+  font-size: 20px;
+}
+
+.kp-md h2 {
+  font-size: 17px;
+}
+
+.kp-md h3 {
+  font-size: 15px;
+}
+
+.kp-md h4 {
+  font-size: 14px;
+}
+
+.kp-md p {
+  margin: 10px 0;
+}
+
+/* 显式声明，不依赖浏览器默认样式表 */
+.kp-md strong {
+  font-weight: 600;
+}
+
+.kp-md em {
+  font-style: italic;
+}
+
+.kp-md ul,
+.kp-md ol {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+
+.kp-md li {
+  margin: 4px 0;
+}
+
+.kp-md blockquote {
+  margin: 12px 0;
+  padding: 2px 14px;
+  border-left: 3px solid var(--kp-primary-ring);
+  border-radius: 0 6px 6px 0;
+  background: var(--kp-surface);
+  color: var(--kp-text-secondary);
+}
+
+.kp-md a {
+  color: var(--kp-primary);
+  text-decoration: none;
+}
+
+.kp-md a:hover {
+  text-decoration: underline;
+}
+
+.kp-md hr {
+  margin: 16px 0;
+  border: none;
+  border-top: 1px solid var(--kp-border-soft);
+}
+
+.kp-md table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.kp-md th,
+.kp-md td {
+  padding: 6px 10px;
+  border: 1px solid var(--kp-border);
+  text-align: left;
+}
+
+.kp-md th {
+  background: var(--kp-surface);
+  font-weight: 600;
+}
+
+/* 代码块：MarkdownView 的 CodeBlock 结构（.kp-md-code > bar + Shiki/pre） */
+.kp-md-code {
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid var(--kp-border-soft);
+  border-radius: 8px;
+  background: var(--kp-surface);
+}
+
+.kp-md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--kp-border-soft);
+  background: var(--kp-surface-soft);
+  font-size: 12px;
+  color: var(--kp-text-muted);
+}
+
+/* Shiki 输出 <pre class="shiki">：背景交给外层容器，免得主题色盖掉项目配色 */
+.kp-md-code .shiki {
+  margin: 0;
+  padding: 12px;
+  max-height: 520px;
+  overflow: auto;
+  background: transparent !important;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.kp-md-code .shiki code {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 高亮未就绪 / 语言不支持时的降级：纯文本代码块 */
+.kp-md-code pre {
+  margin: 0;
+  padding: 12px;
+  max-height: 520px;
+  overflow: auto;
+  font-size: 12.5px;
+  line-height: 1.65;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 行内代码 */
+.kp-md-inline-code {
+  padding: 1px 5px;
+  border: 1px solid var(--kp-border-soft);
+  border-radius: 4px;
+  background: var(--kp-surface);
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

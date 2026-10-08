@@ -1,0 +1,27 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  auth:
+    enabled: false
+    default_initiator_id: 10001
+agent:
+  name: assistant
+platform:
+  url: http://localhost:9095
+  token: _csVBbp8d53wmqTfahy3kujRWBnxUbQ8-NuGeF2Zzek
+llm:
+  provider: deepseek
+  model_name: deepseek-chat
+  api_key: sk-7d98e52253b74b1b9bc3ebd1c3efb67e
+  base_url: https://api.deepseek.com
+  temperature: 0.2
+  timeout: 120
+  max_retries: 3
+workspace:
+  kind: local
+  root: ~/.keeper/workspace/user
+  read_only: false
+agent_overrides: {}
+# 用户设置（A2A 超时/熔断、prompt 落盘、上下文治理）不写在这里：
+# 见 ~/.keeper/settings.yaml——那里的值覆盖本文件同名段，改完立即生效。
+# 本文件是元配置，只在部署时手改。

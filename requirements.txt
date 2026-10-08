@@ -1,0 +1,47 @@
+# keeper 依赖（架构见 doc/collaboration-design.md）
+
+# ---- Web 层（main.py / chat/api.py）----
+# starlette 必须 <0.42：starlette 1.x 移除了 Router 的 on_startup 参数，
+# 而 fastapi 0.115 仍在传，配错会导致 FastAPI() / APIRouter() 直接抛 TypeError。
+fastapi>=0.115,<0.116
+starlette>=0.40,<0.42
+uvicorn>=0.30
+
+# ---- 存储层（store/）----
+sqlalchemy>=2.0        # ORM 与表定义
+# SQLAlchemy 的异步（async_session / engine.begin）必须有 greenlet 才能跑；
+# 它不是在所有平台都会被 sqlalchemy 自动装上，缺了报 "No module named 'greenlet'"
+greenlet>=3.0
+aiosqlite>=0.20        # SQLite 异步驱动（不阻塞事件循环）
+python-ulid>=3.0       # session / message / thread 的 ID 生成（时间有序）
+
+# ---- LLM 层（llm/client.py）----
+langchain>=1.4
+langchain-core>=1.6
+# provider 集成包，对应 llm/config.py 的 PROVIDER_MAP
+langchain-openai        # openai / deepseek / siliconflow
+langchain-anthropic     # anthropic / claude
+langchain-ollama        # ollama / vLLM
+
+# ---- MCP 层 ----
+langchain-mcp-adapters>=0.3      # client：mcp/client.py 的 MultiServerMCPClient
+mcp>=1.30                         # server：keeper/server/mcp 的 FastMCP
+                                  # 必须显式声明：它目前只是 langchain-mcp-adapters 的间接依赖，
+                                  # 而对外 MCP server 直接用了它的 API
+
+# ---- 配置与模型 ----
+pyyaml>=6.0             # config.yaml / skill yaml 解析
+pydantic>=2.0           # LLM 配置模型
+
+# ---- A2A 客户端（a2a/client.py 调对端 JSON-RPC）----
+httpx>=0.27
+
+# ---- 插件装载（keeper/sync/fetcher.py）：嵌入式 git，不依赖宿主机 git 二进制 ----
+# 注意：dulwich 没有名为 ssh 的 extra，[ssh] 写法会触发 pip 警告；SSH 走 dulwich
+# 默认 vendor（系统 ssh 命令）。若要在无 ssh 命令的环境用 SSH，需另装 paramiko
+# 并在 fetcher 里 set_ssh_vendor(ParamikoSSHVendor())。
+dulwich>=1.2
+
+# ---- 记忆层（memory/）：中文分词，FTS5 检索的预处理 ----
+# FTS5 自带分词器不会做中文分词，需在 Python 侧用 jieba 预分词后再喂 FTS5。
+jieba>=0.42
