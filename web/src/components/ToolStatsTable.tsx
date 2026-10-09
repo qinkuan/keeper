@@ -8,7 +8,7 @@ import { fmtDuration, fmtTokens } from "./UsageTag";
  * 关注点：
  * - `avg_output_size` / `max_output_size` 大 → 该工具的返回会原样进下一轮 prompt，
  *   是上下文膨胀的主要来源；
- * - `truncated` 高 → 返回经常超过 observation_limit 被砍，说明该精简工具输出了。
+ * - `truncated` 高 → 返回经常超过内联上限，给模型的文本被换成了引用或截断，说明该精简工具输出了。
  */
 export default function ToolStatsTable({ stats }: { stats: ToolStat[] }) {
   if (!stats.length) return null;

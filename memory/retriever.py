@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import jieba
 

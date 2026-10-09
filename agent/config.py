@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 
 from ..mcp.locate import ExecutableNotFoundError
-from ..plugin import agent_plugins_dir, find_plugin, linked_plugins
+from ..plat.fetcher import FetchError
+from ..plugin import agent_plugins_dir, find_plugin, link_plugin, linked_plugins
 from ..skill import SkillRegistry
 from ..store import (
     Agent,

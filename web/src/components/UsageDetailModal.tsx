@@ -166,7 +166,7 @@ function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTo
         {s.output_size > 0 && (
           <span style={{ color: s.truncated ? "#fa8c16" : "#8c8c8c" }}>
             工具返回 {fmtTokens(s.output_size)}
-            {s.truncated && "（被截断）"}
+            {s.truncated && "（已缩减）"}
           </span>
         )}
         {s.input_text && (

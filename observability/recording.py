@@ -21,6 +21,7 @@ from ..store import (
     new_id,
 )
 from ._context import _ctx
+from ._guard import note_if_bug
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ async def record_llm_call(
             )
             await db.commit()
     except Exception as e:  # 用量记账绝不能把对话搞挂
+        note_if_bug(e, "记录 LLM 调用用量")
         logger.debug("记录 LLM 调用用量失败: %s", e)
 
 
@@ -130,6 +132,7 @@ async def record_tool_call(
             )
             await db.commit()
     except Exception as e:  # 记账失败绝不能把工具执行搞挂
+        note_if_bug(e, "记录工具调用")
         logger.debug("记录工具调用失败: %s", e)
 
 
@@ -165,6 +168,7 @@ async def record_capability_load(
             )
             await db.commit()
     except Exception as e:  # 观测失败绝不能影响对话
+        note_if_bug(e, "记录能力加载")
         logger.debug("记录能力加载失败: %s", e)
 
 
@@ -190,6 +194,7 @@ async def record_react_parse_stat(kind: str, action_count: int = 0) -> None:
             )
             await db.commit()
     except Exception as e:  # noqa: BLE001
+        note_if_bug(e, "记录解析统计")
         logger.debug("记录解析统计失败: %s", e)
 
 
@@ -234,6 +239,7 @@ async def backfill_step_id(
             if rows or trows:
                 await db.commit()
     except Exception as e:
+        note_if_bug(e, "回填 step_id")
         logger.debug("回填 step_id 失败: %s", e)
 
 

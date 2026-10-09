@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 from sqlalchemy import and_, or_, select
 
 from ..store import LLMProfile, ModelPrice, get_session_factory
+from ._guard import raise_if_bug
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,7 @@ async def _price_for(
                     )
         return None
     except Exception as e:
+        raise_if_bug(e, "查询模型单价")
         logger.debug("查询模型单价失败: %s", e)
         return None
 
@@ -182,6 +184,7 @@ async def _context_limit_for(
                     ).scalars().first()
             return row.context_limit if row else None
     except Exception as e:
+        raise_if_bug(e, "查询模型上下文上限")
         logger.debug("查询模型上下文上限失败: %s", e)
         return None
 

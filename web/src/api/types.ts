@@ -218,7 +218,7 @@ export interface ToolStat {
   /** 返回大小：大的要重点看，它的输出会原样进下一轮 prompt */
   avg_output_size: number;
   max_output_size: number;
-  /** 被 observation_limit 截断的次数：高说明返回臃肿 */
+  /** 被 observation_limit 换引用/截断的次数：高说明返回臃肿 */
   truncated: number;
 }
 
@@ -443,7 +443,7 @@ export interface TimelineStep {
   /** 截断后真正进入上下文的长度（影响 token 的是它） */
   output_size: number;
   raw_output_size: number;
-  /** 原始返回 > 实际进上下文：被 observation_limit 砍过 */
+  /** 原始返回 > 实际进上下文：超内联上限，被换引用或截断了 */
   truncated: boolean;
   created_at: string | null;
   /** 本步的思考（+ 工具入参）；过长会被截断 */
@@ -564,7 +564,10 @@ export interface ContextSettings {
   /** 最近这几步永远保留原文 */
   keep_recent_steps: number;
   compact_max_chars: number;
-  /** 单条工具输出硬截断（唯一的即时保护） */
+  /**
+   * 单条输出内联上限：超过它先外部化成「预览 + block_id」，外部化不可用时才硬截断。
+   * 键名沿用 observation_limit 是历史原因，语义已改，别再当「截断上限」理解。
+   */
   observation_limit: number;
   /** 一轮 ReAct 最多跑多少步 */
   max_steps: number;

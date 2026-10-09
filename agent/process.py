@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from .context_store import Compactor, clip_observation, ctx_cfg
+from .context_store import Compactor, clip_observation, ctx_cfg, externalize
 from .planner import ReActPlanner
 
 if TYPE_CHECKING:  # 仅类型检查时引入，避免运行时循环导入
@@ -42,6 +42,41 @@ def _is_error_obs(obs: str) -> bool:
         return False
     head = obs.lstrip()[:200]
     return any(m in head for m in _ERR_OBS_MARKERS)
+
+
+def _fit_observation(tool: str, raw: str, limit: int) -> tuple[str, int]:
+    """把单条工具输出压到 ``limit`` 以内：**先外部化，再硬截断**。
+
+    两种降级的信息损失完全不同：
+
+    - 外部化：原文落盘 + 给 ``block_id``，模型能 ``read(block_id)`` 展开全文。
+      信息**不丢**，只是要多一步。
+    - 硬截断：只留 70% 头 + 30% 尾，中间那段既没落盘也没有 id，模型永远拿不
+      回来——它只看到「省略了多少字符」，不知道该干什么，往往只能原样重调
+      同一个工具（内置工具还没有分页参数），于是打转。
+
+    为什么必须是这个顺序：以前是「先截断、再让滚动外部化判断」，可 messages 里
+    的内容已经 ≤ limit（3500），永远够不到 ``externalize_min_chars``（5000），
+    外部化这条兜底路径实际**一次都没触发过**——超长结果只有截断，没有出路。
+
+    外部化不触发的情况（总开关关 / 在 ``never_externalize`` 名单里 / 写盘失败）
+    一律退回硬截断，此时它仍是唯一的即时保护。
+
+    返回 ``(给模型的文本, 工具原始输出长度)``。
+    """
+    raw_len = len(raw)
+    if limit > 0 and raw_len > limit:
+        # 阈值用 limit（不是 externalize_min_chars）：超过硬截断线就必须给
+        # block_id，否则这段内容既没落盘也没 id，谁都拿不回来。
+        kept = externalize(tool, raw, min_chars=limit + 1)
+        if kept != raw:
+            logger.info(
+                "[context] 单条超长输出已外部化：%s %d 字符 → 预览 + block_id",
+                tool,
+                raw_len,
+            )
+            return kept, raw_len
+    return clip_observation(raw, limit), raw_len
 
 
 def _call_key(name: str, args: Any) -> str:
@@ -524,14 +559,15 @@ class Process:
         except Exception as e:  # noqa: BLE001
             obs = f"[工具 {name} 执行出错: {e}]"
             return obs, False, int((time.perf_counter() - t0) * 1000), len(obs), False
-        raw_len = len(raw) if isinstance(raw, str) else len(str(raw))
-        clipped = clip_observation(raw, self.observation_limit)
+        obs, raw_len = _fit_observation(
+            name, raw if isinstance(raw, str) else str(raw), self.observation_limit
+        )
         return (
-            clipped,
+            obs,
             True,
             int((time.perf_counter() - t0) * 1000),
             raw_len,
-            raw_len > len(clipped),
+            raw_len > len(obs),
         )
 
     def _dropped_actions_note(self, dec: Any) -> str:
@@ -1441,27 +1477,26 @@ class Process:
                 else:
                     try:
                         raw = await tool.execute(dec.args or {})
-                        raw_len = len(raw) if isinstance(raw, str) else len(str(raw))
-                        # 先硬截断（保护窗口），再决定要不要外部化：
-                        # 超长的工具输出只把「首尾预览 + block_id」留在上下文里，
-                        # 原文落盘，模型需要时 read(block_id="ctx:xxx") 展开。
-                        # 硬截断是**唯一的即时保护**：单条工具输出不会超过它。
-                        # 不做「刚返回就外部化」——模型下一步要用这份结果，
-                        # 换成预览会漏内容；真正的瘦身交给滚动外部化（退出保活窗口后）。
-                        # 截断保留头尾：报错与结论常在结尾，硬切会坑模型。
+                        raw = raw if isinstance(raw, str) else str(raw)
+                        # 先外部化（超长时给「预览 + block_id」，模型能 read 回
+                        # 全文），再退到硬截断。clipped 仍只用于落库/展示，
+                        # obs 才是喂给模型的——见 _fit_observation 的注释。
+                        obs, raw_len = _fit_observation(
+                            dec.tool, raw, self.observation_limit
+                        )
                         clipped = clip_observation(raw, self.observation_limit)
-                        obs = clipped
                         # 失败计数：靠 observation 里的错误标记判断，不靠异常
                         #（大部分「失败」是工具正常返回一段错误文本，不是抛异常）
-                        self._note_repeat(dec.tool, args_hash, ok=not _is_error_obs(clipped))
+                        self._note_repeat(dec.tool, args_hash, ok=not _is_error_obs(obs))
                         await self._record_tool_call(
                             dec.tool,
                             duration_ms=int((time.perf_counter() - t_tool) * 1000),
                             ok=True,
                             args_size=args_size,
                             args_hash=args_hash,
-                            # output_size 记**截断后**真正进上下文的长度——影响 token 的是它；
-                            # raw_output_size 是工具原本返回的长度，不等即被 observation_limit 砍过
+                            # output_size 记**真正进上下文**的长度——影响 token 的是它；
+                            # raw_output_size 是工具原本返回的长度，不等即说明给模型的
+                            # 文本被缩减过（超内联上限 → 换引用；外部化不可用 → 硬截断）
                             output_size=len(obs),
                             raw_output_size=raw_len,
                             truncated=raw_len > len(clipped),

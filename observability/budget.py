@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 from sqlalchemy import case, func, select
 
 from ..store import LLMCall, get_session_factory
+from ._guard import raise_if_bug
 from .pricing import _context_limit_for, _cost_of, _price_for
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ async def check_budget(
         out["warning"] = out["rate"] >= 0.8
         out["over"] = out["rate"] >= 1.0
     except Exception as e:
+        raise_if_bug(e, "预算检查")
         logger.debug("预算检查失败: %s", e)
     return out
 
@@ -217,5 +219,6 @@ async def aggregate(
         else:
             out["cache_hit_rate"] = 0.0
     except Exception as e:
+        raise_if_bug(e, "聚合用量")
         logger.debug("聚合用量失败: %s", e)
     return out

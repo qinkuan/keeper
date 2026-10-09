@@ -10,6 +10,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+# select 用于 _resolve_round_anchor 的「回溯到同会话上一条 user 消息」查询。
+# 本函数是从 timeline.py 搬过来的，那边有这行 import，这里漏了——而下面宽泛的
+# ``except Exception`` 会把 NameError 一起吞掉，表现为「用量查不到」而非报错，
+# 极难定位。搬函数时务必连同 import 一起搬。
+from sqlalchemy import select
+
+from ._guard import note_if_bug, raise_if_bug
+
 logger = logging.getLogger(__name__)
 
 def _ctx() -> Dict[str, Any]:
@@ -37,6 +45,7 @@ def _ctx() -> Dict[str, Any]:
             "llm_kind": current_llm_call_kind(),
         }
     except Exception as e:  # 归属失败不影响记账本身
+        note_if_bug(e, "读取归属上下文")
         logger.debug("读取可观测归属上下文失败: %s", e)
         return {}
 
@@ -74,5 +83,9 @@ async def _resolve_round_anchor(message_id: str) -> str:
             ).scalar_one_or_none()
             return prev or message_id
     except Exception as e:  # noqa: BLE001
+        # 解析失败会让「用量 / 时间线 / dump / 空转统计」四处同时返回空，且接口
+        # 看起来像「这轮没数据」——比报错难查得多。所以编程错误照抛，只有运行时
+        # 故障才降级成原样返回。
+        raise_if_bug(e, "解析轮次锚点")
         logger.debug("解析轮次锚点失败: %s", e)
         return message_id

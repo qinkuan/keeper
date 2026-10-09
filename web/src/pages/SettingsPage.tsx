@@ -294,11 +294,12 @@ export default function SettingsPage() {
         外部化（工具输出）
       </Divider>
       <Form.Item
-        label="外部化阈值（字符）"
+        label="滚动外部化阈值（字符）"
         name={["context", "externalize_min_chars"]}
         extra={
-          "唯一触发条件：这一步已退出「保留最近步数」窗口 且 超过这个长度，才换成引用。" +
-          "刚返回的结果永远完整可见——模型下一步要用它，换预览会漏文件、漏条目。0 = 不外部化"
+          "只管「滚动」这一条：这一步已退出「保留最近步数」窗口 且 超过这个长度，才换成引用。" +
+          "刚返回的结果永远完整可见——模型下一步要用它，换预览会漏文件、漏条目。" +
+          "单条超长另由下面的「内联上限」触发（与本项无关）；0 = 不做滚动外部化"
         }
       >
         <InputNumber min={0} max={100000} step={500} style={{ width: "100%" }} />
@@ -306,17 +307,25 @@ export default function SettingsPage() {
       <Form.Item
         label="豁免名单（永不外部化的工具）"
         name={["context", "never_externalize"]}
-        extra="默认空 = 所有工具一视同仁。想让某类产物始终留在上下文里就填它，逗号分隔，支持 task.* 前缀"
+        extra={
+          "默认空 = 所有工具一视同仁。支持 task.* 前缀，逗号分隔。" +
+          "两条路径都不豁免：这些工具超内联上限后会直接硬截断（只留头尾）且没有 block_id，" +
+          "所以只填「输出小且必须看全」的工具（如 fs.list_dir）"
+        }
       >
         <Input placeholder="留空 = 不豁免" />
       </Form.Item>
       <Divider orientation="left" plain style={{ margin: "4px 0" }}>
-        单条输出与步数（决定一轮能涨多大）
+        单条输出内联上限与步数（决定一轮能涨多大）
       </Divider>
       <Form.Item
-        label="单条工具输出截断（字符）"
+        label="单条输出内联上限（字符）"
         name={["context", "observation_limit"]}
-        extra="唯一的即时保护：任何一次工具返回都不会超过它。调小更省 token，但更容易看不全"
+        extra={
+          "超过它：原文落盘，上下文里换成「首尾预览 + block_id」，模型 read(block_id) 可追回全文。" +
+          "仅当外部化不可用时（治理总开关关掉 / 工具在豁免名单 / 写盘失败）才退回硬截断（只留头尾）。" +
+          "调小 = 更多结果变成引用（省上下文，但模型要多 read 一次）；调大 = 更少打断、更容易看全，也更涨"
+        }
       >
         <InputNumber min={200} max={200000} step={500} style={{ width: "100%" }} />
       </Form.Item>

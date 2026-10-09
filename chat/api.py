@@ -1635,7 +1635,7 @@ async def workspace_file_raw(
     前端拿不到能 ``<img>`` 显示的字节。判「用什么展示器」在前端（见
     ``web/src/components/viewers.ts``），这里只管安全地给出原始内容。
     """
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, Response
 
     agent = _agent(agent_id)
     ws = await resolve_workspace(agent, session_id)
@@ -1646,6 +1646,29 @@ async def workspace_file_raw(
     # 未知类型不让浏览器去"猜"，一律当附件，避免内联渲染出奇怪行为
     if not mime:
         dl = 1
+    # HTML 兜底：与产物预览（见 _artifact_response）保持同一套 CSP。
+    #
+    # 前端的 sandbox iframe 挡的是「嵌入渲染」这一种情况；但 viewers.ts 的
+    # opensInNewTab() 允许把 HTML 单独开成顶层页面，此时 sandbox 完全失效，
+    # 页面就以 keeper 自己的源运行——能读 localStorage、能直接调 keeper 的
+    # API（如改配置、读工作空间）。工作空间里的 HTML 多半是 agent 生成的，
+    # 与产物同属低可信内容，必须在这里（而不是只靠前端）挡住。
+    if mime == "text/html":
+        return Response(
+            target.read_bytes(),
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline' 'self' data:; "
+                    "img-src 'self' data: https: http:; "
+                    "font-src 'self' data:; "
+                    "connect-src 'none';"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     return FileResponse(
         str(target),
         media_type=mime or "application/octet-stream",

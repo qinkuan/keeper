@@ -686,9 +686,10 @@ class ToolCall(Base):
     「哪个工具最慢 / 最常失败 / **返回最大**」——返回大的工具往往就是把上下文
     撑爆的元凶（它的输出会原样进下一轮 prompt）。
 
-    ``output_size`` 记的是**截断后**真正进入上下文的长度（影响 token 的是它）；
-    ``raw_output_size`` 是工具原本返回的长度，两者不等即被 ``observation_limit``
-    砍过（``truncated=True``）——常被砍说明该工具的返回需要精简。
+    ``output_size`` 记的是**真正进入上下文**的长度（影响 token 的是它）；
+    ``raw_output_size`` 是工具原本返回的长度。两者不等即说明给模型的文本被缩减过
+    （``truncated=True``）——超内联上限（``observation_limit``）时会先外部化成
+    「预览 + block_id」，外部化不可用时才硬截断。常被缩减说明该工具返回需要精简。
     """
 
     __tablename__ = "tool_calls"

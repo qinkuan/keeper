@@ -32,11 +32,13 @@ mkdir -p "$D/keeper"
 #   __pycache__/ *.pyc *.pyo     Python 字节码
 #   evals/.runs/ evals/baselines 评估产物
 #   web/                         前端整个目录（dist 单独打包，src/node_modules 用不到）
+#   dist/                        本脚本与 web/deploy.sh 的产物目录（zip 会滚雪球）
 #   .venv/                       依赖（start_keeper.sh 到目标机上自己装）
 #   temp.json  test_*.py         无代码引用的临时文件 / 本地回归脚本
 rsync -a \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
   --exclude='data' --exclude='.workplace' --exclude='.venv' \
+  --exclude='dist' \
   --exclude='*.log' --exclude='*.pid' --exclude='*.bak' \
   --exclude='.DS_Store' --exclude='temp.json' --exclude='test_*.py' \
   --exclude='evals/.runs' --exclude='evals/baselines' \

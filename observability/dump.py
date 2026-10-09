@@ -31,7 +31,9 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
+
+from ._guard import note_if_bug, raise_if_bug, warn_bug_only
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,9 @@ def _cfg():
         from ..setting import fingerprint
 
         fp: Any = fingerprint()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 拿不到指纹只是退化成「每次都重读配置」，不影响正确性。
+        warn_bug_only(e, "读 settings 指纹")
         fp = None
     if (
         _cfg_cache is not None
@@ -83,6 +87,7 @@ def _cfg():
         _cfg_cache_at = now
         _cfg_fp = fp
     except Exception as e:  # noqa: BLE001
+        note_if_bug(e, "读取 prompt dump 配置")
         logger.debug("读取 prompt dump 配置失败: %s", e)
         _cfg_cache = None
     return _cfg_cache
@@ -123,16 +128,17 @@ def maybe_cleanup(base: Path, retain_days: int) -> None:
             try:
                 if f.stat().st_mtime < deadline:
                     f.unlink()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                warn_bug_only(e, f"清理过期 dump {f.name}")
         # 由深到浅删空目录
         for d in sorted(base.rglob("*"), key=lambda p: -len(p.parts)):
             try:
                 if d.is_dir() and not any(d.iterdir()):
                     d.rmdir()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                warn_bug_only(e, f"清理空目录 {d.name}")
     except Exception as e:  # noqa: BLE001
+        note_if_bug(e, "清理 prompt dump")
         logger.debug("清理 prompt dump 失败: %s", e)
 
 
@@ -254,6 +260,7 @@ def dump_llm_call(
         )
         maybe_cleanup(base, cfg.retain_days)
     except Exception as e:  # noqa: BLE001
+        note_if_bug(e, "prompt dump 落盘")
         logger.debug("prompt dump 失败: %s", e)
 
 
@@ -292,7 +299,9 @@ async def read_message_dump(message_id: str) -> Dict[str, Any]:
         for f in sorted(d.glob("*.json")):
             try:
                 items.append(json.loads(f.read_text(encoding="utf-8")))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # 单个文件读不了不该让整轮 dump 都返回空——跳过它即可。
+                warn_bug_only(e, f"读 dump 文件 {f.name}")
                 continue
         return {
             "enabled": True,
@@ -301,5 +310,6 @@ async def read_message_dump(message_id: str) -> Dict[str, Any]:
             "files": items,
         }
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "读取 prompt dump")
         logger.debug("读取 prompt dump 失败: %s", e)
         return {"enabled": True, "files": []}

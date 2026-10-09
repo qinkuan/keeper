@@ -149,6 +149,9 @@ class ContextIn(BaseModel):
         ge=200, le=20000,
     )
     # 单条输出与步数：决定「一轮最多能涨到多大」
+    # 键名沿用 observation_limit（不重命名，避免破坏已有 settings.yaml），
+    # 但语义是**内联上限**：超过它先外部化成「预览 + block_id」，外部化不可用
+    # 时才硬截断。设置页上的名字已改成「单条输出内联上限」。
     observation_limit: int = Field(
         default_factory=lambda: _default(ContextSection, "observation_limit"),
         ge=200, le=200000,

@@ -9,6 +9,10 @@
 2. **归属从 ``chat/context.py`` 的 ContextVar 读**（请求级隔离，并发安全），
    不用参数层层透传——调用链很深（process → llm），透参会污染一堆签名。
 3. **任何统计失败都不能影响主流程**，故所有写库一律包 try/except 只记 debug 日志。
+   但这条原则**不覆盖编程错误**（NameError / ImportError / AttributeError /
+   TypeError / SyntaxError）——那些不是运行时故障，兜底只会把「代码写错了」
+   伪装成「查不到数据」。查询路径照常抛出，写入路径至少记 ERROR。
+   判定与处置见 ``_guard.py``。
 
 原来是 1856 行的单体 ``keeper/observability.py``，按职责拆成下面几个模块。
 **对外接口全部从这里导出**，调用方继续 ``from ..observability import X`` 不变：
@@ -30,6 +34,7 @@
 """
 
 from ._context import _ctx, _resolve_round_anchor
+from ._guard import is_bug, note_if_bug, raise_if_bug, warn_bug_only
 from .budget import aggregate, budget_limits, check_budget
 from .dump import dump_llm_call, invalidate_cfg_cache, read_message_dump, maybe_cleanup
 from .pricing import _context_limit_for, _cost_of, _price_for
@@ -93,4 +98,9 @@ __all__ = [
     # 跨模块共享的内部工具（dump / stats 等模块直接引用，故一并导出）
     "_ctx",
     "_resolve_round_anchor",
+    # 兜底策略：查询路径编程错误照抛，写入路径只记 ERROR（见 _guard.py）
+    "raise_if_bug",
+    "note_if_bug",
+    "warn_bug_only",
+    "is_bug",
 ]

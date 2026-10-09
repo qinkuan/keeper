@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 
 from ..store import LLMCall, ToolCall, get_session_factory
 from ._context import _resolve_round_anchor
+from ._guard import note_if_bug, raise_if_bug
 from .budget import aggregate
 from .stats import duplicate_calls
 
@@ -88,6 +89,7 @@ async def step_metrics_for_message(message_id: Optional[str]) -> Dict[int, Any]:
                 ),
             }
     except Exception as e:
+        raise_if_bug(e, "按轮聚合 step 用量")
         logger.debug("按轮聚合 step 用量失败: %s", e)
     return out
 
@@ -309,7 +311,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
                     "tool_calls": int(t.get("tool_calls") or 0),
                     "output_size": out_size,
                     "raw_output_size": raw_size,
-                    # 原始返回 > 实际进上下文：被 observation_limit 砍过
+                    # 原始返回 > 实际进上下文：超内联上限，被换引用或截断了
                     "truncated": bool(raw_size and out_size and raw_size > out_size),
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     # 具体内容：input = 本步的思考（+ 工具入参），output = 工具返回
@@ -331,6 +333,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
             steps.append(_compact_step(compacts[ci]))
             ci += 1
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "构建消息时间线")
         logger.debug("构建消息时间线失败: %s", e)
 
     # 本轮的空转 / 追回抖动：排查「为什么这轮这么慢/这么贵」时，光看 token 曲线
@@ -338,6 +341,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
     try:
         duplicates = await duplicate_calls(message_id=anchor, limit=10)
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "统计本轮重复调用")
         logger.debug("统计本轮重复调用失败: %s", e)
         duplicates = None
 
@@ -369,6 +373,7 @@ async def set_message_duration(message_id: Optional[str], duration_ms: int) -> N
                 row.duration_ms = duration_ms
                 await db.commit()
     except Exception as e:
+        note_if_bug(e, "写入消息耗时")
         logger.debug("写入消息耗时失败: %s", e)
 
 

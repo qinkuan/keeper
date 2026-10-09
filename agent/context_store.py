@@ -302,12 +302,26 @@ def _preview(raw: str, head: int, tail: int) -> str:
     return out
 
 
+# 截断标记里附带的行动指引。
+#
+# 为什么必须写「怎么办」而不只是「省略了多少」：截断丢掉的那段**既没落盘也没有
+# id**，模型拿不回来。只告知缺失，它的选择往往只有原样重调同一个工具——内置
+# 工具（read_file / search_files）都没有 offset/limit 参数，于是拿到同一份被
+# 截断的内容，原地打转（30 步打转的经典形态）。写清「收窄范围重试」把它推向
+# 换参数/换工具，而不是换姿势重试。
+_TRUNCATE_HINT = "需要完整内容请缩小范围后重试：grep 收窄 pattern、只读目标片段，或换用能分批返回的工具"
+
+
 def clip_observation(raw: str, limit: int) -> str:
     """把单条工具输出截到 ``limit``：**保留开头和结尾**，砍中间。
 
     原来直接 ``raw[:limit]`` 是硬切——而报错信息、最终结论、最后一条命中常常在
     结尾，被砍掉后模型会拿着半截结果下结论（比如以为"没有匹配"，实际尾部有）。
-    现在按 70/30 分配头尾，中间明确标出省略了多少字符。
+    现在按 70/30 分配头尾，中间明确标出省略了多少字符，并给出下一步怎么办。
+
+    这是外部化之后的**兜底**：正常情况下超长结果走 ``externalize``（有
+    ``block_id``、可 ``read`` 回全文），只有外部化没触发（关掉 / 豁免名单 /
+    写盘失败）才会走到这里。
     """
     try:
         if limit <= 0 or len(raw) <= limit:
@@ -317,21 +331,34 @@ def clip_observation(raw: str, limit: int) -> str:
         omitted = len(raw) - head - tail
         out = raw[:head]
         if tail:
-            out += f"\n…（中间省略 {omitted} 字符，共 {len(raw)} 字符）…\n" + raw[-tail:]
+            out += (
+                f"\n…（中间省略 {omitted} 字符，共 {len(raw)} 字符。"
+                f"{_TRUNCATE_HINT}）…\n"
+            ) + raw[-tail:]
         else:
-            out += f"\n…（后文省略 {omitted} 字符）"
+            out += f"\n…（后文省略 {omitted} 字符，共 {len(raw)} 字符。{_TRUNCATE_HINT}）"
         return out
     except Exception:  # noqa: BLE001
         return raw[:limit] if limit > 0 else raw
 
 
-def externalize(tool: str, raw: str) -> str:
+def externalize(tool: str, raw: str, min_chars: Optional[int] = None) -> str:
     """把工具输出换成「引用 + 预览」；不触发时原样返回。
 
-    **只由滚动外部化调用**——即「这一步已退出保活窗口」且「超过阈值」时才压。
-    刚返回的结果永远完整可见：模型下一步要用它，换成预览就会漏内容
-    （漏文件、漏条目），比多花 token 严重得多。单条过大的保护交给
-    ``Process.observation_limit`` 的硬截断，不在这里做事后补救。
+    两条调用路径：
+
+    1. **单条超长**（``Process._fit_observation``）：结果超过
+       ``observation_limit`` 就先走这里——原文落盘、给 ``block_id``，模型能
+       ``read`` 展开全文。外部化不触发时才退回硬截断。这条路径用自己的阈值
+       （调用方传入 ``min_chars=observation_limit``），**不复用**
+       ``externalize_min_chars``：后者默认 5000 > observation_limit 3500，
+       若共用，落在两者之间的结果既没外部化也没 block_id，却仍被截断——
+       那正是「截断了但拿不回来」的死角。
+    2. **滚动外部化**（``Compactor.rolling_externalize``）：这一步已退出保活
+       窗口、且超过 ``externalize_min_chars`` 时才压。
+
+    第 1 条存在的理由：超长结果的中间段**既没落盘也没有 id**，模型永远拿不回来，
+    只看到「省略了多少字符」。所以宁可多一步也要先给 block_id。
 
     只影响**给模型看的**文本；落库/展示仍用原文（UI 不受影响）。
     """
@@ -339,7 +366,12 @@ def externalize(tool: str, raw: str) -> str:
     if cfg is None or not getattr(cfg, "enabled", True):
         return raw
     try:
-        min_chars = int(getattr(cfg, "externalize_min_chars", 0) or 0)
+        threshold = (
+            getattr(cfg, "externalize_min_chars", 0)
+            if min_chars is None
+            else min_chars
+        )
+        min_chars = int(threshold or 0)
         if min_chars <= 0 or len(raw) < min_chars:
             return raw
         if _never_externalize(tool):

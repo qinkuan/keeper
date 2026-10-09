@@ -8,8 +8,9 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$DIR/../.." && pwd)"
-OUT="$ROOT/dist"
+# 包输出到 keeper/dist/（与 keeper/deploy.sh 的服务端包同目录，方便一起取）
+KEEPER_DIR="$(cd "$DIR/.." && pwd)"
+OUT="$KEEPER_DIR/dist"
 BUILD=1
 [ "${1:-}" = "--no-build" ] && BUILD=0
 

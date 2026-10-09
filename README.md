@@ -145,9 +145,9 @@ python keeper/tests/test_planner_parse.py   # ReAct 文本协议解析
 ## 部署
 
 ```bash
-./deploy.sh        # 打服务端包 → ../dist/keeper-server-*.zip
-                   # 排除 data / web / 日志 / 测试
-cd web && ./deploy.sh   # 构建前端 → ../dist/keeper-web-*.zip
+./deploy.sh        # 打服务端包 → dist/keeper-server-*.zip
+                   # 排除 data / web / dist / 日志 / 测试
+cd web && ./deploy.sh   # 构建前端 → dist/keeper-web-*.zip
 ```
 
 服务端包解压后目录结构不变，`start_keeper.sh` 可直接用。

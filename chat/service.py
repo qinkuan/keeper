@@ -438,6 +438,12 @@ class ChatService:
         if self.agent is None:
             return {"answer": "（agent 实例未就绪，服务尚未启动完成）", "llm": False}
 
+        from ..observability import (
+            aggregate,
+            set_message_duration,
+            step_metrics_for_message,
+        )
+
         session_id = await self._ensure_session()
         set_session_id(session_id)
         set_agent(self.agent_id, getattr(self.agent, "name", None))
@@ -445,7 +451,15 @@ class ChatService:
 
         # 与 ask 同理：同一会话串行执行，避免续跑与新一轮（或另一次续跑）并发写坏
         # seq、或互相覆盖挂起状态。
+        #
+        # 耗时从「拿到会话锁之后」起算：续跑要重放断点前已落库的步骤，那部分不算
+        # 用户本轮真正等待的时间。
+        t0 = time.perf_counter()
         async with self._session_lock(session_id):
+            # 本轮的用量与步骤仍挂在**原来那条 user 消息**下（续跑不新增 user 消息，
+            # executor 沿用同一个 session_message_id），所以要从 step_id 反查出来。
+            # 少了这一步，下面的 usage / step_usage 会取不到本轮数据。
+            user_message_id = await self._user_message_id_of_step(step_id)
             result = await self.executor.resume_paused(
                 step_id,
                 should_stop=should_stop,
@@ -459,6 +473,11 @@ class ChatService:
             assistant_message_id = await self._append_message(
                 session_id, "assistant", result.answer or ""
             )
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            await set_message_duration(user_message_id, duration_ms)
+            # 逐步用量与本轮汇总一并带回：否则前端要为每个 step 各发一次请求
+            step_usage = await step_metrics_for_message(user_message_id)
+            usage = await aggregate(message_id=user_message_id)
         return {
             "session_id": session_id,
             "message_id": assistant_message_id,
@@ -759,6 +778,23 @@ class ChatService:
                 row.status = "done"
                 await db.commit()
             return row.session_message_id if row is not None else ""
+
+    async def _user_message_id_of_step(self, step_id: str) -> str:
+        """只读反查：某步骤挂在哪条消息下（返回空串表示查不到）。
+
+        与 ``_resolve_step`` 的区别是**没有副作用**——后者会把 suspended 置 done，
+        那是「用户回答追问」的语义；暂停续跑只是要拿到归属消息去查用量，不能改状态。
+        """
+        if not step_id:
+            return ""
+        try:
+            factory = get_session_factory()
+            async with factory() as db:
+                row = await db.get(ReactStep, step_id)
+                return row.session_message_id if row is not None else ""
+        except Exception as e:  # noqa: BLE001 取不到归属不该让续跑失败
+            logger.debug("反查步骤归属消息失败: %s", e)
+            return ""
 
     async def _abandon_suspended(self, session_id: str) -> None:
         """把该会话所有挂起的步骤标为 abandoned。

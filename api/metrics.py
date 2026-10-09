@@ -69,7 +69,8 @@ async def tool_metrics(
     """**工具维度**统计：哪个工具最慢 / 最常失败 / 返回最大（默认按总耗时降序）。
 
     ``avg_output_size`` 大的工具要重点看——它的返回会原样进下一轮 prompt，
-    是上下文膨胀的主要来源；``truncated`` 高的说明返回经常超限被砍，该精简了。
+    是上下文膨胀的主要来源；``truncated`` 高的说明返回经常超过内联上限，
+    给模型的文本被换成了引用或截断，该精简了。
     """
     return await tool_stats(
         session_id=session_id, task_id=task_id, agent_id=agent_id

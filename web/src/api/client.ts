@@ -889,7 +889,10 @@ export function workspaceFileRawUrl(
   path: string,
   dl = false
 ) {
-  return `/agents/${agentId}/sessions/${sessionId}/workspace/file/raw?path=${encodeURIComponent(
+  // 必须带 BASE：dev 模式下 vite 只把 /api 反代到 keeper，裸 /agents/... 会被
+  // vite 自己的 SPA 回退页接管并以 200 + text/html 返回——iframe 会套出一整个
+  // keeper 应用，看起来像「HTML 预览坏了」，且没有任何报错。
+  return `${BASE}/agents/${agentId}/sessions/${sessionId}/workspace/file/raw?path=${encodeURIComponent(
     path
   )}${dl ? "&dl=1" : ""}`;
 }

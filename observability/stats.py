@@ -21,6 +21,7 @@ from ..store import (
     get_session_factory,
 )
 from ._context import _resolve_round_anchor
+from ._guard import raise_if_bug, warn_bug_only
 from .pricing import _cost_of, _price_for
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ async def react_parse_stats(agent_id: Optional[str] = None, days: int = 7) -> Di
         if total_actions:
             out["dropped_ratio"] = round(out["dropped_total"] / total_actions, 4)
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "聚合解析统计")
         logger.debug("聚合解析统计失败: %s", e)
     return out
 
@@ -116,6 +118,7 @@ async def capability_stats(
         out["by_key"] = sorted(agg.values(), key=lambda x: -x["loads"])[:top]
         out["redundant_loads"] = sum(1 for n in per_round.values() if n > 1)
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "聚合能力加载统计")
         logger.debug("聚合能力加载统计失败: %s", e)
     return out
 
@@ -226,7 +229,9 @@ def _bucket_start(bucket: str, granularity: str) -> Optional[datetime]:
     fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m-%d %H:00"
     try:
         return datetime.strptime(bucket, fmt).replace(tzinfo=timezone.utc)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 桶字符串来自 DB，格式本就该对；解析不了只当这一桶没有数据。
+        warn_bug_only(e, "解析时间桶")
         return None
 
 
@@ -290,6 +295,7 @@ async def usage_timeseries(
                 )
             ).all()
     except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "按时间聚合用量")
         logger.debug("按时间聚合用量失败: %s", e)
         return {"granularity": granularity, "points": [], "cost_currency": None}
 
@@ -773,7 +779,8 @@ async def tool_stats(
     """按**工具名**聚合执行情况：定位最慢 / 最常失败 / 返回最大的工具。
 
     ``avg_output_size`` 大的工具要重点看——它的返回会原样进下一轮 prompt，
-    是上下文膨胀的主要来源；``truncated`` 计数高说明它的返回经常超限被砍。
+    是上下文膨胀的主要来源；``truncated`` 计数高说明它的返回经常超过内联上限，
+    给模型的文本被换成了引用（``block_id``）或截断，该精简输出了。
     """
     try:
         stmt = select(
