@@ -410,13 +410,95 @@ export interface StreamHandlers {
   onError?: (msg: string) => void;
   /** 前端主动断开（停止生成） */
   onAbort?: () => void;
+  /**
+   * 回放快照（仅重连用）：整页刷新后服务端把「已经发生过的」一次补齐。
+   * steps / text 直接覆盖本地状态即可，不需要拼接。
+   */
+  onCatchup?: (data: {
+    run_id: string;
+    steps: AgentStep[];
+    text: string;
+    truncated: boolean;
+    dropped_steps: number;
+    finished: boolean;
+    done?: any;
+    error?: string;
+  }) => void;
+  /**
+   * 服务端查不到这个 run（进程重启过 / 缓冲已回收 / 前端没带 run_id）。
+   * 不是错误，前端应退回轮询。
+   */
+  onGone?: (data: any) => void;
+  /**
+   * 会话 id 已确定（流一开始就来）。
+   *
+   * 刻意不在 done 帧才给：新会话的第一句要立刻持久化 session_id，否则用户在这一
+   * 轮没跑完时刷新，前端连「该去看哪个会话」都不知道。
+   */
+  onSession?: (data: { session_id: string }) => void;
+}
+
+/**
+ * 按 SSE 帧解析一个响应流并分派给回调。
+ *
+ * 会话流式（chat/stream）、任务流式（execute/stream、answer/stream）与**重连**
+ * （chat/stream/resume）共用同一套帧协议，所以收帧逻辑只写一处。
+ */
+async function consumeSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  handlers: StreamHandlers
+) {
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    let done: boolean;
+    let value: Uint8Array | undefined;
+    try {
+      ({ done, value } = await reader.read());
+    } catch {
+      // 前端 abort（点「停止生成」）：直接收尾，不算错误
+      handlers.onAbort?.();
+      return;
+    }
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    // SSE 以空行分帧
+    let idx: number;
+    while ((idx = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+
+      let event = "message";
+      const dataLines: string[] = [];
+      frame.split("\n").forEach((line) => {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      });
+      if (!dataLines.length) continue; // 心跳等无 data 的帧
+
+      try {
+        const data = JSON.parse(dataLines.join("\n"));
+        if (event === "step") handlers.onStep?.(data as AgentStep);
+        else if (event === "delta") handlers.onDelta?.(data?.text || "");
+        else if (event === "done") handlers.onDone?.(data);
+        // 重连专属两帧：catchup 补回已发生的，gone 表示服务端已无从回放
+        else if (event === "catchup") handlers.onCatchup?.(data);
+        else if (event === "gone") handlers.onGone?.(data);
+        else if (event === "session") handlers.onSession?.(data);
+        else if (event === "error")
+          handlers.onError?.(data?.message || "流式执行失败");
+      } catch {
+        /* 单帧解析失败不中断整条流 */
+      }
+    }
+  }
 }
 
 /**
  * 通用 SSE 读取：POST 一个 body，按帧解析并分派给回调。
  *
- * 会话流式（chat/stream）与任务流式（execute/stream、answer/stream）共用同一套
- * 帧协议，所以收帧逻辑只写一处。`signal` 用于前端立即断开（停止生成）。
+ * `signal` 用于前端立即断开（停止生成）。
  */
 export function apiStream(
   path: string,
@@ -435,49 +517,38 @@ export function apiStream(
       handlers.onError?.(`${r.status} ${r.statusText || "请求失败"}`);
       return;
     }
+    await consumeSSE(r.body.getReader(), handlers);
+  })();
+}
 
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      let done: boolean;
-      let value: Uint8Array | undefined;
-      try {
-        ({ done, value } = await reader.read());
-      } catch {
-        // 前端 abort（点「停止生成」）：直接收尾，不算错误
-        handlers.onAbort?.();
-        return;
-      }
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      // SSE 以空行分帧
-      let idx: number;
-      while ((idx = buf.indexOf("\n\n")) !== -1) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-
-        let event = "message";
-        const dataLines: string[] = [];
-        frame.split("\n").forEach((line) => {
-          if (line.startsWith("event:")) event = line.slice(6).trim();
-          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-        });
-        if (!dataLines.length) continue; // 心跳等无 data 的帧
-
-        try {
-          const data = JSON.parse(dataLines.join("\n"));
-          if (event === "step") handlers.onStep?.(data as AgentStep);
-          else if (event === "delta") handlers.onDelta?.(data?.text || "");
-          else if (event === "done") handlers.onDone?.(data);
-          else if (event === "error")
-            handlers.onError?.(data?.message || "流式执行失败");
-        } catch {
-          /* 单帧解析失败不中断整条流 */
-        }
-      }
+/**
+ * 重连一条**已断开的**流式运行（GET /agents/{id}/chat/stream/resume）。
+ *
+ * 与 apiChatStream 的本质区别：**不重新发起执行**——那会让 agent 跑第二遍。
+ * 这里只是订阅服务端 chat/hub.py 为这一轮留下的缓冲：先收到 catchup（刷新前
+ * 已经发生的步骤 + 累积正文），再接上还没发生的实时流。
+ *
+ * 收到 gone 表示服务端查不到这个 run（进程重启过 / 缓冲已回收），此时前端应
+ * 退回轮询——那是正确降级，不是错误。
+ */
+export function apiResumeChatStream(
+  agentId: string,
+  runId: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal
+) {
+  return (async () => {
+    const r = await fetch(
+      `${BASE}/agents/${agentId}/chat/stream/resume?run_id=${encodeURIComponent(
+        runId
+      )}`,
+      { signal, headers: { Accept: "text/event-stream" } }
+    );
+    if (!r.ok || !r.body) {
+      handlers.onError?.(`${r.status} ${r.statusText || "请求失败"}`);
+      return;
     }
+    await consumeSSE(r.body.getReader(), handlers);
   })();
 }
 
@@ -502,6 +573,8 @@ export function apiChatStream(
     onDelta: (text: string) => void;
     onDone: (resp: ChatResp) => void;
     onError: (msg: string) => void;
+    /** 会话 id 已确定（流的第一帧）：新会话要立刻持久化，别等到 done */
+    onSession?: (data: { session_id: string }) => void;
   }
 ) {
   return apiStream(
@@ -594,14 +667,24 @@ export function apiSessions(
     limit: String(limit),
   });
 }
+/**
+ * 取某会话的一段消息。
+ *
+ * `beforeSeq` 传入时只取 seq 小于它的那些——「加载更早的消息」用它往前翻页；
+ * 不传就是取最近 `limit` 条。响应的 has_more / oldest_seq 是继续翻页用的游标。
+ */
 export function apiSessionMessages(
   agentId: string,
   sessionId: string,
-  limit = 200
+  limit = 200,
+  beforeSeq?: number
 ) {
   return apiGet<SessionMessagesResp>(
     `/agents/${agentId}/sessions/${sessionId}/messages`,
-    { limit: String(limit) }
+    {
+      limit: String(limit),
+      before_seq: beforeSeq === undefined ? undefined : String(beforeSeq),
+    }
   );
 }
 export function apiSkills(agentId: string) {

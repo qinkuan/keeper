@@ -117,6 +117,21 @@ export interface ChatMessage {
   duration_ms?: number | null;
   /** 流式生成中（前端本地状态，后端不返回）：打字机效果期间隐藏部分操作 */
   streaming?: boolean;
+  /**
+   * 本轮正在跑的 run_id（来自服务端的运行注册表）。
+   *
+   * 只在**刷新后重建**的「进行中」气泡上有值：本地发起的流用不着它（run_id 就
+   * 在闭包里）。它的作用是让「停止生成」在刷新后依然可用——run_id 由前端生成，
+   * 刷新后内存全空，不带回来就不知道该往 apiAbortChat 传什么。
+   */
+  runId?: string | null;
+  /**
+   * 仅「进行中」气泡有：这是哪条 user 消息发起的（后端 `in_progress_for`）。
+   *
+   * 重连时要靠它把 user 消息放进流式桶——桶里那条会按 id 覆盖 msgs 里的同名
+   * 消息，拿不到正确 id 的话去重会失效，页面上会多出一条空的用户气泡。
+   */
+  inProgressFor?: string | null;
   /** 模型在等用户回答，该消息下要渲染追问框 */
   waiting?: boolean;
   /** 挂起的 step id，回答时回传 */
@@ -191,11 +206,36 @@ export interface CapabilityStats {
   top: number;
 }
 
+/** 单个模型的解析质量（by_model 的一项） */
+export interface ReactParseModelStat {
+  total: number;
+  /** 自编轨迹的次数（检出 + 降级） */
+  hallucination: number;
+  /** 点破无效、最终降级执行的次数 */
+  forced: number;
+  /** 幻觉率；「未知」（升级前存量）没有这个字段 */
+  rate?: number;
+  /**
+   * 吐了原生工具调用标记（DSML / invoke name=…）的次数。
+   *
+   * 与「幻觉」严格分开：幻觉是模型**自称做过**，这个是**格式跑偏**——本接口没注册
+   * 原生工具，那些标记根本不会被执行，命中即整轮报废（线上踩过：第 12/30 步直接
+   * 结束）。真要根治先查那个模型的 base_url / 端点，不是换 prompt 能解决的。
+   */
+  format_error?: number;
+  /** 格式错误率；「未知」没有这个字段 */
+  format_rate?: number;
+}
+
 /**
- * 解析结构统计：模型有多想并行、又丢了多少动作。
+ * 解析结构统计：模型有多想并行、又丢了多少动作、有没有在自编工具回执。
  *
- * 判读：`multi_rate` 明显 > 0 → 并行化有真实收益；
- * `dropped_total` 大 → 现在就在白丢信息（现状第二个 ACTION 被丢弃）。
+ * 判读：
+ * - `multi_rate` 明显 > 0 → 并行化有真实收益；
+ *   `dropped_total` 大 → 现在就在白丢信息（现状第二个 ACTION 被丢弃）。
+ * - `hallucination_rate` > 0 → 模型在伪造工具回执，整轮被作废过（白烧 token）。
+ *   看 `by_model` 定位到具体模型：小模型跑飞率明显更高，换模型可能直接根治。
+ * - `forced_rate` 高 → 点破对小模型无效，得在解析层直接兜住。
  */
 export interface ReactParseStats {
   window_days: number;
@@ -205,6 +245,25 @@ export interface ReactParseStats {
   dropped_total: number;
   dropped_ratio: number;
   by_kind: Record<string, number>;
+  /** 检出自编轨迹的总次数（含 forced） */
+  hallucination: number;
+  hallucination_rate: number;
+  /** 点破无效、最终降级执行的次数 */
+  forced: number;
+  forced_rate: number;
+  /**
+   * 格式错误（吐了原生工具调用标记 / DSML）的次数，含最终降级执行的。
+   *
+   * 命中一次就等于那一轮白跑（工具一步没执行），严重度高于幻觉：幻觉至少还能
+   * 靠点破自纠，格式错往往是端点配置问题，模型改不过来。
+   */
+  format_error: number;
+  format_error_rate: number;
+  /** 格式错误里点破无效、最终降级执行的次数 */
+  format_forced: number;
+  format_forced_rate: number;
+  /** 按模型拆分，幻觉率降序 */
+  by_model: Record<string, ReactParseModelStat>;
 }
 
 export interface ToolStat {
@@ -1028,6 +1087,25 @@ export interface SessionMessage {
   usage?: UsageSummary | null;
   /** 可观测：本轮端到端墙钟耗时（毫秒） */
   duration_ms?: number | null;
+  /**
+   * 该消息是后端合成的「本轮进行中」气泡（id 形如 `inprogress-<userMsgId>`）。
+   *
+   * 什么时候会有：客户端断开后后端不再杀 agent（见 chat/api._sse_pump），它会
+   * 继续跑完；但这一轮还没写 assistant 消息，所以 `load_messages` 拿已落库的
+   * steps 合成一条带此标记的虚拟消息，让整页刷新后仍能看到「已执行 N 步」。
+   * 跑完的那次刷新它会被真实消息取代。
+   */
+  streaming?: boolean;
+  /** 仅当 streaming 为 true：这是哪条 user 消息发起的（用于对齐） */
+  in_progress_for?: string;
+  /**
+   * 仅当 streaming 为 true：本轮正在跑的 run_id（来自服务端的运行注册表）。
+   *
+   * 「停止生成」靠 run_id，而 run_id 是**前端生成**的——整页刷新后前端内存全空，
+   * 不知道该往 `apiAbortChat` 传什么，就停不掉正在跑的任务。有它就能接上。
+   * 为空表示后端没有活跃运行（正常情况：这一轮刚结束，或进程重启过）。
+   */
+  in_progress_run_id?: string | null;
 }
 
 /** 会话里挂起等待用户回答的追问 */
@@ -1086,6 +1164,18 @@ export interface SessionMessagesResp {
   /** 非空表示该会话正等用户回答，前端据此恢复追问框 */
   pending?: PendingAsk | null;
   error?: string;
+  /**
+   * 本次返回的这一段**前面**还有没有更早的消息。
+   *
+   * 会话可能很长（一条消息一轮，对话上百轮就超过单次 limit），接口只给最近一段，
+   * 更早的历史要靠前端点「加载更早的消息」继续往前翻。
+   */
+  has_more?: boolean;
+  /**
+   * 本次返回里最小的 seq，拿它当下次请求的 `before_seq` 即可接着往更早翻。
+   * 消息为空时为 null。
+   */
+  oldest_seq?: number | null;
 }
 
 // ---- coding 模式：工作空间文件浏览器 / 编辑器 ----

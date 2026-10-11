@@ -762,14 +762,23 @@ class CapabilityLoad(Base):
 
 
 class ReactParseStat(Base):
-    """一次 LLM 响应的**结构**统计：ReAct 解析出了什么、有没有多余动作被丢。
+    """一次 LLM 响应的**结构**统计：ReAct 解析出了什么、有没有多余动作被丢、
+    以及模型有没有在「自己扮演引擎」。
 
-    只为回答一个问题：**模型到底想并行吗？** prompt 明确要求「每次响应只写一个
-    ACTION」，但模型经常连写两个（见 planner 里那段注释）。现状是第二个被解析器
-    丢弃——按 prompt 办没错，但这份「想并行」的需求白白浪费了。
+    回答两个问题：
 
-    没有这张表之前，只能靠感觉决定要不要做并行化；有了它就是数字：
-    ``multi_rate`` 高说明并行化有真实收益；``dropped_total`` 高说明已经在白丢。
+    1. **模型到底想并行吗？** prompt 明确要求「每次响应只写一个 ACTION」，
+       但模型经常连写两个（见 planner 里那段注释）。现状是第二个被解析器
+       丢弃——按 prompt 办没错，但这份「想并行」的需求白白浪费了。
+       没有这张表之前，只能靠感觉决定要不要做并行化；有了它就是数字：
+       ``multi_rate`` 高说明并行化有真实收益；``dropped_total`` 高说明已经在白丢。
+
+    2. **哪个模型爱自己编工具回执？** 模型偶尔会自己伪造一整轮 ReAct
+       （写了 ACTION 又自己写 OBSERVATION，然后一路写到 FINAL），把
+       「文件已写入 / 已发布」这种**根本没发生**的事当成事实。解析器会检出并
+       整轮作废（见 ``planner.detect_hallucination``），但「哪个模型跑飞得多」
+       才是能指导决策的数据——小模型（deepseek-flash）明显更高，换模型就可能
+       根治。所以这张表必须带 ``model``：聚合在一起会把结论抹平。
     """
 
     __tablename__ = "react_parse_stats"
@@ -780,12 +789,16 @@ class ReactParseStat(Base):
     session_id: Mapped[Optional[str]] = mapped_column(String(26), nullable=True, index=True)
     message_id: Mapped[Optional[str]] = mapped_column(String(26), nullable=True, index=True)
     task_id: Mapped[Optional[str]] = mapped_column(String(26), nullable=True, index=True)
-    # final / ask / act / think：这一步的解析结果
-    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="act")
+    # final / ask / act / think / hallucination（检出并重试）/ hallucination_forced
+    # （点破若干次仍跑飞，放弃并退化为执行第一个 ACTION）。
+    # SQLite 不强制 VARCHAR 长度，这里放宽只为新库建表时不误导。
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="act")
     # 响应里出现了几个 ACTION（不含 ACTION_INPUT）
     action_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # 其中被丢弃的个数（现状 = action_count - 1）
     dropped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # LLM 模型名。幻觉率**必须按模型看**——聚合在一起会掩盖「换模型能根治」。
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, index=True
     )

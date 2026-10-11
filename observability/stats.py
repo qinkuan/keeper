@@ -28,15 +28,29 @@ logger = logging.getLogger(__name__)
 
 
 async def react_parse_stats(agent_id: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
-    """「模型想并行」的量化：多 ACTION 出现率、动作被丢弃的总数。
+    """解析结构统计：模型有多想并行、丢了多少动作、**哪个模型爱自编回执**。
 
-    判读：``multi_rate`` 明显大于 0 → 并行化有真实收益；``dropped_total`` 很大
-    → 现在就在白丢信息；``dropped_ratio`` 高但 ``multi_rate`` 低 → 收益集中在
-    少数几步（批量查符号之类），针对性地加聚合工具更划算。
+    判读：
+
+    - ``multi_rate`` 明显大于 0 → 并行化有真实收益；``dropped_total`` 很大
+      → 现在就在白丢信息；``dropped_ratio`` 高但 ``multi_rate`` 低 → 收益集中在
+      少数几步（批量查符号之类），针对性地加聚合工具更划算。
+    - ``hallucination_rate`` > 0 → 模型在伪造工具回执，整轮被作废过（白烧 token）。
+      看 ``by_model`` 定位到具体模型：小模型跑飞率明显更高，**换模型可能直接根治**，
+      比继续调 prompt 省事。
+    - ``forced_rate`` 是「点破若干次仍跑飞、最终降级执行」占幻觉的比例。
+      它高说明点破对小模型无效，得换思路（比如直接在解析层兜住、不指望模型改）。
     """
     out: Dict[str, Any] = {
         "window_days": days, "total": 0, "multi": 0, "multi_rate": 0.0,
         "dropped_total": 0, "dropped_ratio": 0.0, "by_kind": {},
+        # 自编轨迹（模型在扮演引擎）
+        "hallucination": 0, "hallucination_rate": 0.0,
+        "forced": 0, "forced_rate": 0.0,
+        # 格式错误（吐了原生 tool-calling / DSML 这类本接口不接受的格式）
+        "format_error": 0, "format_error_rate": 0.0,
+        "format_forced": 0, "format_forced_rate": 0.0,
+        "by_model": {},
     }
     try:
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -47,6 +61,7 @@ async def react_parse_stats(agent_id: Optional[str] = None, days: int = 7) -> Di
                 q = q.where(ReactParseStat.agent_id == agent_id)
             rows = (await db.execute(q)).scalars().all()
         by_kind: Dict[str, int] = {}
+        by_model: Dict[str, Dict[str, Any]] = {}
         total_actions = 0
         for r in rows:
             out["total"] += 1
@@ -55,9 +70,64 @@ async def react_parse_stats(agent_id: Optional[str] = None, days: int = 7) -> Di
             if r.action_count > 1:
                 out["multi"] += 1
             out["dropped_total"] += r.dropped_count or 0
+
+            # 幻觉按模型归类。存量行 model 为 NULL（迁移无法回填），归到
+            # "未知" 且不参与幻觉率计算——把升级前的空白算成「没幻觉过」
+            # 会让幻觉率被系统性低估。
+            m = (r.model or "").strip() or "未知"
+            slot = by_model.setdefault(
+                m,
+                {
+                    "total": 0,
+                    "hallucination": 0,
+                    "forced": 0,
+                    "format_error": 0,
+                    "format_forced": 0,
+                },
+            )
+            slot["total"] += 1
+            if r.kind == "hallucination":
+                out["hallucination"] += 1
+                slot["hallucination"] += 1
+            elif r.kind == "hallucination_forced":
+                out["hallucination"] += 1
+                out["forced"] += 1
+                slot["hallucination"] += 1
+                slot["forced"] += 1
+            # 格式错误单独归类：它和「模型自称做过」是两回事，混在一起会让人
+            # 误以为「幻觉率高」，而真正该做的是查那个模型的 base_url / 端点。
+            elif r.kind == "format_error":
+                out["format_error"] += 1
+                slot["format_error"] += 1
+            elif r.kind == "format_error_forced":
+                out["format_error"] += 1
+                out["format_forced"] += 1
+                slot["format_error"] += 1
+                slot["format_forced"] += 1
+
         out["by_kind"] = by_kind
+        for m, slot in by_model.items():
+            # 未知（升级前的存量）样本没有可比性，不给幻觉率
+            if slot["total"] and m != "未知":
+                slot["rate"] = round(slot["hallucination"] / slot["total"], 4)
+                slot["format_rate"] = round(slot["format_error"] / slot["total"], 4)
+        # 按幻觉率降序，命中率高的排前面——这张表是用来挑模型的，不是用来存档的
+        out["by_model"] = dict(
+            sorted(
+                by_model.items(),
+                key=lambda kv: (-(kv[1].get("rate") or 0.0), -kv[1]["total"]),
+            )
+        )
         if out["total"]:
             out["multi_rate"] = round(out["multi"] / out["total"], 4)
+        if out["hallucination"]:
+            out["forced_rate"] = round(out["forced"] / out["hallucination"], 4)
+            out["hallucination_rate"] = round(out["hallucination"] / out["total"], 4)
+        if out["format_error"]:
+            out["format_forced_rate"] = round(
+                out["format_forced"] / out["format_error"], 4
+            )
+            out["format_error_rate"] = round(out["format_error"] / out["total"], 4)
         if total_actions:
             out["dropped_ratio"] = round(out["dropped_total"] / total_actions, 4)
     except Exception as e:  # noqa: BLE001

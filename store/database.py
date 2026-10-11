@@ -656,6 +656,27 @@ async def _migrate_tool_call_args_hash(conn) -> None:
         )
 
 
+async def _migrate_react_parse_stat_model(conn) -> None:
+    """react_parse_stats 补 model 列：幻觉率要按模型看（存量库升级）。
+
+    为什么必须按模型：模型偶尔会自己伪造工具回执（自己写 OBSERVATION /
+    连写多个 THOUGHT），解析器检出后整轮作废。但「哪个模型跑飞得多」才是
+    能指导决策的数据——小模型明显更高，换模型就可能根治。聚合在一起看
+    只会得到一个被平均掉、看不出差别的数字。
+
+    存量行一律留 NULL：升级前没有记录模型，无法回填。统计时按「未知」归类，
+    不参与幻觉率计算（见 observability.stats.react_parse_stats）。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(react_parse_stats)")).fetchall()
+    if not rows:
+        return  # 表还没建（create_all 会按 ORM 建全的）
+    existing = {r[1] for r in rows}
+    if "model" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE react_parse_stats ADD COLUMN model VARCHAR(64)"
+        )
+
+
 async def init_db(url: str | None = None) -> None:
     """建表（幂等）+ 补列迁移。顺带开 WAL，提升读写并发。"""
     engine = get_engine(url)
@@ -694,6 +715,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_model_price_time_range(conn)
         await _migrate_model_price_weekdays(conn)
         await _migrate_tool_call_args_hash(conn)
+        await _migrate_react_parse_stat_model(conn)
 
 
 async def dispose_engine() -> None:

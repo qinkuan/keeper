@@ -39,6 +39,85 @@ _TAIL_LABEL = (
     r"|ANSWER|ASK|提问|OPTIONS)\s*[:：]"
 )
 
+# 幻觉检测用的行首标签（见 detect_hallucination）。都用 (?m)^ 锚定行首，
+# 因为 ACTION_INPUT 里的正文是 JSON 字符串——换行是转义的 \n 两个字符，
+# 不构成真实行首，所以正文里恰好出现这些字样不会误判。
+_OBS_LABEL = r"(?m)^\s*OBSERVATION\s*[:：]"
+_THOUGHT_LABEL = r"(?m)^\s*THOUGHT\s*[:：]"
+
+# ── 原生 tool-calling（DSML）兼容 ────────────────────────────────────────
+#
+# 现象：模型不按文本协议走，直接吐原生工具调用标记::
+#
+#     <｜｜DSML｜｜ calls>
+#     <｜｜DSML｜｜ invoke name="bash__run">
+#     <｜｜DSML｜｜ parameter name="command" string="true">node x.js</｜｜DSML｜｜ parameter>
+#     </｜｜DSML｜｜ invoke>
+#     </｜｜DSML｜｜ calls>
+#
+# 危害：文本协议解析认不出来 → 落进兜底 → 整段当成**最终回答**结束这一轮。工具一步
+# 都没执行，用户看到的却是一段乱码（线上实测：第 12/30 步直接终止）。
+#
+# 为什么会出现：请求里我们**没传** tools（keeper 全程走文本协议，见下面两处 _DSML_）。
+# 通常是模型端 / 中转层自行决定用原生格式；也可能上一轮的历史里已经出现过这种文本，
+# 被模型当成"输出范例"模仿，形成自我强化——所以必须能解析，光在 prompt 里禁止不够。
+#
+# 分隔符故意写宽松（用 ``[^>]*`` 而不是写死 ｜）：不同版本标记里的分隔符不一样。
+_DSML_CALLS_BLOCK = r"<[^>]*calls[^>]*>.*?</[^>]*calls[^>]*>"
+_DSML_INVOKE = re.compile(r'invoke\s+name="([^"]+)"[^>]*>(.*?)</[^>]*invoke\s*>', re.S)
+_DSML_PARAM = re.compile(
+    r'parameter\s+name="([^"]+)"[^>]*>(.*?)</[^>]*parameter\s*>', re.S
+)
+
+
+def _args_span(text: str) -> tuple:
+    """ACTION_INPUT 正文在 text 里的 (start, end)；没有则 (len, len)。
+
+    检测标签时要**跳过这段**：正文是模型生成的任意内容（可能是一整个 HTML），
+    里面出现什么字都不该被当成标签。
+    """
+    m = re.search(r"(?ims)(?:^|\n)\s*ACTION_INPUT\s*[:：]", text)
+    if m is None:
+        return (len(text), len(text))
+    start = m.end()
+    nxt = re.search(_NEXT_LABEL, text[start:])
+    end = start + (nxt.start() if nxt else len(text) - start)
+    return (start, end)
+
+
+def detect_hallucination(text: str) -> str:
+    """检出「模型自己在扮演引擎」。正常返回空串，命中返回可读的原因。
+
+    两条判据都是**结构性**的，不是概率型启发式——所以敢据此整轮作废：
+
+    1. **输出里出现 OBSERVATION**。它是**引擎注入**的标签，进 ``role="tool"``
+       消息，从来不属于 assistant 消息。模型输出里出现它属于不可能事件，
+       **命中即幻觉，零误报**。
+
+    2. **一轮里写了多个 THOUGHT**。一轮只有一个 THOUGHT；写第二个就说明它在
+       替引擎编排后续轮次——实测它会一路写到 FINAL，把整条轨迹自己演完，
+       还顺手编出「文件已写入 / 已发布」这种假回执。
+
+    为什么**不看 ACTION 的个数**：连写多个 ACTION 是「想一次做两件事」，
+    属急躁而非伪造，执行第一个是对的（见 ``process._dropped_actions_note``）。
+
+    真实案例（deepseek-flash）：一步里输出 THOUGHT → ACTION(fs.write_file)
+    → **自编 OBSERVATION** → THOUGHT → ACTION(fs.publish) → **自编 OBSERVATION**
+    → FINAL。因为 FINAL 在 parse 里优先判定，两个 ACTION 一个都没执行，
+    而用户已经收到「已在右侧挂成产物卡片，点开就能跑」。
+    """
+    if not text:
+        return ""
+    s, e = _args_span(text)
+    # 只看正文之外的部分：正文里出现的标签一律不算
+    outside = text[:s] + "\n" + text[e:]
+    if re.search(_OBS_LABEL, outside):
+        return "你自己写了 OBSERVATION"
+    n_thought = len(re.findall(_THOUGHT_LABEL, outside))
+    if n_thought > 1:
+        return f"你一轮里写了 {n_thought} 个 THOUGHT（一轮只能有一个）"
+    return ""
+
 
 def _tool_parallel_mode() -> int:
     """工具并行档位：0=关闭（默认）/ 1=只读 / 2=只读 + 显式声明。
@@ -99,6 +178,13 @@ class Decision:
     # 会被丢弃；这个计数用来量化「模型想并行」的比例（P1-1 的收益依据）。
     # 只在 kind == "act" 时有意义，其余场景留 0。
     action_count: int = 0
+    # 非空 = 模型在「扮演引擎」，本轮整轮作废。值是幻觉原因，会原样念回给它。
+    # 见 detect_hallucination()：两条判据都是结构性的，不是概率型启发式。
+    hallucination: str = ""
+    # 非空 = 输出了本接口不接受的格式（当前只有原生 tool-calling）。与幻觉分开
+    # 记：成因不同（一个是自编轨迹、一个是格式跑偏），处置也不同——幻觉点破的是
+    # 「你以为你做过」，格式点破的是「这样写没用的」。同样走「点破 + 重试」。
+    format_error: str = ""
 
 
 def _clean_tool_name(raw: str) -> str:
@@ -361,7 +447,12 @@ class ReActPlanner:
             "错误：我想清楚了可以直接回答。FINAL: 建议你这样安排…\n"
             "正确：\n"
             "THOUGHT: 想清楚了，可以直接回答。\n"
-            "FINAL: 建议你这样安排…\n"
+            "FINAL: 建议你这样安排…\n\n"
+            "**绝对不要输出原生工具调用标记**（形如 <function_calls>、"
+            "<tool_call>、<｜tool▁call▁begin｜>、包含 `invoke name=` 的 XML/DSML 块"
+            "等一律不行）。本接口**没有向模型注册任何工具**，那些标记既不会被执行，"
+            "也不会被解析——只会让这一轮直接结束、工具一步没跑。要调工具就老老实实"
+            "写 ACTION / ACTION_INPUT 两行。\n"
         )
         # 历史记忆是「随每轮变化」的内容，必须放在 system 最末尾：
         # DeepSeek 前缀缓存要求前缀从头逐 token 一致，变化内容放中间会切断
@@ -403,7 +494,18 @@ class ReActPlanner:
         return out
 
     def parse(self, text: str, step: int) -> Decision:
-        # 0) 最先看 ASK：需要用户补充信息，本轮到此暂停（优先于 FINAL）
+        # -1) 最先判幻觉：模型在扮演引擎时，整段响应都不可信——包括里面的
+        # ACTION（它后面那串「已写入 / 已发布」全是自己编的）。
+        #
+        # 必须放在 ASK / FINAL **之前**：伪造的轨迹里往往还带着一个 FINAL，
+        # 而 FINAL 分支会直接 return，导致本轮被当成正常回答、工具一个都不执行。
+        # 真实案例：贪吃蛇那次，用户收到「已在右侧挂成产物卡片，点开就能跑」，
+        # 实际文件没写、产物没挂。
+        hallu = detect_hallucination(text or "")
+        if hallu:
+            return Decision(kind="hallucination", thought=self._thought(text), hallucination=hallu)
+
+        # 0) 再看 ASK：需要用户补充信息，本轮到此暂停（优先于 FINAL）
         m = re.search(r"(?ims)(?:^|\n)\s*(?:ASK|提问)\s*[:：]\s*(.+)", text)
         if m:
             ask = re.split(
@@ -479,8 +581,34 @@ class ReActPlanner:
                 action_count=max(1, action_count),
             )
 
+        # 2.5) 原生 tool-calling（DSML 等）：文本协议认不出。
+        #
+        # 为什么不「解析出来直接执行」而要整轮作废：那是**默认这套格式合法**了。
+        # 模型一旦发现吐 DSML 能推动流程，下一轮就继续吐；而且这段文本会作为
+        # assistant 消息进入历史，后面的轮次会拿它当范例模仿——实测线上第 12/30
+        # 步整轮报废。正确做法和幻觉一样：**点破它 + 令其重来**。
+        #
+        # 连续点破仍不改时，process 侧再降级执行它那个调用（参数其实是完整的），
+        # 见 ``native_as_act``。所以这一轮不会白白丢掉。
+        native = self._parse_native_calls(text)
+        if native is not None:
+            return Decision(
+                kind="format_error",
+                thought=self._thought(text),
+                format_error=(
+                    "你输出的是原生工具调用标记"
+                    "（invoke name=… 这种 XML/DSML 块），不是本接口要求的文本协议"
+                ),
+            )
+
         # 3) 都没出现：模型可能直接回答但未加标签，按最终回答处理
-        return Decision(kind="final", answer=text.strip(), thought=self._thought(text))
+        #
+        # 但**不能整段返回**：模型漏写 FINAL 时的典型输出是
+        # 「THOUGHT: <思考>\n\n<正文>」，原样返回会让用户直接看到
+        # 「THOUGHT: 用户只是打了个招呼…」这种正文（实测一句「你好」就能触发）。
+        # 交给 _split_bare_answer 划界，只把真正的正文留给用户。
+        answer, thought = self._split_bare_answer(text)
+        return Decision(kind="final", answer=answer, thought=thought)
 
     @staticmethod
     def extract_final(text: str) -> Optional[str]:
@@ -536,12 +664,93 @@ class ReActPlanner:
         return parts or None
 
     @staticmethod
+    def _parse_native_calls(text: str) -> Optional[Tuple[str, dict, int]]:
+        """解析原生 tool-calling（DSML）格式，返回 ``(工具名, 参数, 调用个数)``。
+
+        认不出来返回 None。只取**第一个** invoke——ReAct 一轮只执行一个动作（见
+        prompt 第 4 条），其余的仅计数后丢弃，与多个 ACTION 的处理保持一致。
+
+        参数值可能是 JSON（结构化参数），也可能就是裸文本（bash 命令）；解析不了
+        就按原文用，绝不因为猜不透格式而把整个调用丢掉。
+        """
+        invokes = _DSML_INVOKE.findall(text or "")
+        if not invokes:
+            return None
+        name, body = invokes[0]
+        args: dict = {}
+        for k, v in _DSML_PARAM.findall(body):
+            val = (v or "").strip()
+            if val[:1] in "{[":
+                try:
+                    args[k] = json.loads(val)
+                    continue
+                except Exception:  # noqa: BLE001 解析不了就按原文用
+                    pass
+            args[k] = val
+        return _clean_tool_name(name), args, len(invokes)
+
+    def native_as_act(self, text: str, thought: str = "") -> Optional[Decision]:
+        """把原生 tool-calling 响应转成可执行的 act 决策——**降级路径**用。
+
+        连续点破若干次仍不改格式时走这里：模型那个调用的**参数往往是完整的**
+        （``<parameter name=...>ls -la</parameter>`` 一目了然），直接丢掉太可惜，
+        于是最后还是让它跑，但用我们的方式执行。
+
+        解析不出来返回 None（理论上不会：刚被 ``_parse_native_calls`` 检出过）。
+        """
+        parsed = self._parse_native_calls(text)
+        if parsed is None:
+            return None
+        tool, args, n_calls = parsed
+        return Decision(
+            kind="act",
+            tool=tool,
+            args=args,
+            thought=thought,
+            action_count=max(1, n_calls),
+        )
+
+    @staticmethod
+    def _split_bare_answer(text: str) -> Tuple[str, str]:
+        """拆「没写 FINAL、只写了 THOUGHT + 正文」的输出 → ``(正文, 思考)``。
+
+        模型不按格式走时的典型输出（实测：一句「你好」就会触发）::
+
+            THOUGHT: 用户只是打了个招呼，没有具体任务。直接回应即可。
+
+            你好！我是这个 agent，可以帮你…
+
+        之前这里把**整段**当答案返回，于是用户直接看到「THOUGHT: …」开头的正文；
+        而 ``_thought`` 用 DOTALL 贪婪匹配到末尾，会把正文也当成思考，于是那段文字
+        在「Agent自主规划过程」里再出现一次。两边都错，根因是没给 THOUGHT 与正文
+        划界——这里以**空行**为界把它们分开（THOUGHT 段是思考，空行之后是正文）。
+
+        只有 THOUGHT、后面什么都没有时，返回它去掉标签前缀的内容：总比把
+        「THOUGHT:」这个标签暴露给用户强。
+        """
+        t = text or ""
+        # THOUGHT 段：行首标签 + 内容，一直到下一个空行（或文本结束）
+        m = re.search(
+            r"(?ms)^[ \t]*(?:THOUGHT|思考)[ \t]*[:：][ \t]*\n?(.+?)(?:\n[ \t]*\n|\Z)",
+            t,
+        )
+        if not m:
+            return t.strip(), ""
+        thought = m.group(1).strip()
+        body = re.split(_TAIL_LABEL, t[m.end():].lstrip())[0].strip()
+        return (body or thought), thought
+
+    @staticmethod
     def _thought(text: str) -> str:
         m = re.search(r"(?ims)THOUGHT\s*[:：]\s*(.+)", text, re.S)
         if not m:
             return ""
         # 模型伪造 OBSERVATION 时 THOUGHT 会跟着延伸到下一轮，同样要在标签处切断
-        return re.split(_TAIL_LABEL, m.group(1))[0].strip()
+        t = re.split(_TAIL_LABEL, m.group(1))[0]
+        # 模型改用原生 tool-calling 时，THOUGHT 之后的 DSML 块是**调用**不是思考，
+        # 不剥掉就会整块显示在「Agent自主规划过程」里。
+        t = re.sub(_DSML_CALLS_BLOCK, "", t, flags=re.S)
+        return t.strip()
 
     @staticmethod
     def _parse_args(raw: str) -> dict:

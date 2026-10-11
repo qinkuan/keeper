@@ -19,7 +19,7 @@ import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -32,6 +32,16 @@ from ..store import SessionMessage, get_session_factory
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, resolve_artifact_uri
 from .context import set_agent, set_task_id, set_task_item
+from .hub import (
+    ensure_run,
+    finish as hub_finish,
+    publish_delta,
+    publish_step,
+    snapshot as hub_snapshot,
+    subscribe as hub_subscribe,
+    unsubscribe as hub_unsubscribe,
+)
+from .runs import register_run, unregister_run
 from .service import ChatService, default_initiator_id, resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -167,6 +177,57 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _discard(q: asyncio.Queue) -> None:
+    """排空一个已无人消费的 SSE 队列，直到结束哨兵。"""
+    while True:
+        try:
+            if await q.get() is None:
+                return
+        except asyncio.CancelledError:
+            return
+
+
+async def _sse_pump(q: asyncio.Queue, task: "asyncio.Task") -> AsyncIterator[str]:
+    """把队列泵成 SSE 帧。
+
+    **客户端断开时不取消 task**，让它跑完并把结果落库。
+
+    为什么不能直接 ``task.cancel()``：用户切页面、关标签页、刷新、断网都会断开
+    SSE，而那些场景下 agent 应该继续跑完——本地客户端形态里「随手刷新」是常态。
+    取消会造成两个后果，而且都很难排查：
+
+    1. ``CancelledError`` 继承自 ``BaseException``，``runner`` 里的
+       ``except Exception`` 抓不住 → agent 被硬杀在当前那一步；
+    2. ``process`` 写 assistant 消息的动作在循环**之后**，于是永远执行不到 →
+       库里只剩一条「用户问了、但没有回答」的轮次，已落库的 steps 成了孤儿
+       （``load_messages`` 要求有 assistant 消息才给步骤分配位置）。
+
+    真正的「停止生成」走 ``apiAbortChat`` → ``_STOP_RUNS`` → ``should_stop``
+    的优雅停止路径，不经过这里，所以取消它不会影响用户主动叫停。
+    """
+    completed = False
+    try:
+        while True:
+            try:
+                # 15s 无事件就发心跳：防代理 / 浏览器按空闲掐断连接
+                item = await asyncio.wait_for(q.get(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if item is None:
+                completed = True
+                break
+            event, data = item
+            yield _sse(event, data)
+    finally:
+        if not completed and not task.done():
+            # 没人消费了，但任务还在跑：起个后台任务把队列排空。
+            # 不排的话 on_step/on_delta 会一直往无界队列里 put，长任务
+            # 能把内存吃满；排空后它们照常 put、立刻被丢弃，只浪费一次序列化。
+            asyncio.create_task(_discard(q))
+        # 正常跑完（completed）或任务已结束：什么都不用做
+
+
 def _sse_stream(factory, run_id: str = "") -> StreamingResponse:
     """把一次「带回调的执行」包成 SSE 响应（任务执行 / 补充输入等长耗时动作通用）。
 
@@ -223,26 +284,8 @@ def _sse_stream(factory, run_id: str = "") -> StreamingResponse:
 
     task = asyncio.create_task(runner())
 
-    async def gen():
-        try:
-            while True:
-                try:
-                    # 15s 无事件就发心跳：防代理 / 浏览器按空闲掐断连接
-                    item = await asyncio.wait_for(q.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                if item is None:
-                    break
-                event, data = item
-                yield _sse(event, data)
-        finally:
-            # 客户端断开：取消还在跑的任务，别让它空转
-            if not task.done():
-                task.cancel()
-
     return StreamingResponse(
-        gen(),
+        _sse_pump(q, task),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -264,27 +307,31 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
     - ``event: done``：跑完，带完整结果（answer / artifacts / waiting 等）；
       前端以它为准覆盖正文，避免流式拼接与服务端不一致；
     - ``event: error``：出错。
+
+    客户端断开**不会**取消这一轮（见 ``_sse_pump``）：切页面 / 刷新 / 关窗口都
+    让它跑完并落库，前端回来时能靠 ``load_messages`` 合成的「进行中」气泡接上，
+    也能靠 ``chat/runs.py`` 的登记继续「停止生成」。
     """
     _agent(agent_id)
     q: asyncio.Queue = asyncio.Queue()
 
     async def on_step(seq: int, step) -> None:
-        await q.put(
-            (
-                "step",
-                {
-                    "seq": seq,
-                    "thought": getattr(step, "thought", "") or "",
-                    "tool": getattr(step, "tool", None),
-                    "args": getattr(step, "args", None),
-                    "observation": getattr(step, "observation", None),
-                    "kind": getattr(step, "kind", None),
-                },
-            )
-        )
+        data = {
+            "seq": seq,
+            "thought": getattr(step, "thought", "") or "",
+            "tool": getattr(step, "tool", None),
+            "args": getattr(step, "args", None),
+            "observation": getattr(step, "observation", None),
+            "kind": getattr(step, "kind", None),
+        }
+        # 双写：本连接的队列照旧推给当前订阅者；hub 再留一份缓冲，
+        # 供「整页刷新后拿同一 run_id 重连」时回放（见 chat/hub.py）
+        publish_step(run_id, data)
+        await q.put(("step", data))
 
     async def on_delta(text: str) -> None:
         """最终回答的一小段（token 级流式）。"""
+        publish_delta(run_id, text)
         await q.put(("delta", {"text": text}))
 
     run_id = body.run_id or ""
@@ -292,15 +339,26 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
     # 唯一，不存在「上次遗留同 id」的情况；若在此 pre-discard，会误清掉 apiAbortChat
     # （add）先于本请求执行时写入的停止标记，导致「停止生成」失效。清理交给 finally。
 
+    svc = ChatService(agent_id=agent_id, session_id=body.session_id or None)
+    # 给这一轮留一份内存缓冲：整页刷新后靠它把「已经发生过的」回放出来（见 hub.py）
+    ensure_run(run_id, agent_id)
+
     async def should_stop() -> bool:
         """用户点了「停止生成」？流式每收到一块、每跑完一步都问一次。"""
         return bool(run_id and run_id in _STOP_RUNS)
 
     async def runner() -> None:
         try:
-            res = await ChatService(
-                agent_id=agent_id, session_id=body.session_id or None
-            ).ask(
+            # 会话 id 必须在**真正开跑之前**定下来：它是「这一轮在哪儿」的唯一 key——
+            # register_run 靠它建 session→run 映射，刷新后 load_messages 也靠它查活跃
+            # run。原本注册挂在第一个 step 上，于是「发完消息还在思考」就刷新（最
+            # 常见的刷新时机）时，影射还没建立，那一轮整个找不回来。
+            await svc.ensure_session_id()
+            register_run(svc.session_id, run_id)
+            # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进 localStorage，
+            # 否则用户刷新后连「该去看哪个会话」都不知道，历史也会整片消失。
+            await q.put(("session", {"session_id": svc.session_id}))
+            res = await svc.ask(
                 body.q,
                 step_id=body.step_id or None,
                 user_space_id=body.user_space_id or None,
@@ -308,37 +366,26 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
                 on_delta=on_delta,
                 should_stop=should_stop,
             )
+            # 先封存终态再推给当前连接：hub 里的 done 帧是「刷新后重连」时
+            # 直接拿结果的依据（那一轮已经跑完的情况）
+            hub_finish(run_id, "done", res)
             await q.put(("done", res))
         except Exception as e:  # 兜底：异常也要收尾，否则前端会一直挂着
             logger.exception("chat/stream 执行失败")
+            hub_finish(run_id, "error", {"message": str(e)})
             await q.put(("error", {"message": str(e)}))
         finally:
             if run_id:
                 _STOP_RUNS.discard(run_id)
+            # 注销放在最后，且用**注销时**的 svc.session_id 而不是进来时的
+            # body.session_id：新会话的 id 是 ask() 里补建的，只有 svc 知道
+            unregister_run(svc.session_id, run_id)
             await q.put(None)  # 结束哨兵
 
     task = asyncio.create_task(runner())
 
-    async def gen():
-        try:
-            while True:
-                try:
-                    # 15s 无事件就发心跳：防代理 / 浏览器按空闲掐断连接
-                    item = await asyncio.wait_for(q.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                if item is None:
-                    break
-                event, data = item
-                yield _sse(event, data)
-        finally:
-            # 客户端断开：取消还在跑的任务，别让它空转
-            if not task.done():
-                task.cancel()
-
     return StreamingResponse(
-        gen(),
+        _sse_pump(q, task),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -361,6 +408,75 @@ async def abort_chat(agent_id: str, body: ChatAbortIn) -> Dict[str, Any]:
     return {"ok": True, "run_id": body.run_id}
 
 
+@router.get("/{agent_id}/chat/stream/resume")
+async def resume_chat_stream(agent_id: str, run_id: str = "", session_id: str = ""):
+    """重连一条**已经断开的**流式运行：先回放已发生的，再接着推实时事件。
+
+    为什么需要它
+    ------------
+    整页刷新后那条 SSE 连接已经没了，而 SSE 是「一条 TCP 上的 HTTP 长连接」——
+    协议上不存在把旧连接接回去的办法（详见 ``chat/hub.py``）。但这一轮还在服务端
+    跑着、事件也留了缓冲，所以用**同一个 ``run_id``** 重新订阅即可：
+
+    1. 先发一帧 ``catchup``：刷新前已经发生的步骤 + 累积正文。页面立刻恢复到刷新
+       那一刻该有的样子——这正是老方案「合成 in_progress 气泡 + 3s 轮询」补不上的
+       那一环（它只能看到步骤，正文要等整轮跑完落库才一次性出现）；
+    2. 再接上还没发生的实时流，观感与正常发送完全一致。
+
+    帧协议与 ``chat/stream`` 相同（step / delta / done / error），只多两种：
+
+    - ``catchup``：回放快照（steps / text / finished / done / error）
+    - ``gone``：hub 里查不到这个 run（进程重启过 / 缓冲已回收 / 前端没带 run_id）
+      → 前端退回「合成 in_progress 气泡 + 轮询」的老路径。那是**正确降级**，
+        不是错误：进程都重启了，那一轮本来也已经结束。
+
+    ``session_id`` 目前只用于日志与将来扩展，订阅一律以 ``run_id`` 为准。
+    """
+    _agent(agent_id)
+
+    async def gen() -> AsyncIterator[str]:
+        snap = hub_snapshot(run_id)
+        if snap is None:
+            yield _sse("gone", {"run_id": run_id})
+            return
+        yield _sse("catchup", snap)
+        if snap["finished"]:
+            # 重连时这一轮已经跑完：catchup 里带着 done / error，前端据此收尾
+            return
+        q = hub_subscribe(run_id)
+        if q is None:
+            # 极窄的竞态：取快照之后、订阅之前刚好跑完。补一帧终态，
+            # 否则前端会挂着一个永远等不到 done 的气泡。
+            snap2 = hub_snapshot(run_id)
+            if snap2 is not None:
+                yield _sse("catchup", snap2)
+            return
+        try:
+            while True:
+                try:
+                    # 15s 无事件发心跳，与 _sse_pump 保持一致（防代理掐空闲连接）
+                    item = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if item is None:  # 结束哨兵：finish 或 hub 回收
+                    break
+                event, data = item
+                yield _sse(event, data)
+        finally:
+            hub_unsubscribe(run_id, q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.get("/{agent_id}/sessions")
 async def sessions(
     agent_id: str, initiator_id: Optional[int] = None, limit: int = 50
@@ -375,11 +491,18 @@ async def sessions(
 
 @router.get("/{agent_id}/sessions/{session_id}/messages")
 async def session_messages(
-    agent_id: str, session_id: str, limit: int = 200
+    agent_id: str,
+    session_id: str,
+    limit: int = 200,
+    before_seq: Optional[int] = None,
 ) -> Dict[str, Any]:
     """取某会话的历史消息（按 seq 升序）与挂起的追问。前端打开聊天框时恢复用。
 
     pending 非空表示该会话正等用户回答，前端应在 message_id 对应消息下渲染追问框。
+
+    ``before_seq``：只取 seq 小于它的那些，用于「加载更早的消息」往前翻页；不传
+    即取最近 limit 条（默认行为，向后兼容）。响应里的 has_more / oldest_seq 是
+    给前端继续翻页用的游标。
     """
     _agent(agent_id)
     svc = ChatService(agent_id=agent_id, session_id=session_id)
@@ -387,7 +510,7 @@ async def session_messages(
         await svc.verify_session()
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return await svc.load_messages(session_id, limit=limit)
+    return await svc.load_messages(session_id, limit=limit, before_seq=before_seq)
 
 
 @router.get("/{agent_id}/config")

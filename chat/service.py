@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, select, update
 
@@ -69,6 +69,7 @@ from .context import (
     set_session_id,
     set_workspace,
 )
+from .runs import active_run_id
 from ..store import (
     ChatSession,
     ReactStep,
@@ -694,6 +695,15 @@ class ChatService:
             str(self.session_id), peer, agent_id=self.agent_id
         ).ask(question)
 
+    async def ensure_session_id(self) -> str:
+        """确保会话已存在并返回 id（幂等，已存在则只是查一次）。
+
+        为什么要有这个公开入口：``_ensure_session`` 是私有的，而调用方有时必须在
+        **真正开始跑之前**就把会话定下来。会话 id 是「这一轮在哪儿」的唯一 key——
+        等到第一步跑完再建，在那之前刷新就再也找不回这一轮了（见 chat/api.py）。
+        """
+        return await self._ensure_session()
+
     async def _ensure_session(self) -> str:
         """有 session_id 则沿用；没有则新建 chat_session。
 
@@ -950,21 +960,42 @@ class ChatService:
             segs.append(cur)
         return segs
 
-    async def load_messages(self, session_id: str, limit: int = 200) -> Dict[str, Any]:
-        """取某会话最近 limit 条消息（按 seq 升序），并带回挂起的追问（若有）。
+    async def load_messages(
+        self,
+        session_id: str,
+        limit: int = 200,
+        before_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """取某会话的一段消息（按 seq 升序）与挂起的追问（若有）。
+
+        ``before_seq``：只取 seq **小于**它的那一段——前端「加载更早的消息」靠它往前
+        翻页。不传就是原来的行为（最近 limit 条）。用 seq 而不是偏移量做游标，是因为
+        seq 在会话内连续递增，翻页过程中新消息进来也不会让页码漂移。
+
+        响应额外带两个分页字段：
+        - ``oldest_seq``：本次返回里最小的 seq，前端拿它当下次的 ``before_seq``
+        - ``has_more``：它前面还有没有更早的消息（据此决定要不要显示加载按钮）
 
         先倒序取再反转，保证拿到的是"最近 N 条"而不是"最早 N 条"。
         pending 供前端刷新后恢复追问框：按约束，一个会话最多一个 suspended 步骤。
         """
         factory = get_session_factory()
         async with factory() as db:
-            rows = await db.execute(
-                select(SessionMessage)
-                .where(SessionMessage.chat_session_id == session_id)
-                .order_by(SessionMessage.seq.desc())
-                .limit(limit)
+            stmt = select(SessionMessage).where(
+                SessionMessage.chat_session_id == session_id
             )
-            items = list(rows.scalars())
+            if before_seq is not None:
+                stmt = stmt.where(SessionMessage.seq < before_seq)
+            # 多取一条来判断"前面还有没有"，这一条不进结果
+            rows = list(
+                (
+                    await db.execute(
+                        stmt.order_by(SessionMessage.seq.desc()).limit(limit + 1)
+                    )
+                ).scalars()
+            )
+            has_more = len(rows) > limit
+            items = rows[:limit] if has_more else rows
 
             pending_payload = None
             pr = await db.execute(
@@ -1043,6 +1074,9 @@ class ChatService:
         final_steps: Dict[str, list] = {}
         carry: list = []  # 待分配的段（已按 human_answer 边界切好）
         acc: list = []    # 已分配给前面 assistant 回复的步骤（累积）
+        # 触发最近一次重置的 user 消息：循环结束后 carry 里剩下的段就挂在它下面，
+        # 而它后面没有 assistant 消息 → 说明那一轮**还在跑**（见下方 in_progress）。
+        last_round_user: Optional[SessionMessage] = None
         for m in items:
             if m.role == "user":
                 raw = steps_by_msg.get(m.id) or []
@@ -1052,6 +1086,7 @@ class ChatService:
                     # 清空 carry，后续 assistant 就拿不到剩余段了。
                     carry = self._split_steps_by_round(raw)
                     acc = []  # 新一轮，累积清零
+                    last_round_user = m
                 final_steps[m.id] = []
             else:
                 if carry:
@@ -1083,26 +1118,91 @@ class ChatService:
         except Exception as e:  # 用量加载失败不应拖垮消息列表
             logger.debug("加载历史消息用量失败（已忽略）：%s", e)
 
+        # ── 「本轮进行中」的合成气泡 ──────────────────────────────────────
+        # 循环跑完后 carry 里还剩下的段，说明它等的那条 assistant 消息**还没写**——
+        # 也就是这一轮正在跑（agent 被杀 / 断网 / 进程重启都会留下这种状态）。
+        #
+        # 为什么必须合成一条消息而不是只回一个 in_progress 标志：前端要能直接
+        # 渲染，而 ChatBubble 的「已执行 N 步」进度、步骤列表、光标都是靠消息本身
+        # 的 streaming 字段驱动的。合成一条 id 带前缀的虚拟消息，前端零改动就能
+        # 显示；这一轮跑完后它会被真实消息取代（因为那时 carry 已被消费完）。
+        messages_out: List[Dict[str, Any]] = [
+            {
+                "id": m.id,
+                "seq": m.seq,
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "artifacts": self._public_artifacts(
+                    json.loads(m.artifacts) if m.artifacts else []
+                ),
+                "steps": final_steps.get(m.id, []),
+                # 可观测：本轮用量 + 端到端墙钟（usage 只含 LLM 耗时）
+                "usage": usage_out.get(m.id),
+                "duration_ms": m.duration_ms,
+            }
+            for m in items
+        ]
+        # ── 「本轮进行中」的合成气泡 ──────────────────────────────────────
+        # 循环跑完后 carry 里还剩下的段，说明它等的那条 assistant 消息**还没写**。
+        #
+        # 整段**独立 try**：它只是给前端多渲染一个进度气泡的增强，绝不该有能力
+        # 让整个 /messages 变成 500——那等于「界面少个进度条」升级成「历史全没了」。
+        # 任何意外都只丢这个气泡，不影响上面已经拼好的历史消息。
+        #
+        # 判据：这个会话有活跃 run，且最后一轮还没有 assistant 回复。
+        #
+        # 之前只认 ``carry`` 非空（至少一个 step 已落库），于是「刚发完消息、模型
+        # 还在思考第一步」时刷新——库里一条 step 都没有 → 不合成气泡、run_id 也没
+        # 登记（register_run 原本挂在第一个 step 上）→ 那一轮整段消失，刷新回来只剩
+        # 用户自己那句提问。而这恰恰是最常见的刷新时机：「正在思考」就是还没出 step。
+        running_id = active_run_id(session_id)
+        pending_user: Optional[SessionMessage] = None
+        steps_out: List[Any] = []
+        if running_id:
+            if carry and last_round_user is not None:
+                pending_user = last_round_user
+                # 段内元素就是**裸 AgentStep**，不是 (kind, step) 元组——
+                # _split_steps_by_round 里两处都是 cur.append(st)。按元组解包会在
+                # 「含追问的轮次正在跑」时抛 ValueError，直接把整个 /messages 打成
+                # 500，前端于是连历史都加载不出来（消息「消失」的真正元凶）。
+                steps_out = list(carry[0])
+            elif items and items[-1].role == "user":
+                # 一步都还没跑完：没有 steps 可显示，但这一轮确实已经在跑
+                pending_user = items[-1]
+        if pending_user is not None:
+            try:
+                messages_out.append(
+                    {
+                        "id": f"inprogress-{pending_user.id}",
+                        "seq": (items[-1].seq + 1) if items else 1,
+                        "role": "assistant",
+                        # 还在跑，正文一句都还没定稿——前端用 steps 显示进度就够了
+                        "content": "",
+                        "created_at": None,
+                        "artifacts": [],
+                        "steps": steps_out,
+                        "usage": None,
+                        "duration_ms": None,
+                        "streaming": True,
+                        "in_progress": True,
+                        # 让前端能对上号：这是哪条 user 消息发起的
+                        "in_progress_for": pending_user.id,
+                        # 本轮正在跑的 run_id：前端拿它发 /chat/stream/resume 把
+                        # 过程接回来（见 chat/hub.py），也是刷新后「停止生成」的依据
+                        "in_progress_run_id": running_id,
+                    }
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("合成「进行中」气泡失败（忽略，不影响历史消息）: %s", e)
         return {
             "session_id": session_id,
-            "messages": [
-                {
-                    "id": m.id,
-                    "seq": m.seq,
-                    "role": m.role,
-                    "content": m.content,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                    "artifacts": self._public_artifacts(
-                        json.loads(m.artifacts) if m.artifacts else []
-                    ),
-                    "steps": final_steps.get(m.id, []),
-                    # 可观测：本轮用量 + 端到端墙钟（usage 只含 LLM 耗时）
-                    "usage": usage_out.get(m.id),
-                    "duration_ms": m.duration_ms,
-                }
-                for m in items
-            ],
+            "messages": messages_out,
             "pending": pending_payload,
+            # 分页用：前端拿 oldest_seq 当下次的 before_seq；has_more 决定要不要
+            # 显示「加载更早的消息」。items 为空时 oldest_seq 为 None。
+            "has_more": has_more,
+            "oldest_seq": items[0].seq if items else None,
         }
 
     @staticmethod

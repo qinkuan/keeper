@@ -70,6 +70,7 @@ import {
   apiAbortChat,
   apiChat,
   apiChatStream,
+  apiResumeChatStream,
   newRunId,
   apiDeployInfo,
   apiListTasks,
@@ -99,10 +100,61 @@ const welcomeMsg: ChatMessage = {
   text: "你好，我是这个 agent。你可以问我任何关于它能力范围内的问题，我会处理后回答。",
 };
 
+/** 新会话在拿到真实 session_id 之前，流式气泡先落这个临时桶 */
+const PENDING_BUCKET = "__pending__";
+
+/**
+ * 消息列表**按会话索引**：桶 key -> 该会话的消息。
+ *
+ * 桶 key 与 `streamRuns` 完全一致（真实 sessionId，或新会话时的 PENDING_BUCKET），
+ * 两套状态因此永远指向同一个会话。
+ */
+type MsgsBySession = Record<string, ChatMessage[]>;
+
+/** 空桶的占位。必须是模块级常量：每次渲染现造一个数组，会把下游所有引用比较打乱。 */
+const EMPTY_WITH_WELCOME: ChatMessage[] = [welcomeMsg];
+
+/** 某会话的分页游标（见组件内 paging） */
+type PagingState = {
+  /** 这一段前面还有没有更早的消息 → 要不要显示「加载更早的消息」 */
+  hasMore: boolean;
+  /** 这一段里最小的 seq，拿它当下次请求的 before_seq */
+  oldestSeq: number | null;
+};
+
+/** 一个正在流式跑着的会话：用户消息 + 占位回复 + 中断句柄 */
+type StreamRun = {
+  user: ChatMessage;
+  assistant: ChatMessage;
+  runId: string;
+  abort: AbortController | null;
+};
+
 export default function ChatPage({ agentId }: { agentId: string }) {
-  const [msgs, setMsgs] = useState<ChatMessage[]>([welcomeMsg]);
+  /**
+   * 消息列表**按会话索引**。
+   *
+   * 为什么不能是单个数组：它其实只是「当前视图所在会话」的列表，却会被一堆**异步
+   * 回调**写——loadMessages、流式的 onDone/onError、切会话、resume 收尾……扁平数组
+   * 下这些回调无从知道该写到哪个会话，于是连着出过三类 bug：加载失败整屏清空、
+   * A 的回复写进 B、消息按 sessionId 落到 A 而 UI 显示 B。
+   *
+   * 按会话索引后，「往哪写」由调用点自己指定，串会话这类错误从**结构上**不可能发生，
+   * 之前打的那些归属校验补丁也就都不需要了。
+   */
+  const [msgsBySession, setMsgsBySession] = useState<MsgsBySession>({});
   const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
+  /**
+   * 正在流式跑着的会话，**按 sessionId 分桶**。
+   *
+   * 与 `msgsBySession` 用**同一套桶 key**：气泡在哪、消息在哪，必须始终是同一个会话，
+   * 否则就会出现「消息落 A、气泡显示 B」。
+   *
+   * 为什么不照抄 TaskPage 的单个 streamMsg：那边是「同一时刻只有一条」的场景。
+   * 这里不同会话可以并发（后端只对同一会话串行），用单个变量的话 A 跑完执行
+   * setStreamMsg(null) 会把 B 的气泡一起清掉。故按会话分桶。
+   */
+  const [streamRuns, setStreamRuns] = useState<Record<string, StreamRun>>({});
   /** 点某条消息用量里的「查看详情」：按需拉该轮时间线（对历史消息同样有效） */
   const [detailMessageId, setDetailMessageId] = useState<string | null>(null);
   /** 点「查看 dump」：看该轮完整 prompt（仅落盘开启时才显示入口） */
@@ -122,6 +174,66 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   const qc = useQueryClient();
   /** 可观测：当前会话的累计用量（消息列表里看单轮，这里看整会话总计） */
   const activeSessionId = chatSessionId || sessionId;
+  /** 视图正在看的那个桶。与 streamRuns 取同一个 key，两套状态因此不会分叉。 */
+  const curBucket = activeSessionId || PENDING_BUCKET;
+  /** 当前会话的消息列表；该会话还没加载过时显示欢迎语 */
+  const msgs = msgsBySession[curBucket] ?? EMPTY_WITH_WELCOME;
+  /**
+   * msgs 的最新值快照。
+   *
+   * 重连的 useEffect 要读「当前 msgs」来定位进行中气泡对应的 user 消息，但不能
+   * 把 msgs 放进依赖——否则每来一帧都会把刚建好的重连流拆了重建（表现为过程
+   * 反复从零开始）。
+   */
+  const msgsRef = useRef<ChatMessage[]>(msgs);
+  msgsRef.current = msgs;
+  /**
+   * 只更新指定桶，绝不碰别的会话。
+   *
+   * 所有写消息的地方都必须走它，且**自己指名道姓**地给出桶 key——这是这次重构的
+   * 全部意义：异步回调不再依赖「当前视图在哪」，而是自带归属。
+   */
+  const updateMsgs = useCallback(
+    (bucket: string, fn: (prev: ChatMessage[]) => ChatMessage[]) => {
+      setMsgsBySession((all) => ({ ...all, [bucket]: fn(all[bucket] ?? []) }));
+    },
+    []
+  );
+  /**
+   * 每个会话的分页游标：这一段前面还有没有更早的、以及最早的 seq。
+   *
+   * 会话可以很长（一条消息一轮，对话上百轮就超过接口单次的 limit=200），而接口只给
+   * 最近一段——没有游标的话，更早的历史在界面上就彻底不可达。curBucket 之外的值在切换
+   * 会话后依然保留，所以加载过的早消息不会因为切一次会话就白加载。
+   */
+  const [paging, setPaging] = useState<Record<string, PagingState>>({});
+  /** 「加载更早的消息」是否在途（防连点） */
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  /**
+   * 当前视图对应的流式运行。新会话还没有 id，先落在 PENDING_BUCKET 上；
+   * 拿到真实 session_id 后 `send` 会把桶搬过去，这里自动跟上。
+   *
+   * `sending` 由它派生而不是独立 state：这样「A 在跑」不会禁掉 B 的输入框，
+   * 而切回 A 时输入框又是禁用的——单一 boolean 做不到这个。
+   *
+   * 但它只覆盖**本地流**。整页刷新后那条「进行中」气泡是从 msgs 里重建的，
+   * 没有对应的桶——所以还要把 msgs 里 streaming 的那条也算进来，否则刷新回来
+   * 输入框不被禁用，用户能在上一轮没跑完时又发一条。
+   */
+  const activeRun = activeSessionId
+    ? streamRuns[activeSessionId]
+    : streamRuns[PENDING_BUCKET];
+  const recoveredRun = !activeRun ? msgs.find((m) => m.streaming) : undefined;
+  const sending = !!activeRun?.assistant.streaming || !!recoveredRun;
+  /**
+   * 需要**重连**的 run_id：来自刷新后重建的「进行中」气泡（后端注册表带回来的）。
+   *
+   * 本地发起的流不需要——run_id 就在 send() 的闭包里，流本身也还活着。所以这里
+   * 只在没有活跃桶时才取值：一个稳定的字符串，正好当 useEffect 的依赖。
+   */
+  const recoverRunId = !activeRun
+    ? msgs.find((m) => m.streaming && m.runId)?.runId || null
+    : null;
   const sessionUsageQ = useQuery({
     queryKey: ["session-usage", activeSessionId],
     queryFn: () => apiSessionMetrics(activeSessionId as string),
@@ -192,6 +304,65 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   const openUsageDetail = useCallback((mid: string) => setDetailMessageId(mid), []);
   const openUsageDump = useCallback((mid: string) => setDumpMessageId(mid), []);
 
+  /**
+   * 加载更早的消息。
+   *
+   * 接口单次只给最近一段（limit 条），会话长了更早的历史就取不到——这个按钮往前翻
+   * 一页，并把结果**前插**进该会话的桶（不是替换），所以已经加载过的都还在。
+   *
+   * 最容易做砸的是**视线**：内容插在顶部，浏览器会保持 scrollTop 不变，于是用户正
+   * 看的那条消息被顶到视口外去了——表现为一加载就"跳走"。所以要在插入后把 scrollTop
+   * 加上新增的那段高度，把原视口钉回原处。
+   */
+  const loadOlder = useCallback(async () => {
+    const bucket = curBucket;
+    const st = paging[bucket];
+    if (loadingOlder || !st?.hasMore || st.oldestSeq == null) return;
+    setLoadingOlder(true);
+    const el = listRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    try {
+      const resp = await apiSessionMessages(agentId, bucket, 200, st.oldestSeq);
+      const older = (resp.messages || []).filter((m) => m.id !== "welcome");
+      updateMsgs(bucket, (prev) => {
+        const hasWelcome = prev[0]?.id === "welcome";
+        const rest = hasWelcome ? prev.slice(1) : prev;
+        const seen = new Set(rest.map((m) => m.id));
+        // 去重是必须的：翻页边界可能与已加载的有重叠（这一轮新消息把 seq 顶掉了）
+        const add = older.filter((m) => !seen.has(m.id)).map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.content,
+          created_at: m.created_at ?? null,
+          artifacts: m.artifacts,
+          steps: m.steps ?? [],
+          usage: m.usage ?? null,
+          duration_ms: m.duration_ms ?? null,
+          llm: m.role === "assistant",
+        }));
+        return add.length ? [welcomeMsg, ...add, ...rest] : prev;
+      });
+      setPaging((prev) => ({
+        ...prev,
+        [bucket]: {
+          hasMore: resp.has_more ?? false,
+          oldestSeq: resp.oldest_seq ?? null,
+        },
+      }));
+      // 钉回原视口：顶部多出来多少像素，scrollTop 就补多少
+      requestAnimationFrame(() => {
+        const el2 = listRef.current;
+        if (el2) el2.scrollTop = prevTop + (el2.scrollHeight - prevHeight);
+      });
+    } catch {
+      // 翻页失败不该打断使用：游标不变，用户可以再点一次
+      message.warning("加载更早的消息失败，请稍后重试");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [agentId, curBucket, paging, loadingOlder, updateMsgs]);
+
   /** 拉取某会话的历史消息 */
   const loadMessages = useCallback(
     async (sid: string) => {
@@ -199,9 +370,11 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         const resp = await apiSessionMessages(agentId, sid);
         const list = resp.messages || [];
         const pending = resp.pending;
-        setMsgs(
-          list.length
-            ? [
+        updateMsgs(
+          sid,
+          () =>
+            list.length
+              ? [
                 welcomeMsg,
                 ...list.map((m) => {
                 const item: ChatMessage = {
@@ -218,6 +391,13 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                   // 会话里的 assistant 回复本就是 agent 生成的，按 role 补上，
                   // 否则 ChatBubble 的「AI 生成」标签不会显示。
                   llm: m.role === "assistant",
+                  // 后端合成的「本轮进行中」气泡：整页刷新后靠它还能看到
+                  // 「已执行 N 步」，而不是一片空白。
+                  streaming: m.streaming,
+                  // 后端带来的 run_id：刷新后「停止生成」靠它（见 chat/runs.py）
+                  runId: m.in_progress_run_id,
+                  // 这条气泡是哪条 user 消息发起的：重连时靠它把 user 消息放进桶
+                  inProgressFor: m.in_progress_for,
                 };
                   if (
                     pending &&
@@ -233,11 +413,27 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               ]
             : [welcomeMsg]
         );
+        // 记下分页游标：接口这次只给了最近一段，前面还有没有、要往哪翻都在这
+        setPaging((prev) => ({
+          ...prev,
+          [sid]: {
+            hasMore: resp.has_more ?? false,
+            oldestSeq: resp.oldest_seq ?? null,
+          },
+        }));
       } catch {
-        setMsgs([welcomeMsg]);
+        // 拉不到历史就**保留现有 msgs**，绝不整屏清空。
+        //
+        // 这里原本无条件 ``setMsgs([welcomeMsg])``：一次瞬时失败（后端刚重启 /
+        // 网络抖动 / 偶发 500）就把用户眼前所有历史抹成一句欢迎语，表现为
+        // 「会话记录全没了」——而真实数据好好躺在库里。切走再切回来时最容易撞上，
+        // 因为那一刻往往正好是服务在忙。
+        //
+        // 拿不到就是拿不到，宁可留着上一次渲染的内容，也不能拿空值覆盖它。
+        console.warn("[ChatPage] 加载历史消息失败，保留现有消息不覆盖");
       }
     },
-    [agentId]
+    [agentId, updateMsgs]
   );
 
   /** 拉取某会话生效的工作空间 */
@@ -252,6 +448,260 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     [agentId]
   );
 
+  /**
+   * 「本轮进行中」的轮询：整页刷新 / 重新进页面时用。
+   *
+   * 背景：客户端断开 SSE 后后端**不再杀 agent**（见 chat/api._sse_pump），它会
+   * 继续跑完并落库。但刷新时这一轮还没写 assistant 消息，前端只能靠
+   * ``load_messages`` 合成的「进行中」气泡显示已完成的步骤——那个快照是静态的，
+   * 不轮询就永远停在刷新那一瞬间。
+   *
+   * 只在**当前会话**有进行中气泡时轮询，一结束就停（3s 一次，够跟手也不打扰）。
+   * 不用 react-query：这是高频推送，走它反而要把缓存策略调得很别扭。
+   */
+  useEffect(() => {
+    const sid = activeSessionId;
+    if (!sid) return;
+    // 已经有活流在喂这个会话（本地流，或重连成功建起的桶）：再轮询就是白白每 3s
+    // 全量查库。这一句同时也是「重连成功后自动停掉轮询」的开关。
+    if (activeRun) return;
+    // 只有存在「进行中」的气泡才需要轮询
+    if (!msgs.some((m) => m.streaming)) return;
+    let stop = false;
+    const tick = async () => {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (stop) return;
+      try {
+        const resp = await apiSessionMessages(agentId, sid);
+        if (stop) return;
+        const next = resp.messages || [];
+        // 轮询只拿「最近这一段」，绝不能整段替换：用户点过「加载更早的消息」之后，
+        // 那些更早的历史已经进了这个桶，替换会把它们全冲掉（而且 next 永远只有
+        // 最近 200 条，冲掉之后再也回不来）。
+        //
+        // 所以这里只做两件事：同 id 的用新值覆盖（气泡正文 / steps 会变），真正新增的
+        // （这一轮刚写的消息）追加到末尾——最新的消息永远该在最后。
+        updateMsgs(sid, (prev) => {
+          const hasWelcome = prev[0]?.id === "welcome";
+          const rest = hasWelcome ? prev.slice(1) : prev;
+          const pos = new Map(rest.map((m, i) => [m.id, i]));
+          const added: ChatMessage[] = [];
+          for (const m of next) {
+            const item: ChatMessage = {
+              id: m.id,
+              role: m.role,
+              text: m.content,
+              created_at: m.created_at ?? null,
+              artifacts: m.artifacts,
+              steps: m.steps ?? [],
+              usage: m.usage ?? null,
+              duration_ms: m.duration_ms ?? null,
+              llm: m.role === "assistant",
+              streaming: m.streaming,
+              runId: m.in_progress_run_id,
+            };
+            const at = pos.get(m.id);
+            if (at === undefined) added.push(item);
+            else rest[at] = item;
+          }
+          return hasWelcome ? [welcomeMsg, ...rest, ...added] : [...rest, ...added];
+        });
+        // 还没结束就继续轮
+        if (next.some((m) => m.streaming)) tick();
+      } catch {
+        /* 网络抖动：下一轮自然重试 */
+      }
+    };
+    void tick();
+    return () => {
+      stop = true;
+    };
+    // 依赖 activeSessionId 与「是否有进行中气泡」；刻意不进 msgs——
+    // 每轮都会改 msgs，进依赖会导致轮询自己把自己重启成风暴。
+    // !!activeRun 是布尔，稳定：只用来在「重连成功」后把轮询关掉。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, activeSessionId, msgs.some((m) => m.streaming), !!activeRun]);
+
+  /**
+   * **重连**：整页刷新 / 断网后把正在跑的那一轮「接回来」。
+   *
+   * SSE 是「一条 TCP 上的 HTTP 长连接」，刷新后它被浏览器关掉，协议上不存在把旧
+   * 连接接回去的办法。但服务端 `chat/hub.py` 给这一轮留了内存缓冲——用同一
+   * run_id 订阅 `chat/stream/resume`：先收到 `catchup`（刷新前已发生的步骤和正文，
+   * 页面立刻恢复到该有的样子），再接上实时流，观感与没刷新过一致。
+   *
+   * 这正是老方案「合成气泡 + 轮询」补不上的一环：它只能看到步骤，正文要等整轮
+   * 跑完落库才一次性出现（中间那几分钟正文区是空的）。
+   *
+   * 收到 `gone`（服务端无从回放：进程重启过 / 缓冲已回收）就拆桶退回轮询——
+   * 那是正确降级，不是错误。
+   */
+  useEffect(() => {
+    const sid = activeSessionId;
+    if (!sid || !recoverRunId) return;
+    const runId = recoverRunId;
+    const bucketKey = sid;
+    let stopped = false;
+    let raf = 0;
+    const controller = new AbortController();
+
+    // 定位这一轮的 user 消息：桶里那条会按 id 覆盖 msgs 里的同名消息，
+    // id 拿错的话去重失效，页面上会多出一条空气泡。
+    const list = msgsRef.current;
+    const target = list.find((m) => m.streaming && m.runId === runId);
+    if (!target) return;
+    const userForRun =
+      list.find((m) => m.id === target.inProgressFor) ||
+      list.slice(0, list.indexOf(target)).reverse().find((m) => m.role === "user");
+
+    // 建桶：assistant 直接用恢复态气泡的 id，visibleMsgs 按 id 去重后不会重复
+    setStreamRuns((prev) => ({
+      ...prev,
+      [bucketKey]: {
+        user: userForRun || { id: `${runId}-user`, role: "user", text: "" },
+        assistant: { ...target },
+        runId,
+        abort: controller,
+      },
+    }));
+
+    /** 收尾：把权威结果写回该会话的消息列表（换成服务端 message_id）并删桶 */
+    const settle = (p: Partial<ChatMessage>) => {
+      if (stopped) return;
+      stopped = true;
+      updateMsgs(bucketKey, (prev) =>
+        prev.map((m) => (m.id === target.id ? { ...m, ...p, streaming: false } : m))
+      );
+      setStreamRuns((prev) => {
+        if (!prev[bucketKey]) return prev;
+        const next = { ...prev };
+        delete next[bucketKey];
+        return next;
+      });
+      qc.invalidateQueries({ queryKey: ["session-usage", sid] });
+    };
+
+    let acc = target.text || "";
+    const flushDelta = () => {
+      raf = 0;
+      setStreamRuns((prev) => {
+        const run = prev[bucketKey];
+        if (!run) return prev;
+        return {
+          ...prev,
+          [bucketKey]: { ...run, assistant: { ...run.assistant, text: acc } },
+        };
+      });
+    };
+
+    void apiResumeChatStream(
+      agentId,
+      runId,
+      {
+        onCatchup: (data) => {
+          // 回放：直接覆盖。服务端这份是权威，且比「刷新瞬间查库得到的快照」新
+          acc = data.text || "";
+          setStreamRuns((prev) => {
+            const run = prev[bucketKey];
+            if (!run) return prev;
+            return {
+              ...prev,
+              [bucketKey]: {
+                ...run,
+                assistant: {
+                  ...run.assistant,
+                  steps: data.steps ?? run.assistant.steps ?? [],
+                  text: data.text ?? "",
+                },
+              },
+            };
+          });
+          if (!data.finished) return;
+          // 重连时这一轮已经跑完了：catchup 自带终态
+          const d = data.done;
+          if (d) {
+            settle({
+              id: d.message_id || target.id,
+              text: d.canceled
+                ? d.answer || acc || "（已停止生成）"
+                : d.answer || "",
+              llm: d.llm,
+              steps: d.steps,
+              artifacts: d.artifacts,
+              waiting: d.waiting_human,
+              stepId: d.step_id,
+              usage: d.usage ?? null,
+              duration_ms: d.duration_ms ?? null,
+              options: d.options,
+              canceled: d.canceled,
+            });
+          } else {
+            settle({
+              text: data.error ? "执行失败。" : acc,
+              error: data.error || undefined,
+            });
+          }
+        },
+        onStep: (s) =>
+          setStreamRuns((prev) => {
+            const run = prev[bucketKey];
+            if (!run) return prev;
+            return {
+              ...prev,
+              [bucketKey]: {
+                ...run,
+                assistant: {
+                  ...run.assistant,
+                  steps: [...(run.assistant.steps ?? []), s],
+                },
+              },
+            };
+          }),
+        onDelta: (t) => {
+          acc += t;
+          if (!raf) raf = requestAnimationFrame(flushDelta);
+        },
+        onDone: (d) =>
+          settle({
+            id: d.message_id || target.id,
+            text: d.canceled ? d.answer || acc || "（已停止生成）" : d.answer || "",
+            llm: d.llm,
+            steps: d.steps,
+            artifacts: d.artifacts,
+            waiting: d.waiting_human,
+            stepId: d.step_id,
+            usage: d.usage ?? null,
+            duration_ms: d.duration_ms ?? null,
+            options: d.options,
+            canceled: d.canceled,
+          }),
+        onError: (msg) => settle({ text: "执行失败。", error: msg }),
+        onGone: () => {
+          // 服务端无从回放：拆桶退回轮询。**不要 settle**——那一轮还在跑，
+          // 只是我们看不到过程而已；标成终态会让用户以为它结束了。
+          stopped = true;
+          setStreamRuns((prev) => {
+            if (!prev[bucketKey]) return prev;
+            const next = { ...prev };
+            delete next[bucketKey];
+            return next;
+          });
+        },
+      },
+      controller.signal
+    );
+
+    return () => {
+      stopped = true;
+      if (raf) cancelAnimationFrame(raf);
+      try {
+        controller.abort();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [agentId, activeSessionId, recoverRunId, qc, updateMsgs]);
+
   useEffect(() => {
     const sid = localStorage.getItem(sessionKey(agentId));
     if (sid) {
@@ -260,11 +710,29 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     }
   }, [agentId, loadMessages, loadWorkspace]);
 
-  // 消息更新、发送中，或在会话 / 任务视图间切换回来时，都停在最新一条
+  /**
+   * 实际渲染的消息列表 = 已落库的 msgs + 当前会话正在流式的那两条。
+   *
+   * 去重是必要的：流式期间用户消息**同时**存在于 msgs 和桶里（前者是本地先插的、
+   * 后者保证被 loadMessages 抹掉后还能补回），按 id 去重后只留一份。
+   * 用桶里的版本覆盖同名消息，保证内容最新。
+   */
+  const visibleMsgs = activeRun
+    ? [
+        ...msgs.filter(
+          (m) => m.id !== activeRun.user.id && m.id !== activeRun.assistant.id
+        ),
+        activeRun.user,
+        activeRun.assistant,
+      ]
+    : msgs;
+
+  // 消息更新、发送中，或在会话 / 任务视图间切换回来时，都停在最新一条。
+  // 依赖 activeRun：流式期间步骤挂在它上面，只盯 msgs 的话不会跟着往下滚。
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [msgs, sending, mode]);
+  }, [msgs, sending, mode, activeRun]);
 
   // 切换会话时清空已打开的文件（该会话工作空间变了）
   useEffect(() => {
@@ -286,7 +754,17 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     setUserSpaceId("");
     setWorkspace(null);
     localStorage.removeItem(sessionKey(agentId));
-    setMsgs([welcomeMsg]);
+    // 清掉「还没拿到真实 session_id 时用的那个桶」：里面可能躺着上一段没绑定到
+    // 会话上的对话，新建后不该再冒出来。已落库的历史不受影响（各会话自己的桶照旧）。
+    //
+    // 必须是**删掉这个键**而不是置成空数组：``msgs ?? EMPTY_WITH_WELCOME`` 只在
+    // undefined 时兜底，空数组是有效值，会把欢迎语挡掉——新建会话就变成一片空白。
+    setMsgsBySession((all) => {
+      if (all[PENDING_BUCKET] === undefined) return all;
+      const next = { ...all };
+      delete next[PENDING_BUCKET];
+      return next;
+    });
   };
 
   /** 任务会话：只作为当前生效 session（任务详情 / 工作空间用），
@@ -342,12 +820,18 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     const q = (raw ?? input).trim();
     if (!q || sending) return;
 
-    setMsgs((prev) => [
-      ...prev,
-      { id: newId(), role: "user", text: q, created_at: new Date().toISOString() },
-    ]);
+    /**
+     * 这一轮要发到**哪个会话**：视图当前所在的会话。
+     *
+     * 这里原先用的是 ``sessionId``，而气泡所在的位置用的是 ``activeSessionId``
+     * （= chatSessionId || sessionId）。两者在「会话视图和任务视图各自选过不同会话」
+     * 时会分叉——``applyTaskSession`` 只改 sessionId、不动 chatSessionId——于是消息
+     * 按 sessionId 落到 A、UI 却按 activeSessionId 显示 B，同一条消息连同它的回答
+     * 就同时出现在两个会话里。发消息的目标和气泡的归属必须是同一个。
+     */
+    const targetSid = activeSessionId;
+
     setInput("");
-    setSending(true);
 
     // 本次运行的标识 + 可中断的 fetch：点「停止」时前端立即断流、后端尽快收尾
     const runId = newRunId();
@@ -355,31 +839,72 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     runIdRef.current = runId;
     abortRef.current = controller;
 
-    // 先放一条占位回复：流式过程中逐步填充步骤，跑完再补最终内容
+    // 用户消息也放进桶里：它同样会被 loadMessages 抹掉，而用户发完消息切走再回来
+    // 「我刚发的那句话没了」是同一个 bug 的另一半。
+    const userMsg: ChatMessage = {
+      id: newId(),
+      role: "user",
+      text: q,
+      created_at: new Date().toISOString(),
+    };
     const placeholderId = newId();
     placeholderRef.current = placeholderId;
-    const patchPlaceholder = (patch: Partial<ChatMessage>) =>
-      setMsgs((prev) =>
-        prev.map((m) => (m.id === placeholderId ? { ...m, ...patch } : m))
-      );
-    setMsgs((prev) => [
-      ...prev,
-      {
-        id: placeholderId,
-        role: "assistant",
-        text: "",
-        steps: [],
-        created_at: new Date().toISOString(),
-        streaming: true,
-      },
-    ]);
+    const assistantMsg: ChatMessage = {
+      id: placeholderId,
+      role: "assistant",
+      text: "",
+      steps: [],
+      created_at: new Date().toISOString(),
+      streaming: true,
+    };
 
+    // 桶 key：用**视图当前显示的**会话（activeSessionId），这样切会话后气泡跟着
+    // 视图走；与 stopSend / visibleMsgs 取的是同一个 key，三处不会分叉。
+    // 新会话还没有 id，先落 PENDING_BUCKET，等流里第一帧带真实 session_id 回来再搬。
+    let bucket = activeSessionId || PENDING_BUCKET;
+    setStreamRuns((prev) => ({
+      ...prev,
+      [bucket]: { user: userMsg, assistant: assistantMsg, runId, abort: controller },
+    }));
+    updateMsgs(bucket, (prev) => [...prev, userMsg]);
+
+    const patch = (p: Partial<ChatMessage>) =>
+      setStreamRuns((prev) => {
+        const run = prev[bucket];
+        if (!run) return prev;
+        return { ...prev, [bucket]: { ...run, assistant: { ...run.assistant, ...p } } };
+      });
+    /**
+     * 把桶从 PENDING_BUCKET 搬到真实 session_id 上。
+     *
+     * **消息列表和流式气泡必须一起搬**：新会话在拿到 id 之前，用户的提问先落在
+     * PENDING_BUCKET 上。只搬气泡的话，视图切到真实会话后，那条提问就成了孤儿
+     * （躺在没人看的桶里）——用户会看到「我刚发的那句话不见了」。
+     */
+    const rekey = (realSid: string) => {
+      if (!realSid || realSid === bucket) return;
+      const from = bucket;
+      bucket = realSid;
+      setMsgsBySession((all) => {
+        if (all[from] === undefined) return all;
+        const next = { ...all, [realSid]: all[from] };
+        delete next[from];
+        return next;
+      });
+      setStreamRuns((prev) => {
+        const run = prev[from];
+        if (!run) return prev;
+        const next = { ...prev, [realSid]: run };
+        delete next[from];
+        return next;
+      });
+    };
     // 逐字累积 + 按帧刷新：token 很密，一帧一次 setState 就够跟手了
     let acc = "";
     let raf = 0;
     const flushDelta = () => {
       raf = 0;
-      patchPlaceholder({ text: acc });
+      patch({ text: acc });
     };
 
     try {
@@ -387,56 +912,85 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         agentId,
         q,
         {
-          sessionId,
+          sessionId: targetSid,
           stepId,
           // 仅新建会话时传待选用户空间；已有会话忽略（沿用库里绑定）
-          userSpaceId: sessionId ? undefined : userSpaceId,
+          userSpaceId: targetSid ? undefined : userSpaceId,
           runId,
           signal: controller.signal,
         },
         {
+          // 会话 id 一确定就立刻持久化。新会话第一句尤其关键：用户在这一轮还没
+          // 跑完就刷新时，前端靠 localStorage 里的 id 才能回到同一个会话，进而
+          // 把这一轮接回来（否则连「去看哪个会话」都不知道，历史整片消失）。
+          onSession: (d) => {
+            const sid = d?.session_id;
+            if (!sid) return;
+            rekey(sid);
+            setSessionId(sid);
+            localStorage.setItem(sessionKey(agentId), sid);
+            loadWorkspace(sid);
+          },
           // 每完成一步：追加到占位消息的思考过程里
           onStep: (s) =>
-            setMsgs((prev) =>
-              prev.map((m) =>
-                m.id === placeholderId ? { ...m, steps: [...(m.steps ?? []), s] } : m
-              )
-            ),
+            setStreamRuns((prev) => {
+              const run = prev[bucket];
+              if (!run) return prev;
+              return {
+                ...prev,
+                [bucket]: {
+                  ...run,
+                  assistant: {
+                    ...run.assistant,
+                    steps: [...(run.assistant.steps ?? []), s],
+                  },
+                },
+              };
+            }),
           // 逐字输出：累积到下一帧再统一刷新，避免每个 token 都整页重渲染
           onDelta: (t) => {
             acc += t;
             if (!raf) raf = requestAnimationFrame(flushDelta);
           },
           onDone: (resp) => {
-            if (resp.session_id && resp.session_id !== sessionId) {
+            if (resp.session_id && resp.session_id !== targetSid) {
+              rekey(resp.session_id);
               setSessionId(resp.session_id);
               localStorage.setItem(sessionKey(agentId), resp.session_id);
               loadWorkspace(resp.session_id); // 会话已建，拉取生效工作空间
             }
-            patchPlaceholder({
-              id: resp.message_id || placeholderId,
-              // 被用户叫停时：保留已生成的那部分（后端答案可能为空，用前端累积的补上）
-              text: resp.canceled
-                ? resp.answer || acc || "（已停止生成）"
-                : resp.answer || "没有拿到回答，请换个问法或稍后重试。",
-              llm: resp.llm,
-              steps: resp.steps,
-              artifacts: resp.artifacts,
-              waiting: resp.waiting_human,
-              stepId: resp.step_id,
-              usage: resp.usage ?? null,
-              duration_ms: resp.duration_ms ?? null,
-              options: resp.options,
-              canceled: resp.canceled,
-              streaming: false,
-            });
+            // 收尾：把权威内容写进**这一轮所属会话**的消息列表（用服务端的 message_id），
+            // 随后 finally 删桶。这里写的是 bucket 而不是「当前视图」，所以用户中途
+            // 切去别的会话也只会写进正确的那个桶——串会话在结构上就不可能发生了。
+            updateMsgs(bucket, (prev) => [
+              ...prev.filter((m) => m.id !== placeholderId),
+              {
+                ...assistantMsg,
+                id: resp.message_id || placeholderId,
+                // 被用户叫停时：保留已生成的那部分（后端答案可能为空，用前端累积的补上）
+                text: resp.canceled
+                  ? resp.answer || acc || "（已停止生成）"
+                  : resp.answer || "没有拿到回答，请换个问法或稍后重试。",
+                llm: resp.llm,
+                steps: resp.steps,
+                artifacts: resp.artifacts,
+                waiting: resp.waiting_human,
+                stepId: resp.step_id,
+                usage: resp.usage ?? null,
+                duration_ms: resp.duration_ms ?? null,
+                options: resp.options,
+                canceled: resp.canceled,
+                streaming: false,
+              },
+            ]);
           },
-          onError: (msg) =>
-            patchPlaceholder({
-              text: "执行失败。",
-              error: msg,
-              streaming: false,
-            }),
+          onError: (msg) => {
+            patch({ text: "执行失败。", error: msg, streaming: false });
+            updateMsgs(bucket, (prev) => [
+              ...prev.filter((m) => m.id !== placeholderId),
+              { ...assistantMsg, text: "执行失败。", error: msg, streaming: false },
+            ]);
+          },
         }
       );
     } catch (e: any) {
@@ -446,41 +1000,65 @@ export default function ChatPage({ agentId }: { agentId: string }) {
           (await apiChat(
             agentId,
             q,
-            sessionId,
+            targetSid,
             stepId,
-            sessionId ? undefined : userSpaceId
+            targetSid ? undefined : userSpaceId
           )) || { answer: "", llm: false };
-        if (resp.session_id && resp.session_id !== sessionId) {
+        if (resp.session_id && resp.session_id !== targetSid) {
+          rekey(resp.session_id);
           setSessionId(resp.session_id);
           localStorage.setItem(sessionKey(agentId), resp.session_id);
           loadWorkspace(resp.session_id);
         }
-        patchPlaceholder({
-          id: resp.message_id || placeholderId,
-          text: resp.answer || "没有拿到回答，请换个问法或稍后重试。",
-          llm: resp.llm,
-          steps: resp.steps,
-          artifacts: resp.artifacts,
-          waiting: resp.waiting_human,
-          stepId: resp.step_id,
-          usage: resp.usage ?? null,
-          duration_ms: resp.duration_ms ?? null,
-          options: resp.options,
-          streaming: false,
-        });
+        updateMsgs(bucket, (prev) => [
+            ...prev.filter((m) => m.id !== placeholderId),
+            {
+              ...assistantMsg,
+              id: resp.message_id || placeholderId,
+              text: resp.answer || "没有拿到回答，请换个问法或稍后重试。",
+              llm: resp.llm,
+              steps: resp.steps,
+              artifacts: resp.artifacts,
+              waiting: resp.waiting_human,
+              stepId: resp.step_id,
+              usage: resp.usage ?? null,
+              duration_ms: resp.duration_ms ?? null,
+              options: resp.options,
+              streaming: false,
+            },
+          ]);
       } catch (e2: any) {
-        patchPlaceholder({
-          text: "查询失败，请确认 keeper 服务已启动。",
-          error: e2?.message || String(e2),
-          streaming: false,
-        });
+        const errText = "查询失败，请确认 keeper 服务已启动。";
+        patch({ text: errText, error: e2?.message || String(e2), streaming: false });
+        updateMsgs(bucket, (prev) => [
+          ...prev.filter((m) => m.id !== placeholderId),
+          {
+            ...assistantMsg,
+            text: errText,
+            error: e2?.message || String(e2),
+            streaming: false,
+          },
+        ]);
       }
     } finally {
       if (raf) cancelAnimationFrame(raf);
       abortRef.current = null;
       runIdRef.current = "";
       placeholderRef.current = "";
-      setSending(false);
+      // 删桶：终态消息已由 onDone / catch 写进 msgs，这里只收掉流式副本。
+      // 若这轮被 loadMessages 抹掉了用户消息（切走过），补回——否则用户会看到
+      // 自己刚发的那句话凭空消失。
+      setStreamRuns((prev) => {
+        if (!prev[bucket]) return prev;
+        const next = { ...prev };
+        delete next[bucket];
+        return next;
+      });
+      // 补回用户消息：这一轮被 loadMessages 刷掉过（切走过）就得重新放回去，否则用户会
+      // 看到自己刚发的那句话凭空消失。写的是 bucket，不会跑到别的会话去。
+      updateMsgs(bucket, (prev) =>
+        prev.some((m) => m.id === userMsg.id) ? prev : [...prev, userMsg]
+      );
       // 本轮产生了新用量：刷新整会话累计
       qc.invalidateQueries({ queryKey: ["session-usage", activeSessionId] });
     }
@@ -497,25 +1075,51 @@ export default function ChatPage({ agentId }: { agentId: string }) {
    * （即「点停止后过一会结果还是出来了」的现象）。
    *
    * 兜底：若后端迟迟不回 canceled 帧（卡在不可取消的同步操作），5s 后硬断流。
+   *
+   * 两种来源的 run_id
+   * -----------------
+   * - **本地流**（本页发起的）：run_id 在 send() 的闭包里，最常见；
+   * - **恢复态**（整页刷新后重建的「进行中」气泡）：本地内存全空，靠后端
+   *   ``chat/runs.py`` 的注册表把 run_id 带回来，否则停不掉正在跑的任务。
+   *
+   * 两者都取不到时**什么都不做**——不能猜一个 run_id 去停，那可能停掉别的会话。
    */
   const stopSend = () => {
-    const pid = placeholderRef.current;
-    const rid = runIdRef.current;
+    // 句柄从**当前视图对应的桶**里取，而不是全局 ref：不同会话可以并发跑，
+    // 用单个 ref 会导致「停 A 却把 B 也停了」。
+    const run = activeRun;
+    const pid = run?.assistant.id || "";
+    // run_id 优先取本地流；本地没有（**整页刷新后重建**的「进行中」气泡）就取
+    // 后端注册表带回来的那个（见 chat/runs.py）。取不到就放弃——宁可按钮无效，
+    // 也不能拿一个错的 run_id 去停别人的任务。
+    const rid = run?.runId || recoveredRun?.runId || "";
+    const bucketKey = activeSessionId || PENDING_BUCKET;
     // 1. 通知后端优雅停止（should_stop 在下一个检查点生效）
     if (rid) {
       void apiAbortChat(agentId, rid).catch(() => {});
     }
     // 2. UI 立即反馈「已停止」，但保留占位消息等 done 帧补内容/标记
-    setSending(false);
-    if (pid) {
-      setMsgs((prev) =>
+    setStreamRuns((prev) => {
+      const cur = prev[bucketKey];
+      if (!cur) return prev;
+      return {
+        ...prev,
+        [bucketKey]: {
+          ...cur,
+          assistant: { ...cur.assistant, streaming: false, canceled: true },
+        },
+      };
+    });
+    // 2-b 恢复态的气泡直接在**它自己那个会话**的列表里标停：它没有对应的本地流式桶
+    if (recoveredRun) {
+      updateMsgs(curBucket, (prev) =>
         prev.map((m) =>
-          m.id === pid ? { ...m, streaming: false, canceled: true } : m
+          m.id === recoveredRun.id ? { ...m, streaming: false, canceled: true } : m
         )
       );
     }
     // 3. 兜底：超时仍未结束则硬断流（仅当后端可能被不可取消操作卡住）
-    const ctrl = abortRef.current;
+    const ctrl = run?.abort;
     if (ctrl) {
       setTimeout(() => {
         try {
@@ -621,7 +1225,25 @@ export default function ChatPage({ agentId }: { agentId: string }) {
           boxShadow: "0 1px 3px rgba(0, 0, 0, 0.04)",
         }}
       >
-        {msgs.map((m) => (
+        {/*
+          「加载更早的消息」：会话可能很长，接口单次只给最近一段。显式按钮而不是
+          无限滚动——气泡里常带着一长串思考步骤，自动加载既容易让用户失去位置感，
+          一次拉太多也会明显卡。
+        */}
+        {paging[curBucket]?.hasMore && (
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              padding: "0 0 14px",
+            }}
+          >
+            <Button size="small" type="text" loading={loadingOlder} onClick={loadOlder}>
+              加载更早的消息
+            </Button>
+          </div>
+        )}
+        {visibleMsgs.map((m) => (
           <div key={m.id}>
             <ChatBubble
               msg={m}

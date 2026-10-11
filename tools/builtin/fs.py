@@ -10,9 +10,11 @@
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import fnmatch
 import heapq
+import json
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -25,6 +27,67 @@ from .sandbox import TMP_PREFIX, PathEscape, resolve_path
 MAX_READ_BYTES = 200_000
 # 单次列出的最大条目数
 MAX_LIST = 200
+
+# 单次 fs.write_file 的字符上限（超出请分段，见 make_write_file 的描述）。
+#
+# 为什么设上限：LLM 是**逐字生成**的，正文越长越容易在输出里跑飞。实测
+# deepseek-flash 一次生成 9.8k 字符的 HTML 后，接着自编了 OBSERVATION 又写了
+# 一个 FINAL——整轮作废（见 planner.detect_hallucination）。长内容还会被
+# max_tokens 截断，而截断后的 JSON 常常**勉强闭合**，写出来的是残缺文件却
+# 照样回「已写入」。
+#
+# 不是硬性技术限制，调大只是多烧点 token；调小则强制走「分段写 + 拼接」那条
+# 已经写进工具描述的路子。6000 是在「一次生成质量」与「少走弯路」之间取的折中。
+_MAX_SINGLE_WRITE = 6_000
+
+
+def _integrity_hint(rel: str, content: str) -> str:
+    """写完立刻粗检一遍内容完整性；没问题返回空串。
+
+    为什么必须做：这层存在的意义是**把静默失败变成信号**。工具此前只回
+    「已写入 N 字符」——那是**操作结果**，不是**达成情况**。模型据此理所当然
+    认为文件写好了，然后在 FINAL 里向用户断言「点开就能跑」，而文件可能
+    是个缺尾标签的残片。这个差异对纯文本无所谓，对「产物卡片」是致命的。
+
+    判定全部是启发式，只在**明显可疑**时出声，宁可漏报也不误报——误报会让
+    模型反复去「修」一个本来正确的文件。
+
+    覆盖不到的情况也说明白：内容在 JSON 里被截断时，闭合标签/括号/引号
+    往往仍然配对齐全（模型会在中途收尾），这种「完整但不完整」检不出来，
+    只能靠上面的长度上限拦住。
+    """
+    name = rel.rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    tail = content.rstrip()
+    if not tail:
+        return "⚠️ 内容是空的。"
+
+    if ext in ("html", "htm"):
+        if not tail.lower().endswith("</html>"):
+            return "⚠️ HTML 没有 </html> 结束标签，文件很可能被截断了。"
+        if tail.lower().count("<script") != tail.lower().count("</script>"):
+            return "⚠️ <script> 与 </script> 数量不匹配，文件很可能被截断了。"
+    elif ext == "json":
+        try:
+            json.loads(content)
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ 内容不是合法 JSON：{e}"
+    elif ext == "py":
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            return f"⚠️ 内容不是合法 Python：{e}"
+    elif ext in ("js", "jsx", "ts", "tsx", "css", "less", "scss"):
+        for open_c, close_c in (("{", "}"), ("(", ")"), ("[", "]")):
+            if content.count(open_c) != content.count(close_c):
+                return (
+                    f"⚠️ {open_c}{close_c} 数量不配对（{content.count(open_c)} vs "
+                    f"{content.count(close_c)}），文件很可能被截断了。"
+                )
+    elif ext in ("xml", "svg", "html.j2"):
+        if not tail.endswith(">"):
+            return "⚠️ XML/SVG 没有以 > 结束，文件很可能被截断了。"
+    return ""
 
 
 def _effective(fallback_root: Path, fallback_ro: bool):
@@ -129,6 +192,25 @@ def make_read_file(root: Path, read_only: bool) -> ProcessorTool:
     )
 
 
+def _write_too_long(rel: str, n: int) -> str:
+    """超长单次写入的回执。**不写文件**——写一半比不写更糟。
+
+    为什么要硬拦：LLM 逐字生成，正文越长越容易在输出里跑飞或被 max_tokens
+    截断，而截断后的 JSON 常常勉强闭合，结果是「写成功了」但内容残缺。
+    与其事后靠完整性自检去发现，不如一开始就不让它写这么大。
+    """
+    return (
+        f"[拒绝写入] {rel} 单次 {n} 字符，超过上限 {_MAX_SINGLE_WRITE}。\n"
+        "长内容在生成途中被截断时，会**静默写坏**——写出来看着成功、其实缺尾巴。\n"
+        "请分段：\n"
+        "  1. 分几次用 fs.write_file 写 @tmp/part1.txt、@tmp/part2.txt…"
+        "（每次一两千字符）；\n"
+        "  2. 用一条 bash 命令（cat / 顺序拼接）把它们合成目标文件；\n"
+        "  3. 对目标文件调用 fs.write_file 或 fs.publish 挂载。\n"
+        "（@tmp/ 下的分片文件不受此限制。）"
+    )
+
+
 def _write_arg_missing(content: str) -> str:
     """``write_file`` 收到空 path 时的诊断信息。
 
@@ -174,12 +256,15 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
         )
         if eff_ro and not is_tmp:
             return "[工作空间为只读，不能写文件]"
+        if len(content) > _MAX_SINGLE_WRITE:
+            return _write_too_long(rel, len(content))
         try:
             p = resolve_path(eff_root, tmp_root, rel)
         except PathEscape as e:
             return f"[拒绝] {e}"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        hint = _integrity_hint(rel, content)
         # 临时目录要给真实绝对路径：``bash__run`` 这类插件不认 ``@tmp/`` 前缀
         # （它起的是真子进程，没有我们的路径解析），agent 只能拿绝对路径去
         # ``cd`` / 传参。写完就告诉它一次，省得它把脚本又写回用户工作区。
@@ -187,8 +272,8 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
             return (
                 f"已写入 {rel}（{len(content)} 字符），"
                 f"实际路径 {p}（这是会话临时目录，bash 命令里请用这个绝对路径）"
-            )
-        return f"已写入 {rel}（{len(content)} 字符）"
+            ) + (f"\n{hint}" if hint else "")
+        return f"已写入 {rel}（{len(content)} 字符）" + (f"\n{hint}" if hint else "")
 
     return ProcessorTool(
         name="fs.write_file",
@@ -197,22 +282,28 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
             "路径相对工作空间；**临时文件请用 `@tmp/` 前缀**"
             "（如 `@tmp/check.py`、`@tmp/test_a.js`）——它落在本会话私有的临时目录，"
             "不会弄脏用户工作区。只有**要交付给用户的文件**才直接写在工作空间里。"
-            "\n\n【content 长度限制 —— 超过就会整个调用失败】"
+            "\n\n【content 长度限制 —— 超过会被直接拒绝、文件不会被创建】"
             "content 是要**由你逐字生成**并放进 JSON 的，"
-            "所以单次上限受你的输出长度约束（约一万字符）。"
-            "超过这个量级时本工具会收到**空的** path 与 content（输出在 JSON 闭合前"
-            "就被截断），报「缺少参数 path」——那不是路径写错，别去改路径。\n"
+            f"所以单次上限是 {_MAX_SINGLE_WRITE} 字符。"
+            "超过时本工具返回「拒绝写入」——那不是路径写错，是内容太长，别去改路径。\n"
+            "为什么要卡：正文越长越容易在生成途中被截断或跑飞，"
+            "而截断后的 JSON 常常**勉强闭合**，结果是「写成功了」但内容缺尾巴。\n"
             "长文件必须**分段写**：先用本工具分几次写 `@tmp/part1.txt`、"
             "`part2.txt`…（每次一两千字符），再用一条 bash 命令把它们"
             "按顺序拼成目标文件，最后对目标文件调用 fs.publish 挂载。"
+            "（`@tmp/` 下的分片文件本身不受此限制。）"
+            "\n\n【写完会自动体检】写入后会按扩展名粗检一遍内容完整性"
+            "（HTML 是否闭合、JSON/Python 能否解析、括号是否配对），"
+            "有问题会在回执里附上 ⚠️ 提示——看到它就说明文件可能被截断了，"
+            "请改用分段写重来。"
         ),
         parameters={
             "path": (
                 "文件路径。相对工作空间；临时文件用 `@tmp/` 前缀（如 `@tmp/check.py`）"
             ),
             "content": (
-                "要写入的文本。**单次请控制在约一万字符以内**；更长请分段写入"
-                "多个 @tmp/partN.txt 后再合并"
+                f"要写入的文本。**单次上限 {_MAX_SINGLE_WRITE} 字符**；"
+                "更长请分段写入多个 @tmp/partN.txt 后用 bash 合并"
             ),
         },
         run=run,
@@ -602,6 +693,20 @@ def make_publish(root: Path, read_only: bool) -> ProcessorTool:
             return f"[拒绝] {e}"
         if not p.is_file():
             return f"[文件不存在] {rel}"
+        # 挂载前体检：产物卡片是用户**直接看到**的东西，一个缺尾标签的残片挂上去
+        # 比不挂更糟（用户点开发现是坏的，模型却已经宣称「点开就能跑」）。
+        # 这里复用写入时的同一套粗检，不通过就拒绝挂载并说清原因。
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return f"[读取失败] {rel}：{e}"
+        hint = _integrity_hint(rel, body)
+        if hint:
+            return (
+                f"[拒绝挂载] {hint}\n"
+                f"文件确实存在，但内容看起来不完整。挂上去用户点开会看到坏文件，"
+                f"比不挂更糟。请先用 fs.read_file 检查结尾，修正或分段重写后再 publish。"
+            )
         return f"已登记为产物 {rel}"
 
     return ProcessorTool(

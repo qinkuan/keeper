@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -95,6 +96,27 @@ def _call_key(name: str, args: Any) -> str:
 _CAP_LOADER = "load_capabilities"
 # 一轮里最多同时保留几份 L2 正文。再多就挤上下文了，按加载顺序 FIFO 换出。
 _CAP_MAX = 3
+
+# 模型「自编轨迹」（写了 OBSERVATION 或多个 THOUGHT）时最多点破几次。
+# 到顶就不再重试，退化为执行第一个 ACTION——点破对小模型不一定有效，
+# 不能让它变成烧钱死循环。
+_MAX_HALLUCINATION_RETRIES = 2
+
+# 模型输出了本接口不接受的格式（当前只有原生 tool-calling / DSML）时最多点破几次。
+# 与幻觉同一套理由：点破对小模型不一定有效，不能变成烧钱死循环。区别在于**到顶后
+# 怎么收场**——格式错不影响模型对世界的认知，它那个调用的参数往往还是完整的，所以
+# 到顶后降级为「按我们的方式执行它那个调用」，而不是作废（见循环里的 format_error
+# 分支）。
+_MAX_FORMAT_ERROR_RETRIES = 2
+
+# 单轮 ReAct 的最长墙钟时间（秒）。客户端断开时 agent 仍会跑完（用户切页面/
+# 关窗口不该中断思考），但那之后用户按不到「停止生成」——所以要有服务端兜底，
+# 否则一个长任务会白烧 token 跑完。可用 KEEPER_MAX_RUN_SECONDS 覆盖。
+# 默认 40 分钟：足够跑完绝大多数真实任务，又能拦住「卡在不可取消操作里」的无底洞。
+#
+# 与预算守卫（observability.budget）互补：预算管金额，这里管时间——便宜的长任务
+# 可能不触发预算，但同样会白跑。
+_MAX_RUN_SECONDS = int(os.environ.get("KEEPER_MAX_RUN_SECONDS", "2400"))
 
 # 「小规模」阈值（正文 token 粗估合计）：低于它直接全量预加载，不做判读
 _CAP_SMALL_LIMIT = 6000
@@ -593,6 +615,61 @@ class Process:
             f"请在下一轮把剩下的单独再发一次。"
         )
 
+    @staticmethod
+    def _first_obs_pos(text: str) -> int:
+        """第一个行首 OBSERVATION 的位置；没有返回全文长度。
+
+        连续跑飞到上限时会用到：截断到自编 OBSERVATION 之前，剩下的
+        THOUGHT + ACTION + ACTION_INPUT 是它真实想做的，参数通常是完整的。
+        """
+        m = re.search(r"(?m)^\s*OBSERVATION\s*[:：]", text or "")
+        return m.start() if m else len(text or "")
+
+    def _hallucination_note(self, dec: Any) -> str:
+        """本轮作废的说明：把「你在扮演引擎」这件事原样点破。
+
+        为什么整轮作废，而不是截断后执行第一个 ACTION
+        ---------------------------------------------
+        它编出来的整条轨迹是一个**整体**：后面那句「已发布：snake.html」说明它
+        已经默认前一个 ACTION 成功了。若我们真去执行，下一步它会基于「文件已
+        写入」继续推理（实测去 ``cp`` 一个还没落盘的文件）。先把世界观纠正回来
+        再让它自己重走，比顺着它的错觉走便宜得多。
+
+        点破必须**具体**——只说「格式错了」它只会改格式，照样以为做过。
+        """
+        return (
+            f"[系统] 本轮作废，没有执行任何工具。\n\n"
+            f"原因：{dec.hallucination}。\n\n"
+            "OBSERVATION 是**引擎注入**的标签，只有引擎能写；你写的那几行 "
+            "（「文件已写入」「已发布」之类）**全部是假的**，不代表任何工具被"
+            "执行过。刚才这一轮里，文件没有写、产物没有挂。\n\n"
+            "判断「做没做」只看回执：没收到回执 = 没做。\n\n"
+            "请重新输出**一轮**：只写一个 THOUGHT，然后一个 ACTION（或 FINAL），"
+            "写完 ACTION_INPUT 就停下等回执，不要替引擎往下写。"
+        )
+
+    def _format_error_note(self, dec: Any) -> str:
+        """格式错误的点破文案。
+
+        和幻觉点破的关键差别：幻觉要说清「你**以为**你做过，但没做」（否则它改完
+        格式照样以为做过）；格式错误只要说清「这样写**不会被执行**」并给出正确写法。
+
+        为什么必须给可照抄的模板：模型已经写了 DSML，说明它脑子里那套「原生 tool
+        calling」是它的默认习惯，光说「格式错了」它多半下一轮还这么写。
+        """
+        return (
+            "[系统] 本轮作废，没有执行任何工具。\n\n"
+            f"原因：{dec.format_error}。\n\n"
+            "本接口**没有向模型注册任何原生工具**，那些标记既不会被执行、也不会被"
+            "解析——照着它们走等于什么都没发生。要调用工具，请只写这两行纯文本：\n\n"
+            "THOUGHT: 先想清楚要做什么\n"
+            "ACTION: 上面「可用工具」清单里的工具名\n"
+            'ACTION_INPUT: {"参数名": "值"}\n\n'
+            "写完这三行就**停下等回执**，不要继续往下写。若本轮就是要直接回答，则只写：\n\n"
+            "THOUGHT: 想清楚了\n"
+            "FINAL: 回答正文\n"
+        )
+
     def _progress_note(self, step_no: int) -> str:
         """回执上附一条进度（`[步 12/30]`），临近上限时催交付。
 
@@ -844,12 +921,24 @@ class Process:
             name, kind="tool", source="auto_disclose", chars=len(text)
         )
 
-    async def _record_parse_stat(self, dec) -> None:
-        """记一条解析结构统计（P1-1 阶段 0）。失败不影响主流程。"""
+    async def _record_parse_stat(self, dec, kind: Optional[str] = None) -> None:
+        """记一条解析结构统计（P1-1 阶段 0）。失败不影响主流程。
+
+        ``kind`` 可覆盖落库的类别——用于「点破若干次仍跑飞」时补记一条
+        ``hallucination_forced``：那条响应本身已被记成 ``hallucination``，
+        但它最终导致降级执行，是**另一件事**，不补记就看不出策略 B 到底
+        有没有效（点破一次就收敛 vs 点破两次还是跑飞，处置完全不同）。
+
+        模型名从 ``self.llm.model_name`` 取：幻觉率必须按模型看。
+        """
         try:
             from ..observability import record_react_parse_stat
 
-            await record_react_parse_stat(dec.kind, dec.action_count or 0)
+            await record_react_parse_stat(
+                kind or dec.kind,
+                dec.action_count or 0,
+                model=getattr(self.llm, "model_name", None),
+            )
         except Exception as e:  # noqa: BLE001
             logger.debug("记录解析统计失败（忽略）: %s", e)
 
@@ -1327,6 +1416,15 @@ class Process:
 
         # 预算告警只催一次：反复塞同一句提示只会挤上下文，且模型已看到要求
         budget_warned = False
+        # 模型「自编轨迹」的重试次数。小模型可能连续跑飞，不做上限就是死循环，
+        # 到顶后退化为执行第一个 ACTION（见下面的 hallucination 分支）。
+        hallucination_retries = 0
+        # 格式错误（原生 tool-calling 等）的点破次数。与幻觉分开计：成因不同，
+        # 降级策略也不同（幻觉作废，格式错降级执行）。
+        format_error_retries = 0
+        # 本轮开始的墙钟时刻：给时长守卫用。客户端断开后 agent 仍会跑完，
+        # 没有这个兜底的话用户关掉页面就等于放任长任务白烧 token。
+        started_at = time.perf_counter()
 
         for step_i in range(self.max_steps):
             try:
@@ -1380,6 +1478,78 @@ class Process:
             # 量化「模型想并行」：prompt 要求每次只写一个 ACTION，但模型经常连写。
             # 现状第二个会被丢弃，这里只记数不改行为（P1-1 的收益依据）。
             await self._record_parse_stat(dec)
+
+            if dec.kind == "hallucination":
+                # 模型在扮演引擎：本轮**整轮作废**，只把这件事点破后让它重来。
+                #
+                # 为什么不「截断后执行第一个 ACTION」：它编出来的整条轨迹是一个
+                # 整体——后面那句「已发布：snake.html」是假的，说明它**已经默认
+                # 前一个 ACTION 成功**。若我们真去执行，就等于顺着它的错觉走，
+                # 下一步它会基于「文件已写入」继续推理（实测会去 cp 一个还没落盘
+                # 的文件）。所以必须先把世界观纠正回来，再让它自己重走一遍。
+                #
+                # 重试有上限：小模型可能连续跑飞，不做上限就是烧钱死循环。
+                hallucination_retries += 1
+                logger.warning(
+                    "检测到模型自编轨迹（第 %s 次），本轮作废: %s",
+                    hallucination_retries,
+                    dec.hallucination,
+                )
+                if hallucination_retries <= _MAX_HALLUCINATION_RETRIES:
+                    messages.append(
+                        {"role": "user", "content": self._hallucination_note(dec)}
+                    )
+                    continue
+                # 连续跑飞到上限：说明点破对它没用。退化成执行第一个 ACTION——
+                # 实测那种情况下 ACTION_INPUT 本身往往是完整的（JSON 在第一个
+                # 自编 OBSERVATION 处被切断，参数解析正常），丢掉太可惜。
+                # 这里把 hallucination 清掉，让下面的 act 分支正常接手。
+                logger.warning(
+                    "连续 %s 次自编轨迹，不再重试，改为执行第一个 ACTION",
+                    hallucination_retries,
+                )
+                # 补记一条 forced：上面那条 hallucination 记的是「检出」，
+                # 这条记的是「点破失败、最终降级」。两者之比就是策略 B 的
+                # 有效率——只统计检出数会让人误以为重试总是管用。
+                await self._record_parse_stat(dec, kind="hallucination_forced")
+                dec.hallucination = ""
+                dec = self.planner.parse(
+                    resp[: self._first_obs_pos(resp)] or resp, step_i
+                )
+
+            if dec.kind == "format_error":
+                # 模型吐了原生工具调用标记：整轮作废，点破后令其重来。
+                #
+                # 为什么不能直接执行：那样等于默认这套格式合法。模型一旦发现吐
+                # DSML 能推动流程就会一直吐，而且这段文本会作为 assistant 消息
+                # 进入历史、后面的轮次拿它当范例模仿——线上实测第 12/30 步整轮
+                # 就这么报废的。所以先纠正格式，这是唯一能止住它的办法。
+                #
+                # 为什么不整轮丢掉：它那个调用的参数往往是完整的
+                # （<parameter name=...>ls -la</parameter> 一目了然），所以到顶后
+                # 降级为「用我们的方式执行它」，两件事都不耽误。
+                format_error_retries += 1
+                logger.warning(
+                    "检测到格式错误（第 %s 次）：%s",
+                    format_error_retries,
+                    dec.format_error,
+                )
+                if format_error_retries <= _MAX_FORMAT_ERROR_RETRIES:
+                    messages.append(
+                        {"role": "user", "content": self._format_error_note(dec)}
+                    )
+                    continue
+                # 连续点破仍不改：改用我们自己的方式把它那个调用执行掉，
+                # 并补记一条 forced——「检出」与「点破失败后降级」是两件事，
+                # 不分开记就看不出点破到底有没有效。
+                await self._record_parse_stat(dec, kind="format_error_forced")
+                logger.warning(
+                    "连续 %s 次格式错误，不再重试，降级执行它那个原生调用",
+                    format_error_retries,
+                )
+                dec = self.planner.native_as_act(resp, dec.thought)
+                if dec is None:  # 兜底：刚检出过，理论上不会发生
+                    dec = self.planner.parse("", step_i)
 
             if dec.kind == "final":
                 # 没调工具的纯思考轮：也记一步，让思考内容落在「自主规划过程」里，
@@ -1562,6 +1732,26 @@ class Process:
             if should_stop is not None and await should_stop():
                 return ProcessResult(
                     answer="", steps=steps, used_tools=True, paused=True
+                )
+
+            # ③-b 时长守卫：客户端断开后 agent 仍会跑完（见 chat/api._sse_pump），
+            #     这在本地客户端形态下是常态。但用户关掉页面后就按不到「停止生成」，
+            #     没有兜底的话一个 30 步的长任务会白烧 token 跑完。
+            #     预算守卫管的是**金额**，这里管的是**时间**——两者互补：
+            #     便宜的长任务可能不触发预算，但同样会白跑。
+            elapsed = time.perf_counter() - started_at
+            if elapsed > _MAX_RUN_SECONDS:
+                logger.warning(
+                    "单轮运行超过 %s 秒，强制收尾（已产出内容保留）", _MAX_RUN_SECONDS
+                )
+                return ProcessResult(
+                    answer=(
+                        f"（本轮运行超过 {_MAX_RUN_SECONDS // 60} 分钟，已自动收尾。"
+                        "已完成的步骤都保留了下来，可以让我继续。）"
+                    ),
+                    steps=steps,
+                    used_tools=True,
+                    canceled=True,
                 )
 
             # ③ 预算守卫：每步查一次。只在会话开始查的话，长任务能在单轮内把

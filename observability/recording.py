@@ -172,8 +172,18 @@ async def record_capability_load(
         logger.debug("记录能力加载失败: %s", e)
 
 
-async def record_react_parse_stat(kind: str, action_count: int = 0) -> None:
-    """落一条「本次响应的结构」统计；失败只记日志，绝不影响解析。"""
+async def record_react_parse_stat(
+    kind: str, action_count: int = 0, model: Optional[str] = None
+) -> None:
+    """落一条「本次响应的结构」统计；失败只记日志，绝不影响解析。
+
+    ``kind`` 取值：``final`` / ``ask`` / ``act`` / ``think`` /
+    ``hallucination``（模型自编轨迹，已检出并重试）/
+    ``hallucination_forced``（点破若干次仍跑飞，退化为执行第一个 ACTION）。
+
+    ``model`` 是 LLM 模型名：幻觉率必须按模型看，聚合在一起会抹平
+    「换模型能根治」这个结论。
+    """
     try:
         ctx = _ctx()
         factory = get_session_factory()
@@ -190,6 +200,7 @@ async def record_react_parse_stat(kind: str, action_count: int = 0) -> None:
                     action_count=action_count,
                     # 现状：解析器只认第一个 ACTION，其余全丢
                     dropped_count=max(0, action_count - 1) if kind == "act" else 0,
+                    model=(model or None),
                 )
             )
             await db.commit()
