@@ -1,0 +1,14 @@
+{
+  "name": "keeper-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "keeper 桌面壳：Electron 窗口 + Python sidecar（keeper 内核）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "echo 提示：本壳不打包 Python，内核沿用 keeper 目录里的 .venv"
+  },
+  "devDependencies": {
+    "electron": "^30.5.1"
+  }
+}
