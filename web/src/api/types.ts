@@ -228,6 +228,23 @@ export interface ReactParseModelStat {
 }
 
 /**
+ * 改模型预设后，被重装配的 agent。
+ *
+ * 模型改动之所以要"重载"：LLM 实例是在 agent build 期按当时的配置创建的，把
+ * api_key / base_url / 模型名都固化进了那个对象，不重载就得重启整个服务（而重启
+ * 会中断所有正在跑的会话）。所以保存后就地重装配，并把结果如实回报——哪些生效了、
+ * 哪个没起来，都不该藏在"保存成功"四个字后面。
+ */
+export interface ReloadedAgent {
+  id: string;
+  name: string;
+  /** 重装配是否成功 */
+  ok: boolean;
+  /** 失败原因（成功时为空串） */
+  reason: string;
+}
+
+/**
  * 解析结构统计：模型有多想并行、又丢了多少动作、有没有在自编工具回执。
  *
  * 判读：
@@ -1210,7 +1227,27 @@ export interface ModelProfile {
   name: string;
   provider: string;
   model_name: string;
+  /**
+   * 更新预设时，服务端顺手重装配了哪些 agent（见 {@link ReloadedAgent}）。
+   *
+   * 模型改动必须重载才生效：LLM 实例是在 agent build 期创建的，api_key /
+   * base_url / 模型名都固化在那个对象里，不重载就只能重启服务（会中断所有正在
+   * 跑的会话）。所以「哪些生效了、哪个没起来」必须如实回报，不能让"保存成功"
+   * 这四个字把人糊弄过去。
+   */
+  reloaded_agents?: ReloadedAgent[];
+  /**
+   * API Key，**只写不读**。
+   *
+   * 服务端永远不会把它回传（`GET /manage/models` 只回 `has_api_key`）。这个字段
+   * 存在的唯一意义是「提交时把它带上」，编辑页**不应该**拿它回填输入框。
+   *
+   * 更新时留空 = 保持原值不变（服务端语义），否则用户改个模型名就会把 Key 清空，
+   * 而他根本看不见自己清掉了什么。
+   */
   api_key?: string | null;
+  /** 服务端是否已配置 API Key（只读展示标志） */
+  has_api_key?: boolean;
   base_url?: string | null;
   temperature: number;
   timeout: number;
@@ -1219,8 +1256,11 @@ export interface ModelProfile {
   context_limit?: number | null;
 }
 
-/** 创建 / 更新模型预设的请求体（id 仅更新时带） */
-export type ModelProfileInput = Omit<ModelProfile, "id">;
+/** 创建 / 更新模型预设的请求体（id 仅更新时带）
+ *
+ *  刻意排除 `has_api_key`：那是只读的展示标志，不该被回传。
+ */
+export type ModelProfileInput = Omit<ModelProfile, "id" | "has_api_key">;
 
 /** 模型单价（每百万 token）。成本按调用发生的时间匹配当时生效的那一段价。 */
 export interface ModelPrice {
@@ -1254,10 +1294,20 @@ export interface ModelPriceInput {
   note?: string | null;
 }
 
-/** GET /manage/agents/{id}/model：本 agent 当前绑定的模型预设 */
+/** GET /manage/agents/{id}/model：本 agent 当前绑定的模型预设
+ *
+ *  模型配置的**唯一**来源就是这个绑定，没有隐藏兜底。所以这里必须能区分三种状态，
+ *  否则界面只能说「未配置」，用户不知道该去哪儿配、是忘了绑还是预设被删了。
+ */
 export interface AgentModelBinding {
   llm_profile_id: string | null;
   profile_name: string | null;
+  /** 是否已成功绑定到一个存在的预设 */
+  bound: boolean;
+  /** ok 已绑定 / missing 没绑定 / invalid 绑了但预设已被删除 */
+  state: "ok" | "missing" | "invalid";
+  /** 未就绪时给用户看的一句话说明（可直接展示）；已绑定为 null */
+  hint: string | null;
 }
 
 // ---------------- 任务系统 ----------------

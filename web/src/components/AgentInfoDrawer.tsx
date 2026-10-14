@@ -239,8 +239,6 @@ export default function AgentInfoDrawer({
           return (
             <List.Item
               style={{
-                cursor: hasTools ? "pointer" : "default",
-                flexDirection: "column",
                 alignItems: "stretch",
               }}
               onClick={() =>
@@ -328,7 +326,11 @@ export default function AgentInfoDrawer({
               <Descriptions column={1} size="small" bordered title="基本信息">
                 <Descriptions.Item label="名称">{cfg.name}</Descriptions.Item>
                 <Descriptions.Item label="工作区">
-                  {cfg.workspace || "未绑定"}
+                  {/* 只读：工作空间是**会话级**属性，不是 agent 的。agent 装配时
+                      用的目录只是它自己的默认工作目录，与会话实际读写哪里无关。
+                      给入口反而会让人以为"改了这里会话就跟着变"。要换会话的
+                      工作空间，用会话页顶栏那个下拉。 */}
+                  {cfg.workspace || "默认"}
                 </Descriptions.Item>
                 <Descriptions.Item label="MCP 连接">
                   {cfg.mcp_connected ? (
@@ -359,7 +361,12 @@ export default function AgentInfoDrawer({
                     </Tag>
                   </Space>
                 ) : (
-                  <Typography.Text type="secondary">未配置（纯索引模式）</Typography.Text>
+                  <Space size={6}>
+                    <Tag color="warning">未绑定模型</Tag>
+                    <Typography.Text type="secondary">
+                      该 agent 不会调用模型（纯索引模式）
+                    </Typography.Text>
+                  </Space>
                 )}
               </div>
 
@@ -367,7 +374,7 @@ export default function AgentInfoDrawer({
                 <Typography.Text strong>绑定模型预设：</Typography.Text>{" "}
                 <Select
                   style={{ minWidth: 260 }}
-                  placeholder="默认（全局配置）"
+                  placeholder="未绑定（无法调用模型）"
                   allowClear
                   loading={agentModelQ.isLoading}
                   value={agentModelQ.data?.llm_profile_id ?? undefined}
@@ -378,7 +385,12 @@ export default function AgentInfoDrawer({
                   }))}
                 />
                 <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                  留空则用全局默认（config.yaml 的 llm 段）
+                  模型必须绑定才能使用：未绑定时该 agent 不会调用模型（纯索引模式）
+                  {agentModelQ.data?.hint && !agentModelQ.data.bound ? (
+                    <Typography.Text type="warning" style={{ marginLeft: 8, fontSize: 12 }}>
+                      {agentModelQ.data.hint}
+                    </Typography.Text>
+                  ) : null}
                 </Typography.Text>
               </div>
 

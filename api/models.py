@@ -16,7 +16,13 @@ from ..llm import build_model
 from ..llm.config import LLMConfig
 from datetime import datetime
 
-from ..store import LLMProfile, ModelPrice, get_session_factory
+from ..store import (
+    Agent,
+    AgentLLMBinding,
+    LLMProfile,
+    ModelPrice,
+    get_session_factory,
+)
 from ..store.models import new_id
 
 logger = logging.getLogger(__name__)
@@ -38,30 +44,102 @@ class LLMProfileIn(BaseModel):
 
 
 class LLMProfileOut(BaseModel):
+    """**只出不进**：不含 api_key 明文，只回一个「配没配」的标志。
+
+    为什么
+    ----
+    API Key 是**只写**字段：能设、不能看。原因很实际——
+
+    1. 这个接口返回体直接进浏览器（表格 + 编辑表单），明文一旦返回，就等于
+       每个能看到这页的人都能读到密钥（截图、日志、DevTools、前端报错里都可能
+       留下痕迹），而"模型管理"页通常谁都能点开；
+    2. 看密钥对使用者没有价值——真要确认，页面上给个「已配置」就够了；
+    3. 它只需要单向写入，一次都没有读取的必要。
+
+    与 ``LLMProfileIn`` 分开就是这个道理：入参收明文，出参永不回。
+    """
+
     id: str
     name: str
     provider: str
     model_name: str
-    api_key: Optional[str] = None
+    #: 是否已配置 API Key（bool，不含任何明文片段）
+    has_api_key: bool = False
     base_url: Optional[str] = None
     temperature: float
     timeout: int
     max_retries: int
     context_limit: Optional[int] = None
+    #: 保存后被重装配的 agent（如实回报：谁重载了、谁没成功）。空表示没有 agent 绑它
+    reloaded_agents: List[Dict[str, Any]] = []
 
 
-def _to_out(r: LLMProfile) -> LLMProfileOut:
+async def _rebuild_agents_using(model_id: str) -> List[Dict[str, Any]]:
+    """重装配所有绑定了该预设的 agent。
+
+    为什么模型预设改了必须重载
+    ----------------------
+    LLM 实例是在 agent **build 期**按当时的配置创建出来的（``build_agent`` →
+    ``get_llm`` → provider 客户端），它把 api_key / base_url / model_name /
+    temperature 都固化进了那个对象。改预设**不会**影响已经建好的实例——所以以前
+    改完必须重启服务才生效，而重启会连带中断所有正在跑的会话。
+
+    这里在改配置后立刻重装配对应 agent：``shutdown`` 旧实例 → 重新 build → 重新注册。
+    逐个做、互不影响；某个 agent 起不来（缺插件、配置有问题）只记它自己的失败，
+    不影响其他 agent 继续重载（返回列表里如实报告成功与失败）。
+
+    已停用的 agent（本地停用 / 能力被关）跳过——它本来就不在跑，重载它没意义，
+    还要重新检查一遍停用状态。``_rebuild_if_enabled`` 已经处理了这种情况。
+    """
+    from .agents import _rebuild_if_enabled
+
+    async with get_session_factory()() as session:
+        ids = (
+            await session.execute(
+                select(AgentLLMBinding.agent_id).where(
+                    AgentLLMBinding.llm_profile_id == model_id
+                )
+            )
+        ).scalars().all()
+        names = (
+            {
+                r[0]: r[1]
+                for r in (
+                    await session.execute(
+                        select(Agent.id, Agent.name).where(Agent.id.in_(ids))
+                    )
+                ).all()
+            }
+            if ids
+            else {}
+        )
+
+    done: List[Dict[str, Any]] = []
+    for aid in ids:
+        ok, reason = await _rebuild_if_enabled(aid)
+        done.append(
+            {"id": aid, "name": names.get(aid, aid), "ok": ok, "reason": reason}
+        )
+        logger.info("模型预设变更，重装配 agent %s：%s", names.get(aid, aid), "成功" if ok else reason)
+    if done:
+        logger.info("模型预设 %s 变更，共重装配 %s 个 agent", model_id, len(done))
+    return done
+
+
+def _to_out(r: LLMProfile, reloaded_agents: Optional[List[Dict[str, Any]]] = None) -> LLMProfileOut:
     return LLMProfileOut(
         id=r.id,
         name=r.name,
         provider=r.provider,
         model_name=r.model_name,
-        api_key=r.api_key,
+        # 只回标志位：见 LLMProfileOut 的说明
+        has_api_key=bool((r.api_key or "").strip()),
         base_url=r.base_url,
         temperature=r.temperature,
         timeout=r.timeout,
         max_retries=r.max_retries,
         context_limit=r.context_limit,
+        reloaded_agents=reloaded_agents or [],
     )
 
 
@@ -94,6 +172,17 @@ async def create_model(body: LLMProfileIn) -> LLMProfileOut:
 
 @models_router.put("/{model_id}", response_model=LLMProfileOut)
 async def update_model(model_id: str, body: LLMProfileIn) -> LLMProfileOut:
+    """更新模型预设。**api_key 留空 = 保持原值不变**。
+
+    为什么是这个语义
+    --------------
+    Key 改成只写之后，编辑页拿不到明文，输入框就是空的。如果按常规的
+    「字段为空就写空」处理，用户只想改个模型名，保存后 Key 就被清空了——
+    而他**根本看不见**自己清掉了什么，下一次调用直接 401，还查不出原因。
+
+    所以这里显式区分：空 = 不动，要换 Key 就往框里输新值。
+    （代价是不能通过这个接口清除 Key，那是刻意的：要清除得先知道它存在。）
+    """
     async with get_session_factory()() as session:
         row = await session.get(LLMProfile, model_id)
         if not row:
@@ -108,21 +197,40 @@ async def update_model(model_id: str, body: LLMProfileIn) -> LLMProfileOut:
                 raise HTTPException(
                     status_code=409, detail=f"模型名称已存在：{body.name}"
                 )
-        for key, value in body.model_dump().items():
+        data = body.model_dump()
+        # 只写字段：空字符串 / 空白 都视为「不改」，别把它覆盖成空
+        if not (data.get("api_key") or "").strip():
+            data.pop("api_key", None)
+        for key, value in data.items():
             setattr(row, key, value)
         await session.commit()
         await session.refresh(row)
-        return _to_out(row)
+
+    # 改完立刻重装配绑着它的 agent：LLM 实例是 build 期固化的，不重载就得重启
+    # 整个服务才生效（而重启会中断所有正在跑的会话）。
+    reloaded = await _rebuild_agents_using(model_id)
+    return _to_out(row, reloaded_agents=reloaded)
 
 
 @models_router.delete("/{model_id}", status_code=204)
 async def delete_model(model_id: str) -> Response:
+    """删除模型预设。
+
+    也会重装配绑着它的 agent：它们的绑定会变成「预设失效」，放任不管的话这些
+    agent 会继续用**已经删掉的配置**跑（内存里的实例还活着），界面却显示未绑定——
+    又是那种"界面与实际不一致"。删完就重载，让它们立刻落到无模型的纯索引模式，
+    并按未绑定提示用户去重新配一个。
+
+    接口仍是 204（无 body），重载结果只进日志。
+    """
     async with get_session_factory()() as session:
         row = await session.get(LLMProfile, model_id)
         if not row:
             raise HTTPException(status_code=404, detail="模型不存在")
         await session.delete(row)
         await session.commit()
+    reloaded = await _rebuild_agents_using(model_id)
+    logger.info("模型预设 %s 已删除，重装配 %s 个 agent", model_id, len(reloaded))
     return Response(status_code=204)
 
 

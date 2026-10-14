@@ -1449,12 +1449,19 @@ export default function ChatPage({ agentId }: { agentId: string }) {
           />
           {/* 工作空间：会话 / 任务模式共用顶栏一行（合并进下拉框） */}
           {(() => {
-            const cur = sessionId ? (workspace?.user_space?.id ?? "") : userSpaceId;
-            // 当前处于默认目录（""）且不在真实空间列表中时，作为兜底项显示
-            const opts =
-              cur && !usOptions.some((o) => o.value === cur)
-                ? [...usOptions, { value: cur, label: cur === "" ? "默认" : cur }]
-                : usOptions;
+            const dflt = userSpaces.find((u) => u.name === "default")?.id ?? "";
+            const cur = sessionId ? workspace?.user_space?.id || dflt : userSpaceId || dflt;
+            // 显式给「默认」一项。agent 与会话都没绑定用户空间时 user_space_id 就是
+            // 空字符串，此时下拉里一个能匹配上的选项都没有，Select 只能渲染成空白——
+            // 看着就像"配置丢了"，其实只是没有可选项。给它个名字，空值才读得懂。
+            const opts = [
+              ...usOptions,
+              // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
+              // 否则下拉显示空白，用户看不出当前究竟在哪个目录
+              ...(cur && !usOptions.some((o) => o.value === cur)
+                ? [{ value: cur, label: cur }]
+                : []),
+            ];
             return (
               <Select
                 size="small"

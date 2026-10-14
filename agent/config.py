@@ -66,7 +66,6 @@ class WorkspaceConfig:
     kind: str = "none"
     path: Optional[str] = None
     read_only: bool = True
-    # 历史兜底字段：过去按 agent 名给每个 agent 单独默认目录；新设计下默认统一走
     # 系统默认用户空间（workspace/user/default），此字段不再参与路径计算。
     agent_name: Optional[str] = None
 
@@ -336,56 +335,38 @@ def _enabled(
 
 
 async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
-    """装配期确定「工作空间根 + 它是否只读」。
+    """装配期确定「工作空间根 + 它是否只读」——**永远是 default 用户空间**。
 
-    语义（唯一真源 = ``user_space.read_only``）：
+    工作空间是**会话级**的属性，不是 agent 的：agent 装配时只需要知道自己默认在
+    哪个目录读写，而这完全由 default 决定。所以这里不再看 agent 有没有「绑定」
+    工作区（workspace_kind / workspace_path 两列已随之删除）。
 
-    - agent **绑定了**工作区（``workspace_path`` 有值）→ 用那个空间的只读标志；
-      但它必须在 ``user_space`` 表里有登记，否则**报错**——静默回落到 default 会
-      变成「agent 明明绑了 A 目录，却按 B 目录的只读判」，配置与实际不符；
-    - agent **没绑定**（``workspace_path`` 为空 / kind=none）→ 用 ``default`` 空间。
+    曾经这里是分支的：绑了空间就用那个空间的只读标志，没绑才用 default。于是
+    产生了一堆本不该有的状态——「绑定的空间没登记就报错」、「平台上同步下来的
+    agent 从来不绑定、于是永远是 default」、「改了 agent 的绑定但会话实际读写
+    目录没跟着变」（会话绑自己的空间，压根不看 agent 的）。分支收益为零，成本
+    是一整套需要维护的语义，所以直接删掉。
 
-    为什么必须是 ``user_space.read_only``：运行期
-    :func:`keeper.chat.service.resolve_workspace` 读的就是它。两个来源曾经各判各的
-    （这里读 ``agent.workspace_read_only``、运行期读 user_space），后果是
-    「工作区明明可写，装配期却按 agent 画像上那个从未被改过的默认值 1 把写类工具
-    全丢了」——工具在界面上凭空消失，还没有任何报错。
-
-    ``agent.workspace_read_only`` 不再参与判断（连兜底也不做：它既不权威、又会
-    被平台同步冲掉，留着只会误导下一个人）。
+    唯一真源是 user_space.read_only：运行期
+    keeper.chat.service.resolve_workspace 读的就是它。两处各判各的曾让
+    「工作区明明可写，装配期却按 agent 画像上那个从未被改过的默认值把写类工具全
+    丢了」——工具在界面上凭空消失，还没有任何报错。
     """
     async with get_session_factory()() as db:
-        space = None
-        if row.workspace_path:
-            space = (
-                await db.execute(
-                    select(UserSpace).where(UserSpace.path == row.workspace_path)
-                )
-            ).scalars().first()
-            if space is None:
-                raise ValueError(
-                    f"agent {row.id}（{row.name}）绑定的工作区"
-                    f"「{row.workspace_path}」不在「用户空间」里。"
-                    "工作区必须先登记才能绑定（创建 agent 的下拉框只列已登记的空间）。"
-                    "请到「用户空间」补一条，或改绑其它空间。"
-                )
-        else:
-            space = (
-                await db.execute(
-                    select(UserSpace).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
-                )
-            ).scalars().first()
-            if space is None:
-                raise ValueError(
-                    "user_space 表里没有 default 空间，无法确定工作区。"
-                    "请先到「用户空间」创建 default。"
-                )
-
+        space = (
+            await db.execute(
+                select(UserSpace).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
+            )
+        ).scalars().first()
+        if space is None:
+            raise ValueError(
+                "user_space 表里没有 default 空间，无法确定工作区。"
+                "请先到「用户空间」创建 default。"
+            )
     root = Path(space.path).expanduser()
     logger.info(
-        "装配 agent %s：工作空间=%s（user_space「%s」read_only=%s，来源=%s）",
+        "装配 agent %s：工作空间=%s（user_space「%s」read_only=%s）",
         row.id, root, space.name, bool(space.read_only),
-        "agent 绑定" if row.workspace_path else "未绑定，用 default",
     )
     return root, bool(space.read_only)
 
@@ -1082,12 +1063,15 @@ def _build_config(
         persona=row.persona or "",
         description=row.description or "",
         workspace=WorkspaceConfig(
-            kind=row.workspace_kind or "none",
-            path=row.workspace_path,
+            # agent 不再绑定工作区：path 留空、kind=none，运行期 resolve_workspace
+            # 会落到 user_space 里的 default（与装配期同一个真源）；只读标志由
+            # _resolve_workspace 从 default 空间解析后经参数传入。
+            kind="none",
+            path=None,
             read_only=bool(workspace_read_only),
             agent_name=row.name,
         ),
-        llm=llm if llm is not None else (_json(row.llm) or {}),
+        llm=llm if llm is not None else {},
         mcp_servers=mcp_servers or {},
         skill_registry=skill_registry,
         tools=tools,
@@ -1098,13 +1082,17 @@ def _build_config(
 async def _resolve_llm(row: Agent) -> Dict[str, Any]:
     """解析本 agent 实际使用的 LLM 配置。
 
-    优先级：agent 内联 llm（row.llm，兼容现有用法）> 绑定的模型预设
-    （agent_llm_binding → llm_profiles）> 否则返回内联（可能为空，保持现状）。
-    全局 config.yaml 的 llm 段不在本处处理，避免改变既有行为。
+    **只认绑定**：``agent_llm_binding`` → ``llm_profiles``。没绑定就返回空 dict，
+    调用方（``get_llm``）据此进入纯索引模式——只用知识库/工具，不调模型。
+
+    为什么不做任何回落：历史上这里有过三层兜底，每一层都制造过「改了配置却不生效、
+    又查不出原因」的问题——inline 曾被平台同步用全局 config.yaml 的 llm 段灌进来；
+    全局 llm 段同理；建 agent 时自动绑第一个预设则等于替用户挑模型。所以语义唯一：
+    先在模型管理页配好模型，再显式绑定给 agent。
+
+    未绑定时打 warning 而不是静默：这是用户可操作的状态（去绑一个），不是内部细节。
+    静默的话 agent 看起来一切正常，一对话才发现不调模型。
     """
-    inline = _json(row.llm) or {}
-    if inline.get("provider"):
-        return inline
     factory = get_session_factory()
     async with factory() as session:
         binding = await session.get(AgentLLMBinding, row.id)
@@ -1112,7 +1100,20 @@ async def _resolve_llm(row: Agent) -> Dict[str, Any]:
             profile = await session.get(LLMProfile, binding.llm_profile_id)
             if profile and profile.provider:
                 return profile.to_llm_dict()
-    return inline
+            # 绑着但预设被删了：按未绑定处理，并说明是「预设失效」而非「没绑」，
+            # 否则用户会去模型管理页反复找那个已经不在的模型
+            logger.warning(
+                "agent[%s]：绑定的模型预设已失效（id=%s），按未绑定处理。请重新绑定一个。",
+                row.id,
+                binding.llm_profile_id,
+            )
+            return {}
+    logger.warning(
+        "agent[%s]：未绑定模型预设，将以纯索引模式运行（不调用模型）。"
+        "请在「模型管理」配好模型后，为该 agent 绑定一个。",
+        row.id,
+    )
+    return {}
 
 
 async def load_agent_config(

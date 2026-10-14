@@ -9,14 +9,6 @@ agent:
 platform:
   url: http://localhost:9095
   token: _csVBbp8d53wmqTfahy3kujRWBnxUbQ8-NuGeF2Zzek
-llm:
-  provider: deepseek
-  model_name: deepseek-chat
-  api_key: sk-7d98e52253b74b1b9bc3ebd1c3efb67e
-  base_url: https://api.deepseek.com
-  temperature: 0.2
-  timeout: 120
-  max_retries: 3
 workspace:
   kind: local
   root: ~/.keeper/workspace/user

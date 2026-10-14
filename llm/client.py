@@ -686,7 +686,11 @@ def build_model(cfg: LLMConfig) -> Any:
 def get_llm(cfg: Optional[Dict[str, Any]] = None) -> Optional[LLM]:
     """按配置构建 LLM；无 provider 或构建失败则返回 None（纯索引模式）。
 
-    cfg 来自 config.yaml 的 llm 段，支持：
+    cfg 是**已经解析好的**一份 LLM 配置 dict，正常来自数据库：绑定预设
+    （agent_llm_binding → llm_profiles）或该 agent 的内联 llm，见
+    ``agent/config.py::_resolve_llm``。全局 config.yaml 的 llm 段不参与这里。
+
+    支持字段：
         provider / model_name（兼容旧写法 model）/ api_key / base_url /
         temperature / timeout / max_retries
     """

@@ -121,6 +121,32 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
     return WorkspaceCtx(root=root, read_only=read_only, agent_space=agent_space)
+async def _default_space_id() -> Optional[str]:
+    """取默认用户空间（``user_space.name == "default"``）的 id；没有就 None。
+
+    会话默认落在 default 上
+    ----------------------
+    工作空间是**会话级**的东西，不是 agent 的属性——agent 不绑定工作区，装配时用
+    的目录只是它自己的默认工作目录，与会话实际读写哪里无关。
+
+    以前会话只认显式传入的 ``user_space_id``，没传就是 None，于是 ``user_space_id``
+    恒为空、顶栏那个下拉一个匹配项都没有，只能渲染成空白——看着像配置没保存。
+
+    这里补上默认值：没指定就落到 ``default``。它找不到就返回 None（那是"确实没有
+    默认空间"的事实，不该硬凑一个顶上），界面上会显示成"未绑定"。
+    """
+    from ..store import UserSpace
+
+    async with get_session_factory()() as db:
+        return (
+            await db.execute(
+                select(UserSpace.id)
+                .where(UserSpace.name == "default")
+                .order_by(UserSpace.created_at, UserSpace.id)
+            )
+        ).scalars().first()
+
+
 class ChatService:
     # 会话级串行锁：同一会话一次只跑一个 ask。
     #
@@ -192,6 +218,11 @@ class ChatService:
 
         # 新建会话时记录要绑定的用户空间；已有会话忽略（沿用库里的绑定，中途不可换）
         self.user_space_id = user_space_id
+        # 没指定就落到默认用户空间（default）。否则 user_space_id 恒为 None，顶栏
+        # 那个下拉一个匹配项都没有、只能渲染成空白，看起来就像配置没保存。
+        # **仅对新建会话生效**：已有会话的绑定按约定中途不可换。
+        if not self.session_id and not self.user_space_id:
+            self.user_space_id = await _default_space_id()
 
         if not text.strip():
             return {"answer": "", "llm": self.agent.llm is not None}

@@ -1343,36 +1343,24 @@ async def delete_user_space(us_id: str) -> Dict[str, Any]:
             raise HTTPException(status_code=404, detail="用户空间不存在")
         if row.name == USER_SPACE_DEFAULT_NAME:
             raise HTTPException(status_code=400, detail="默认用户空间不可删除（除非手动改库）")
-        # 有 agent 把它当默认工作区绑定时**不能删**：装配期只认 user_space 的记录，
-        # 记录没了「工作区不存在」，那个 agent 会在下次重建时直接起不来。
-        # 会话引用可以安全解绑（会话能回落 default），agent 绑定没有回落语义
-        # ——它绑的就是这个目录。
-        from ..store import Agent as AgentRow
-
-        bound = (
-            await db.execute(
-                select(AgentRow).where(AgentRow.workspace_path == row.path)
-            )
-        ).scalars().all()
-        if bound:
-            names = "、".join(f"{a.name}({a.id})" for a in bound)
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"还有 agent 绑定着这个工作区：{names}。"
-                    "它们的工作区只认「用户空间」里的这条记录，删了就起不来。"
-                    "请先把这些 agent 改绑到别的空间。"
-                ),
-            )
+        
         # 删掉 user/ 下的软链接（真实文件夹不動）。
         entry = USER_DIR / row.name
         if entry.is_symlink():
             entry.unlink()
-        # 解绑引用它的会话（避免外键约束），让其回落到默认用户空间
+        # 引用它的会话**改绑到 default**：工作空间是跟会话绑定的，删掉一个空间不等于
+        # 让会话变成"没有工作区"——那等于静默改了它读写的位置。明确改绑到 default，
+        # 语义才是"这个会话还在，只是换了默认目录"。default 一定查得到：上面已拦住
+        # "默认用户空间不可删除"。
+        default_id = (
+            await db.execute(
+                select(UserSpace.id).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
+            )
+        ).scalars().first()
         await db.execute(
             ChatSession.__table__.update()
             .where(ChatSession.user_space_id == us_id)
-            .values(user_space_id=None)
+            .values(user_space_id=default_id)
         )
         await db.delete(row)
         await db.commit()
@@ -1390,15 +1378,24 @@ async def session_workspace(agent_id: str, session_id: str) -> Dict[str, Any]:
     async with get_session_factory()() as db:
         sess = await db.get(ChatSession, session_id)
         usid = getattr(sess, "user_space_id", None) if sess else None
-        if usid:
-            us = await db.get(UserSpace, usid)
-            if us:
-                user_space = {
-                    "id": us.id,
-                    "name": us.name,
-                    "path": us.path,
-                    "read_only": us.read_only,
-                }
+        us = await db.get(UserSpace, usid) if usid else None
+        if us is None:
+            # 没绑定 / 绑的已被删：按**实际生效的根目录**反查。resolve_workspace
+            # 本来就有兜底，这里不硬编码找 default，是为了让展示的永远是真正在用
+            # 的那一个——否则界面与实际行为不一致：下拉渲染成空白像配置丢了，读写
+            # 却发生在兜底目录里。
+            us = (
+                await db.execute(
+                    select(UserSpace).where(UserSpace.path == str(ctx.root))
+                )
+            ).scalars().first()
+        if us:
+            user_space = {
+                "id": us.id,
+                "name": us.name,
+                "path": us.path,
+                "read_only": us.read_only,
+            }
     return {
         "user_space": user_space,
         "agent_space": str(ctx.agent_space),

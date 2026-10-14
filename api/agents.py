@@ -113,12 +113,12 @@ async def load_agent(agent_id: str) -> dict:
 
     from ..store import AgentCapabilityOverride, get_session_factory
 
-    # 同步只写 agent.llm（inline），不会碰绑定表。所以"没指定模型"的 agent
-    # 装过来仍然是没模型的 → build 失败、连概览都进不去。顺手绑第一个模型，
-    # 一个预设都没有时保持为空（让 build 失败并给出可读原因）。
-    async with get_session_factory()() as _db:
-        await _ensure_default_llm(_db, agent_id, await _load_inline_llm(agent_id))
-        await _db.commit()
+    # 这里曾经调 _ensure_default_llm 给没模型的 agent 自动绑第一个预设。现已移除：
+    # 模型的唯一来源是「模型管理页配好 → 这里显式绑定」，自动兜底会替用户做这个
+    # 决定——他明明选了另一个模型（或一个都不想要），却因为"建 agent 时库里恰好有
+    # 一个"而被绑上，且界面上看不出是谁替他选的。
+    # 现在没绑定就是没绑定：agent 以纯索引模式装起来（不调模型），并在日志和
+    # agent 信息里明确告诉用户去绑定。
 
     # 本地已停用的话，只把配置拉下来，不进运行时——否则「停用」会被这次装载
     # 悄悄撤销，用户会以为开关坏了
@@ -201,84 +201,39 @@ async def unload_agent(agent_id: str) -> dict:
 
 @router.get("/{agent_id}/model")
 async def get_agent_model(agent_id: str) -> Dict[str, Any]:
-    """读取本 agent 当前绑定的模型预设（本地归属，独立于平台缓存）。"""
+    """读取本 agent 当前绑定的模型预设（本地归属，独立于平台缓存）。
+
+    模型配置的**唯一**来源就是这个绑定：没有绑定就是没配置，前端据此提示用户去
+    模型管理页配一个并绑定，不会有任何隐藏兜底（见 ``_resolve_llm``）。
+    ``state`` 把三种状态分开，别让前端只靠 profile_name 猜：
+    ``ok`` 已绑定 / ``missing`` 没绑定 / ``invalid`` 绑了但预设已删除。
+    """
     from keeper.store import get_session_factory
 
     async with get_session_factory()() as db:
         binding = await db.get(AgentLLMBinding, agent_id)
         if not binding or not binding.llm_profile_id:
-            return {"llm_profile_id": None, "profile_name": None}
+            return {"llm_profile_id": None, "profile_name": None,
+                    "bound": False, "state": "missing",
+                    "hint": "未绑定模型：该 agent 将以纯索引模式运行（不调用模型）。"}
         profile = await db.get(LLMProfile, binding.llm_profile_id)
-        return {
-            "llm_profile_id": binding.llm_profile_id,
-            "profile_name": profile.name if profile else None,
-        }
-
-
-async def _load_inline_llm(agent_id: str) -> dict:
-    """读该 agent 的 inline llm 段（config.yaml 的 llm 解析结果）。
-
-    只用来判断"inline 里有没有 provider" —— 有的话优先级高于绑定表（见
-    ``_resolve_llm``），没必要再绑一个。读不到 / 存坏了都当没有。
-    """
-    from sqlalchemy import select
-
-    from keeper.store import Agent as AgentRow
-    from keeper.store import get_session_factory
-
-    async with get_session_factory()() as db:
-        row = (
-            await db.execute(select(AgentRow).where(AgentRow.id == agent_id))
-        ).scalars().first()
-    if row is None:
-        return {}
-    try:
-        return json.loads(row.llm or "{}") or {}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-async def _ensure_default_llm(db, agent_id: str, inline: Optional[dict]) -> Optional[str]:
-    """给还没模型的 agent 绑**第一个**模型预设；一个都没有就保持为空。
-
-    为什么要有兜底
-    ------------
-    没有模型时 ``build_agent`` 直接失败（NoLLMConfigError），agent 就进不了运行时、
-    也不出现在概览里——用户看到的是"建了但用不了"，却不知道缺什么。而"配了 3 个
-    模型、agent 一个都没绑"很常见（模型先配好、agent 后建）。所以建/装 agent 时
-    顺手绑第一个，省掉一次往返。
-
-    刻意**不覆盖**已有绑定，也不覆盖 inline（config.yaml 的 llm 段已解析出
-    provider 的优先级更高，见 ``_resolve_llm``）。一个预设都没有时返回 None，
-    保持"没模型"这个事实，不硬造一个错的。
-    """
-    from sqlalchemy import select
-
-    from keeper.store import AgentLLMBinding as LLMBinding
-    from keeper.store import LLMProfile as Profile
-
-    if (inline or {}).get("provider"):
-        return None
-    binding = await db.get(LLMBinding, agent_id)
-    if binding and binding.llm_profile_id:
-        return binding.llm_profile_id
-    first = (
-        await db.execute(select(Profile.id).order_by(Profile.created_at, Profile.id))
-    ).scalars().first()
-    if first is None:
-        return None
-    if binding is None:
-        db.add(LLMBinding(agent_id=agent_id, llm_profile_id=first))
-    else:
-        binding.llm_profile_id = first
-    return first
+        if profile is None:
+            return {"llm_profile_id": binding.llm_profile_id, "profile_name": None,
+                    "bound": False, "state": "invalid",
+                    "hint": "绑定的模型预设已被删除，请重新绑定一个。"}
+        return {"llm_profile_id": binding.llm_profile_id, "profile_name": profile.name,
+                "bound": True, "state": "ok", "hint": None}
 
 
 @router.post("/{agent_id}/model")
 async def set_agent_model(agent_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """绑定 / 解绑本 agent 的模型预设。
 
-    ``llm_profile_id`` 为空（None / 空串）表示解绑，回落到全局默认（config.yaml 的 llm 段）。
+    ``llm_profile_id`` 为空（None / 空串）表示解绑。解绑后该 agent **没有**模型，
+    以纯索引模式运行（只用知识库/工具，不调模型）——不再回落到内联配置、也不回落到
+    全局 config.yaml 的 llm 段。那种看不见的兜底正是「改了配置却不生效、又查不出
+    原因」的那类问题。
+
     放在独立表而非 ``agent`` 列，是为了不和平台同步重写 agent 行时冲突。
     """
     llm_profile_id: Optional[str] = body.get("llm_profile_id") or None
@@ -502,23 +457,16 @@ async def _assert_name_free(agent_id: str, name: str) -> None:
 class AgentCreateIn(BaseModel):
     """新建本地 agent。
 
-    工作区给 ``workspace_space_id``（引用 ``user_space`` 一条记录）——**不要**让
-    调用方自己传路径和只读：只读是**工作空间**的属性（``user_space.read_only``），
-    让前端再手填一遍会出现两个来源打架（历史上就是这样：agent 画像上的
-    ``workspace_read_only`` 默认 true，而用户空间是可写的，装配期读前者，
-    把写类工具全丢了）。传 id，后端按同一条记录取路径与只读，只有一个真源。
+    工作空间**不属于 agent**：它是会话级的绑定（在会话页顶栏切换），
+    agent 装配时永远用「用户空间」里的 default。这个模型不接收工作区参数——
+    曾经接收，而那个参数并不能决定会话实际读写哪里（会话压根不看它），
+    变成了一个改了没用的配置项。
     """
 
     name: str = Field(min_length=1, max_length=64)
     description: Optional[str] = None
     persona: str = ""
     status: str = "active"
-    # 「无工作区」传空；否则给 user_space.id
-    workspace_space_id: Optional[str] = None
-    # 仅保留兼容（老调用方直接给路径）；新代码走 space_id。
-    # **没有** workspace_read_only：只读是工作空间的属性，不该由调用方再填一份。
-    workspace_kind: str = "none"
-    workspace_path: Optional[str] = None
     # 插件的**库内目录名**或清单 name 都接受（用户在文件夹里看到的是目录名）
     plugins: List[str] = Field(default_factory=list)
 
@@ -661,8 +609,7 @@ async def list_agents(origin: Optional[str] = None) -> Dict[str, Any]:
                 "enabled": r.id not in disabled,
                 "loaded": bool(r.loaded),
                 "persona": r.persona,
-                "workspace_kind": r.workspace_kind,
-                "workspace_path": r.workspace_path,
+                
                 # 只读不在这里给：它属于工作空间（user_space.read_only）。
                 # 想知道某个 agent 能不能写，问它绑定的那个空间，或看装配日志。
                 "plugins": want,
@@ -706,8 +653,7 @@ async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
         # 工作区：给了 space_id 就按用户空间那条记录取路径与只读，别让调用方
         # 自己传——两个来源必须是一个，否则会出现「用户空间是可写的、agent
         # 画像写着只读，装配期按后者把写类工具丢了」这种静默失效。
-        ws_kind, ws_path = "none", None
-        if body.workspace_space_id:
+        if False:
             from keeper.store import UserSpace as UserSpaceRow
 
             space = await db.get(UserSpaceRow, body.workspace_space_id)
@@ -781,17 +727,13 @@ async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
             description=body.description,
             persona=body.persona,
             status=body.status,
-            workspace_kind=ws_kind,
-            workspace_path=ws_path,
+            
             loaded=True,  # 创建即进运行时（见 docstring）；status 才是启停开关
         )
         db.add(row)
         # 插件绑定 = 链接目录里有什么，不落表。链接在 _ensure_plugin_links /
         # 创建前就已经建好了（见上面的 link_plugin 循环）。
-        # 没指定模型就绑第一个：否则 build 必然失败（NoLLMConfigError），
-        # 用户要再手动配一次才能用。一个模型都没有时保持为空。
-        await _ensure_default_llm(db, agent_id, await _load_inline_llm(agent_id))
-        await db.commit()
+        # 模型同理：不自动兜底。没绑定就是没绑定，由用户在模型信息里显式选。
 
     # 装配成实例（创建即装载，且默认启用——本地开关是唯一开关，缺省开）。
     # 失败要连库带链接一起撤：留一个 build 不起来的 agent 在库里，用户看到的

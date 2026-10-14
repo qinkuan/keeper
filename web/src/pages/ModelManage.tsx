@@ -10,6 +10,7 @@ import {
   Select,
   Space,
   Table,
+  Tag,
   Typography,
   message,
 } from "antd";
@@ -89,8 +90,25 @@ export default function ModelManage() {
   const saveM = useMutation({
     mutationFn: (v: ModelFormValues) =>
       editing ? apiUpdateModel(editing.id, v) : apiCreateModel(v),
-    onSuccess: () => {
-      message.success(editing ? "已更新" : "已创建");
+    onSuccess: (saved) => {
+      // 改预设必须重载绑着它的 agent（LLM 实例是 build 期固化的），所以如实告诉
+      // 用户哪些生效了、哪个没起来——否则"保存成功"会让人以为全都生效了。
+      const reloaded = saved?.reloaded_agents ?? [];
+      const okNames = reloaded.filter((a) => a.ok).map((a) => a.name);
+      const bad = reloaded.filter((a) => !a.ok);
+      if (!editing) {
+        message.success("已创建");
+      } else if (!reloaded.length) {
+        message.success("已更新（暂未被任何 agent 绑定）");
+      } else if (bad.length) {
+        message.warning(
+          `已更新；已重载 ${okNames.length} 个 agent，但 ${bad
+            .map((a) => a.name)
+            .join("、")} 重载失败：${bad[0]?.reason ?? ""}`
+        );
+      } else {
+        message.success(`已更新，已重载 ${okNames.length} 个 agent：${okNames.join("、")}`);
+      }
       setOpen(false);
       qc.invalidateQueries({ queryKey: ["models"] });
     },
@@ -119,7 +137,12 @@ export default function ModelManage() {
   };
   const openEdit = (m: ModelProfile) => {
     setEditing(m);
-    form.setFieldsValue(m);
+    // 显式剥掉 api_key：服务端已不再回传，这里也不该回填。
+    // API Key 是只写字段——看得见就能抄走，而这个页面通常谁都能点开。
+    // 空输入框 + 「已配置」提示就是完整的状态表达。
+    const { api_key: _omit, ...rest } = m;
+    void _omit;
+    form.setFieldsValue(rest as ModelFormValues);
     setOpen(true);
   };
 
@@ -237,8 +260,32 @@ export default function ModelManage() {
               }
             />
           </Form.Item>
-          <Form.Item label="API Key" name="api_key">
-            <Input.Password placeholder="可留空（使用默认 / 环境变量）" />
+          <Form.Item
+            label={
+              <Space size={6}>
+                <span>API Key</span>
+                {editing?.has_api_key ? (
+                  <Tag color="green">已配置</Tag>
+                ) : (
+                  <Tag>未配置</Tag>
+                )}
+              </Space>
+            }
+            name="api_key"
+            extra={
+              editing?.has_api_key
+                ? "出于安全考虑不显示已保存的 Key。留空表示不修改；要换 Key 请直接输入新值。"
+                : "可留空（使用默认 / 环境变量）"
+            }
+          >
+            <Input.Password
+              placeholder={
+                editing?.has_api_key
+                  ? "留空 = 不修改"
+                  : "输入 API Key（可留空）"
+              }
+              autoComplete="new-password"
+            />
           </Form.Item>
           <Form.Item label="Base URL" name="base_url">
             <Input placeholder="可选，如自建网关地址" />

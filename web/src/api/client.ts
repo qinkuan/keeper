@@ -1046,6 +1046,20 @@ export function apiDeletePrice(modelId: string, priceId: string) {
 export function apiGetAgentModel(agentId: string) {
   return apiGet<AgentModelBinding>(`/manage/agents/${agentId}/model`);
 }
+/** 设定 / 清除 agent 的默认工作区（引用 user_space；传 null = 无工作区）。
+ *
+ *  保存后服务端会重装配该 agent（工作区是 build 期装配的），并回报是否成功。
+ */
+export function apiSetAgentWorkspace(agentId: string, userSpaceId: string | null) {
+  return apiPut<{
+    ok: boolean;
+    user_space_id: string | null;
+    workspace: string;
+    reloaded: boolean;
+    reason: string;
+  }>(`/manage/agents/${agentId}/workspace`, { user_space_id: userSpaceId });
+}
+
 export function apiSetAgentModel(agentId: string, llmProfileId: string | null) {
   return apiPost<{
     ok: boolean;

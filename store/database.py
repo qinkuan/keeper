@@ -109,6 +109,20 @@ _AGENT_LEGACY_COLUMNS = [
     "deploy_error",
     "last_deployed_at",
     "ui_kind",
+    # 模型配置的 inline 列：唯一来源已改为 agent_llm_binding → llm_profiles，
+    # 而这列优先级最高、内容又来自 config.yaml 同步，导致绑好的预设被无声压住。
+    # 改成"先在模型管理页配好、再绑定"之后它彻底没人读了。
+    "llm",
+    # 三类资源的下载目录覆盖：从未有写入方（全库非空数为 0），运行时也不读，
+    # 只在模型定义和几处注释里出现过。
+    "mcp_cache_dir",
+    "tool_cache_dir",
+    "skill_cache_dir",
+    # agent 侧工作区两列：工作空间是**会话级**属性，装配时永远用 default，不存在
+    # "给 agent 绑工作区"。会话压根不看 agent 的绑定，那个分支零收益却制造了
+    # "平台同步的 agent 永远没绑定"等状态。
+    "workspace_kind",
+    "workspace_path",
 ]
 
 

@@ -454,7 +454,10 @@ class Agent(Base):
     装配时注入 system。它与 skill 的区别：persona 始终生效、且只有一个；
     skill 可随时增减。
 
-    ``llm`` 为空时回退到全局默认（config.yaml 的 llm 段）。
+    模型配置不在本表：唯一来源是 ``agent_llm_binding`` 绑定的 ``llm_profiles`` 预设
+    （"模型管理"页维护那份），没绑定就是纯索引模式（不调用模型）。曾经有一列 inline
+    ``llm`` 且优先级最高，而它的内容是平台同步时从全局 config.yaml 灌进来的——
+    于是数据库里绑好的预设被无声压住，界面上改什么都没反应。该列已移除。
     """
 
     __tablename__ = "agent"
@@ -473,16 +476,18 @@ class Agent(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 预设提示词（人设）：始终生效，注入 system 的身份部分
     persona: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    workspace_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
-    # 留空 → 自动用 ~/.keeper/workspace/user/<name>（每个 agent 都有自己的默认空间）
-    workspace_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # 这里**没有** workspace_read_only：只读是**工作空间**的属性，真源在
+    # 这里**没有**工作区相关列：工作空间是**会话级**属性，agent 装配时永远用
+    # default 用户空间，所以不存在"给 agent 绑一个工作区"这回事。
+    # 曾经有 workspace_kind / workspace_path 两列支撑那个分支（绑定则用该空间的
+    # 只读标志，否则用 default），但会话压根不看 agent 的绑定——分支零收益，却带来
+    # 一堆本不该有的状态（平台同步的 agent 永远没绑定、改了绑定但会话读写目录不变）。
+    # 两列已由 ``_drop_agent_legacy_columns`` 从存量库里删掉。
+    #
+    # 同样**没有** workspace_read_only：只读是**工作空间**的属性，真源在
     # ``user_space.read_only``（装配期与运行期都只读那一列）。
     # 曾经在这存一份，结果两处各判各的：user_space 明明可写，装配期却按这里的
     # 默认 true 把写类工具全丢了，且工具在界面上凭空消失、无任何报错。
-    # 该列已由 ``_drop_agent_legacy_columns`` 从存量库里删掉。
-    # 大模型配置（JSON dict）；当前 api_key 明文存储，与 mcp 的凭证一致
-    llm: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 该列同样已删。
 
     # ---- 生命周期状态 ----
     # active  ：启用中——可被装配、可服务
@@ -496,14 +501,6 @@ class Agent(Base):
     # 点「装载」重新置 True。平台同步不写这一列，所以不会被冲掉。
     loaded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    # ---- 各类资源的「下载目录」覆盖（仅覆盖用，默认留空） ----
-    # 默认每个 agent 独立目录（决策 #4）：~/.keeper/agents/<agent_id>/<kind>；
-    # 显式配置才用这里的值（需要版本 / 权限隔离、或与其它 agent 共用时）。
-    # 注意：这跟 keeper 自带的连接器缓存 ~/.keeper/mcp 是两码事——后者是
-    # keeper 自己的能力，前者是「agent 从平台拉下来的代码」，互不干扰。
-    mcp_cache_dir: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    tool_cache_dir: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    skill_cache_dir: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
