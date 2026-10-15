@@ -404,9 +404,103 @@ def get_keeper(agent_id: Optional[str] = None) -> Optional["KeeperAgent"]:
     return _KEEPERS.get(agent_id)
 
 
+# ---- 核心 agent：独立槽位 ----
+#
+# 它**不进 _KEEPERS**：那本按 agent_id 索引，而核心 agent 没有 id（它不是数据库里的
+# 任何一行）。塞进去要么编一个假 id（于是它能被 unload、能被 A2A 路由到，恰好是
+# 我们要避免的），要么把 dict 的键类型改成 Optional（会让所有调用点的类型标注失真）。
+# 单独一个槽位最直白，也把「它没有 id、不对外暴露」这件事写在了代码结构里。
+_CORE_AGENT: Optional["KeeperAgent"] = None
+
+
+def get_core_keeper() -> Optional["KeeperAgent"]:
+    """核心 agent 实例；未装配（比如目录里还没有定义文件）时返回 None。"""
+    return _CORE_AGENT
+
+
+def resolve_for_chat(agent_id: Optional[str] = None) -> Optional["KeeperAgent"]:
+    """对话侧解析 agent 实例。
+
+    - ``agent_id`` 给了 → 就用它。取不到就是取不到，**不回退**到主脑：
+      用户点名要跟某个 agent 说话，悄悄换成另一个是错的（而且不可排查）。
+    - ``agent_id`` 为空 → 用核心 agent。这正是"会话是一等公民"这条设计的落点：
+      不指定 agent 就是默认值，而默认那个是主脑——不是"没有 agent"。
+
+    ``get_keeper`` 保持"纯按 id 查"的语义不变，因为 A2A 路由（``api.py``）依赖它：
+    那里按 URL 里的 agent_id 找实例，找不到就该404，不能悄悄换人。
+    """
+    if agent_id:
+        return _KEEPERS.get(agent_id)
+    return resolve_core_agent()
+
+
+def set_core_keeper(agent: Optional["KeeperAgent"]) -> None:
+    """登记 / 清空核心 agent 实例（装配与热重载用）。"""
+    global _CORE_AGENT
+    _CORE_AGENT = agent
+
+
 def list_keepers() -> list["KeeperAgent"]:
     """列出所有已装载的 agent（供 landing 页 / 管理接口枚举）。"""
     return list(_KEEPERS.values())
+
+
+def resolve_core_agent() -> Optional["KeeperAgent"]:
+    """选出**核心 agent**（会话的默认主脑）。
+
+    解析顺序（逐级回落，保证"配了就能用、不配也能用"）：
+
+    1. **本地目录装配的核心 agent**（``~/.keeper/core-agent/``）——首选。
+       它是应用内生的，不依赖数据库、不依赖平台，也不可能被卸载掉。
+    2. ``core_agent.id`` / ``core_agent.name`` —— 上一版设计留下的入口：指向数据库里
+       某条 agent 记录。老配置下继续能用，但那条记录只是普通 agent。
+    3. 顶层 ``agent.id`` / ``agent.name`` —— 元配置里的"这个进程跑谁"。
+    4. **第一个已装载的 agent** —— 兜底，走按 id 排序保证结果稳定
+       （dict 顺序取决于装载完成先后，多进程/重启后可能变，所以不能直接用
+       ``list(_KEEPERS)[0]``，否则"哪个是主脑"会随机跳动）。
+
+    返回 None = 既没有目录定义、也没装载任何 agent。调用方据此给出可读的提示，
+    而不是 500。
+    """
+    # 1) 本地目录装配的核心 agent
+    if _CORE_AGENT is not None:
+        return _CORE_AGENT
+
+    from ..config import core_agent_selector, load_config
+
+    try:
+        want_name, want_id = core_agent_selector(load_config())
+    except Exception as e:  # noqa: BLE001 配置读不出来不该让选主脑这件事整体失败
+        logger.warning("读取核心 agent 配置失败，回落到第一个已装载的 agent: %s", e)
+        want_name, want_id = None, None
+
+    if want_id:
+        hit = _KEEPERS.get(want_id)
+        if hit is not None:
+            return hit
+        # 配了但没装载：这是**用户可操作的状态**（去装载它），要显式告警而不是
+        # 静默换人——否则用户以为自己在跟主脑说话，其实换了一个。
+        logger.warning(
+            "核心 agent 已配置但未装载: id=%s，暂时回落到第一个已装载的 agent",
+            want_id,
+        )
+    if want_name:
+        for a in _KEEPERS.values():
+            if a.name == want_name:
+                return a
+        logger.warning(
+            "核心 agent 已配置但未装载: name=%s，暂时回落到第一个已装载的 agent",
+            want_name,
+        )
+    if not _KEEPERS:
+        return None
+    return _KEEPERS[sorted(_KEEPERS)[0]]
+
+
+def resolve_core_agent_id() -> Optional[str]:
+    """核心 agent 的 id（前端「新建会话」调用时用它，省得前端自己判断用谁）。"""
+    agent = resolve_core_agent()
+    return agent.agent_id if agent is not None else None
 
 
 async def build_all_agents() -> None:
@@ -425,11 +519,33 @@ async def build_all_agents() -> None:
     只有三条件都满足的 agent 才会出现在概览里。
 
     单个 agent 装配失败只降级跳过（继续装载其余），避免一个坏配置拖垮整服务。
+
+    核心 agent 走独立路径（``build_core_agent``），**先于**数据库里的 agent 装配：
+    它是主脑，失败了也不该影响其它 agent 的装载。
     """
     from sqlalchemy import select
 
     from ..store import Agent as AgentRow
     from ..store import AgentCapabilityOverride, get_session_factory
+
+    # 先铺目录：首次启动时生成一份带注释的定义与灵魂模板。
+    # 放在这里而不是模块导入时，是为了让"没写过配置"这件事在日志里可见，
+    # 且不拖慢 import。
+    try:
+        from ..config import load_config
+        from . import core as core_def
+
+        core_dir = core_def.ensure_core_dir(load_config())
+        logger.info("核心 agent 目录: %s", core_dir)
+    except Exception as e:  # noqa: BLE001 目录建不出来不该挡住其它 agent 装载
+        logger.warning("准备核心 agent 目录失败: %s", e)
+
+    # 核心 agent 装配失败（模型名写错、soul.md 编码坏了……）只降级：主脑缺席时
+    # resolve_core_agent() 会回落到数据库里的 agent，应用仍可用。
+    try:
+        await build_core_agent()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("核心 agent 装配失败，将回落到数据库中的 agent: %s", e)
 
     factory = get_session_factory()
     async with factory() as db:
@@ -472,6 +588,15 @@ async def build_all_agents() -> None:
 
 async def shutdown_all() -> None:
     """释放所有 agent 资源（服务退出时调用）。"""
+    # 核心 agent 先关：它是主脑，可能被其它 agent 的 peer 调用依赖
+    global _CORE_AGENT
+    if _CORE_AGENT is not None:
+        try:
+            await _CORE_AGENT.shutdown()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("核心 agent shutdown 异常: %s", e)
+        _CORE_AGENT = None
+
     for agent in list(_KEEPERS.values()):
         try:
             await agent.shutdown()
@@ -502,4 +627,99 @@ async def build_agent(
     await agent.build()
     # 叠加运行时持久化过的对端（agent_peers 表），使重启后它们仍然生效
     await agent.load_managed_peers()
+    return agent
+
+
+async def build_core_agent() -> Optional[KeeperAgent]:
+    """从本地目录装配核心 agent，并登记到核心槽位。
+
+    与 ``build_agent`` 的三步编排一致（构造 config → 建实例 → build），差别只在
+    **配置的来源**：这里读 ``~/.keeper/core-agent/agent.yaml`` + ``soul.md``，
+    不查数据库。所以它可以在"一个 agent 都没装载""平台连不上"的情况下照样成功——
+    这正是把核心 agent 独立出来的目的。
+
+    返回 None 表示"没配核心 agent"（目录里没有定义文件），此时不清空已有槽位：
+    调用方通常是启动期，此时本来也没有。
+
+    关于能力：核心 agent **只带内置工具**，不扫插件、不读 agent_binding。
+    插件与对端是"往某个会话里加入"的东西，不属于它的出厂配置——
+    这也让定义文件保持足够小，不引入第二套能力模型。
+    """
+    from ..config import load_config
+    from . import core as core_def
+    from .config import AgentConfig, WorkspaceConfig
+
+    cfg = load_config()
+
+    if not core_def.exists(cfg):
+        logger.info("未发现核心 agent 定义（%s），跳过装配", core_def.def_path(cfg))
+        return None
+
+    d = core_def.load_core_def(cfg)
+    if d is None:  # exists() 为真但读取失败：按"没配"处理，不让启动挂掉
+        return None
+
+    # 模型：**不从这份定义读**。核心 agent 的模型跟随会话，默认值取部署配置
+    # （config.yaml 的 llm 段）——那里本来就是"本地默认大模型配置"，注释也写着
+    # 「平台不维护 model，用哪个模型是客户端自己的事」。角色定义里焊死模型等于把
+    # 它降级成普通 agent 那种"被配置出来的工件"。
+    # 取不到就留空 dict = 纯索引模式（不调模型），这是**未配置**状态，会明确告警。
+    llm: Dict[str, Any] = dict(getattr(cfg, "llm", None) or {})
+    if not llm:
+        logger.warning(
+            "核心 agent 没有可用的模型配置（config.yaml 的 llm 段为空），"
+            "将以纯索引模式运行：不调用模型，只做本地检索"
+        )
+
+    # 工作区：**不钉路径**。会话各自绑定 user_space（见 chat/service.py 的
+    # _resolve_workspace），那才是这个角色当下工作的地方。这里给 kind="none"，
+    # 让会话的绑定生效——一个陪伴的角色不该被锁死在某个固定目录里。
+    # read_only=False：陪用户做事的角色需要能写文件（其它 agent 默认只读）。
+    workspace = WorkspaceConfig(
+        kind="none",
+        path=None,
+        read_only=False,
+        agent_name=d.name,
+    )
+
+    # 画像：soul.md 优先；再叠加配置里的 persona/persona_file 覆盖层
+    persona = d.persona
+    try:
+        from ..config import core_agent_persona
+
+        override = core_agent_persona(cfg)
+        if override:
+            persona = override
+    except Exception as e:  # noqa: BLE001 读覆盖配置失败不该让角色装不起来
+        logger.warning("读取核心 agent 画像覆盖失败，沿用 soul.md: %s", e)
+
+    agent_config = AgentConfig(
+        name=d.name,
+        persona=persona,
+        description=d.description,
+        workspace=workspace,
+        llm=llm,
+        # 刻意留空：核心 agent 不连接 MCP server、不预挂对端。
+        # 要用这些能力时，通过会话把执行者/插件加进来。
+        mcp_servers={},
+        peers={},
+    )
+
+    agent = KeeperAgent(config=agent_config, agent_id=None)
+    await agent.build()
+    # 对端仍然从 agent_peers 表加载：核心 agent 不做"会话级 peer"，
+    # 但它可以沿用上一版配置里已挂在某条 agent 记录上的对端。
+    # TODO: 会话级 peer 落地后，这里应改为只读会话内的 peer 集合。
+    try:
+        await agent.load_managed_peers()
+    except Exception as e:  # noqa: BLE001 peer 加载失败不该让主脑起不来
+        logger.warning("核心 agent 加载对端失败，仅影响对端能力: %s", e)
+
+    set_core_keeper(agent)
+    logger.info(
+        "核心 agent 已装配：name=%s 模型=%s 目录=%s",
+        d.name,
+        "（未配置，纯索引模式）" if not llm else "来自 config.yaml 的 llm 段",
+        core_def.core_agent_dir(cfg),
+    )
     return agent

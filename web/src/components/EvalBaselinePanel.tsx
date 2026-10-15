@@ -4,26 +4,9 @@
  * 这里只管「什么时候拉数据、怎么触发」，长什么样全在 `EvalReportView` 里。
  * 拆开是因为：前者是流程，后者是排版，混在一起两边都不好读。
  */
-import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Button,
-  Card,
-  Modal,
-  Progress,
-  Select,
-  Space,
-  Spin,
-  Tooltip,
-  Typography,
-} from "antd";
-import {
-  ExperimentOutlined,
-  PlayCircleOutlined,
-  WarningOutlined,
-} from "@ant-design/icons";
+import { FlaskConical, Loader2, Play, TriangleAlert } from "lucide-react";
 
 import {
   apiEvalReport,
@@ -36,18 +19,15 @@ import {
 } from "../api/client";
 import type { EvalCaseStatus } from "../api/types";
 import EvalReportView, { type EvalRow } from "./EvalReportView";
+import { Section } from "./ui/Page";
+import { Hint } from "./ui/Page";
+import { Modal } from "./ui/Modal";
+import { SelectInput } from "./ui/Form";
+import { toast } from "./ui/Toast";
+import { cn } from "../lib/utils";
 
-const { Text } = Typography;
-
-const LOG_STYLE: CSSProperties = {
-  marginTop: 8,
-  maxHeight: 220,
-  overflow: "auto",
-  background: "#fafafa",
-  padding: 10,
-  fontSize: 12,
-  lineHeight: 1.5,
-};
+const LOG_CLS =
+  "mt-2 max-h-[220px] overflow-auto rounded-lg border border-line-soft bg-surface p-2.5 font-mono text-[12px] leading-[1.5] text-ink";
 
 export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
   const qc = useQueryClient();
@@ -123,7 +103,7 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
         baseline: cmpWith,
       }),
     onSuccess: (r) => setActiveRun(r.run_id),
-    onError: (e) => Modal.error({ title: "启动评测失败", content: String(e) }),
+    onError: (e) => toast.error("启动评测失败：" + String(e)),
   });
 
   const mdQ = useQuery({
@@ -151,131 +131,135 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
   const totalCases = suitesQ.data?.reduce((n, s) => n + s.cases, 0);
 
   return (
-    <Card
-      size="small"
-      style={{ marginTop: 16 }}
+    <Section
       title={
-        <Space>
-          <ExperimentOutlined />
+        <span className="flex items-center gap-1.5">
+          <FlaskConical className="h-4 w-4 text-ink-muted" />
           效果评估基线（回归护栏）
-        </Space>
+        </span>
       }
       extra={
-        <Space wrap>
-          <Select
-            style={{ width: 210 }}
-            size="small"
-            value={cmpWith ?? "__auto"}
-            onChange={(v) => setCmpWith(v === "__auto" ? undefined : v)}
-            options={[
-              { value: "__auto", label: "对比 上一次运行" },
-              ...history
-                // 排除当前正在看的那份：自己跟自己比没有意义，
-                // 后端会判成「无可比基线」，不如直接不给这个选项
-                .filter((h) => h.run_id !== runId)
-                .map((h) => ({
-                  value: h.run_id,
-                  label: `对比 ${h.run_id}`,
-                })),
-            ]}
-          />
-          <Select
-            style={{ width: 240 }}
-            size="small"
-            value={viewRun ?? history[0]?.run_id ?? undefined}
-            placeholder="尚无报告"
-            loading={historyQ.isLoading}
-            onChange={(v) => {
-              setViewRun(v);
-              setActiveRun(null);
-            }}
-            options={history.map((h) => ({
-              value: h.run_id,
-              label: `${h.run_id}　${h.passed}/${h.total}`,
-            }))}
-            notFoundContent="还没跑过评测"
-          />
-          <Tooltip title="跑一轮固定用例集，产出可 diff 的基线。会真实消耗 token。">
-            <Button
-              size="small"
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              loading={runMutation.isPending}
-              disabled={running}
-              onClick={() => runMutation.mutate()}
-            >
-              运行评估
-            </Button>
-          </Tooltip>
-        </Space>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 对比对象 */}
+          <div className="w-[190px]">
+            <SelectInput
+              value={cmpWith ?? "__auto"}
+              onChange={(v) => setCmpWith(v === "__auto" ? undefined : v)}
+              options={[
+                { value: "__auto", label: "对比 上一次运行" },
+                ...history
+                  // 排除当前正在看的那份：自己跟自己比没有意义，
+                  // 后端会判成「无可比基线」，不如直接不给这个选项
+                  .filter((h) => h.run_id !== runId)
+                  .map((h) => ({ value: h.run_id, label: `对比 ${h.run_id}` })),
+              ]}
+            />
+          </div>
+
+          {/* 选看哪一份报告 */}
+          <div className="w-[220px]">
+            <SelectInput
+              value={viewRun ?? history[0]?.run_id ?? ""}
+              disabled={historyQ.isLoading || history.length === 0}
+              onChange={(v) => {
+                setViewRun(v || null);
+                setActiveRun(null);
+              }}
+              options={
+                history.length
+                  ? history.map((h) => ({
+                      value: h.run_id,
+                      label: `${h.run_id}　${h.passed}/${h.total}`,
+                    }))
+                  : [{ value: "", label: "还没跑过评测" }]
+              }
+            />
+          </div>
+
+          <button
+            type="button"
+            disabled={running || runMutation.isPending}
+            title="跑一轮固定用例集，产出可 diff 的基线。会真实消耗 token。"
+            onClick={() => runMutation.mutate()}
+            className="flex items-center gap-1.5 rounded-lg bg-brand-gradient px-3 py-[5px] text-[12.5px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {runMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            运行评估
+          </button>
+        </div>
       }
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="每次改 prompt / 换模型 / 加 skill 之后跑一次，看有没有用例掉"
-        description={
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            评测在<strong>独立进程 + 独立数据库</strong>里跑（库里克隆一份配置），
-            不污染真实会话与可观测面板；工作空间默认只读。判定只看断言，不引入
-            另一个模型打分——评分口径会漂，漂了的基线就没法比了。
-            <br />
-            <strong>对比上一次</strong>看「本次改动的净效果」；
-            <strong>指定一份固定报告</strong>看「离起点还差多远」——
-            连续小退化只有后者拦得住（每次对比上次都 ±0，其实已比起点掉了两条）。
-          </Text>
-        }
-      />
+      <div className="mb-3">
+        <Hint title="每次改 prompt / 换模型 / 加 skill 之后跑一次，看有没有用例掉">
+          评测在<strong className="text-ink-strong">独立进程 + 独立数据库</strong>
+          里跑（库里克隆一份配置），不污染真实会话与可观测面板；工作空间默认只读。
+          判定只看断言，不引入另一个模型打分——评分口径会漂，漂了的基线就没法比了。
+          <br />
+          <strong className="text-ink-strong">对比上一次</strong>
+          看「本次改动的净效果」；
+          <strong className="text-ink-strong">指定一份固定报告</strong>
+          看「离起点还差多远」——连续小退化只有后者拦得住（每次对比上次都 ±0，
+          其实已比起点掉了两条）。
+        </Hint>
+      </div>
 
       {running ? (
         <div>
-          <Progress percent={100} status="active" showInfo={false} />
-          <Text type="secondary">
+          {/* 无进度百分比可用（后端只给日志尾巴），所以用一条滚动的高亮条表示
+              「在跑」，而不是假装知道百分比 */}
+          <div className="h-1 overflow-hidden rounded-full bg-surface">
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-brand" />
+          </div>
+          <div className="mt-1.5 text-[12px] text-ink-muted">
             正在跑 {activeRun}…
             {statusQ.data?.log_tail
               ? "十几条用例通常要十几分钟，可以先去做别的。"
               : "（正在获取进度…）"}
-          </Text>
-          <pre style={LOG_STYLE}>
+          </div>
+          <pre className={LOG_CLS}>
             {statusQ.data?.log_tail || "（等待日志…）"}
           </pre>
           {statusQ.isError && (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginTop: 8 }}
-              message="取不到进度（服务可能重启过，内存里的运行状态已丢失）"
-              description={
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  评测本身在<b>独立子进程</b>里跑，不受服务重启影响；刷新页面会重新
-                  从服务端查询。进程跑完后，历史列表里会出现它的新报告。
-                </Text>
-              }
-            />
+            <div className="mt-2">
+              <Hint
+                tone="warn"
+                title="取不到进度（服务可能重启过，内存里的运行状态已丢失）"
+              >
+                评测本身在<strong className="text-ink-strong">独立子进程</strong>
+                里跑，不受服务重启影响；刷新页面会重新从服务端查询。进程跑完后，
+                历史列表里会出现它的新报告。
+              </Hint>
+            </div>
           )}
         </div>
       ) : statusQ.data?.status === "failed" ? (
-        <Alert
-          type="error"
-          showIcon
-          icon={<WarningOutlined />}
-          message="这次评测没有产出报告"
-          description={
-            <pre
-              style={{ margin: 0, fontSize: 12, maxHeight: 200, overflow: "auto" }}
-            >
-              {statusQ.data.log_tail || "（无日志）"}
-            </pre>
+        <Hint
+          tone="danger"
+          title={
+            <span className="flex items-center gap-1.5">
+              <TriangleAlert className="h-3.5 w-3.5" />
+              这次评测没有产出报告
+            </span>
           }
-        />
+        >
+          <pre className="mt-1.5 max-h-[200px] overflow-auto rounded-md bg-surface p-2 font-mono text-[12px]">
+            {statusQ.data.log_tail || "（无日志）"}
+          </pre>
+        </Hint>
       ) : reportQ.isLoading ? (
-        <Spin size="small" />
+        <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          加载中…
+        </div>
       ) : !report ? (
-        <Text type="secondary">
+        <div className="text-[13px] text-ink-muted">
           还没有基线。点右上「运行评估」跑第一轮
           {totalCases ? `（当前用例集共 ${totalCases} 条）` : ""}。
-        </Text>
+        </div>
       ) : (
         <EvalReportView
           report={report}
@@ -286,31 +270,46 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
 
       <Modal
         open={mdOpen}
-        title={`评测报告 ${runId ?? ""}（Markdown）`}
-        onCancel={() => setMdOpen(false)}
+        onClose={() => setMdOpen(false)}
         width={820}
-        footer={[
-          <Button
-            key="copy"
-            onClick={() =>
-              navigator.clipboard?.writeText(mdQ.data?.markdown ?? "")
-            }
-          >
-            复制
-          </Button>,
-          <Button key="close" type="primary" onClick={() => setMdOpen(false)}>
-            关闭
-          </Button>,
-        ]}
+        title={`评测报告 ${runId ?? ""}（Markdown）`}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard?.writeText(mdQ.data?.markdown ?? "");
+                toast.success("已复制");
+              }}
+              className="rounded-lg border border-line bg-panel px-4 py-[7px] text-[13px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:bg-surface hover:text-ink-strong active:scale-[0.98]"
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              onClick={() => setMdOpen(false)}
+              className="rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+            >
+              关闭
+            </button>
+          </>
+        }
       >
         {mdQ.isFetching ? (
-          <Spin size="small" />
+          <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            加载中…
+          </div>
         ) : (
-          <pre style={{ maxHeight: 520, overflow: "auto", fontSize: 12 }}>
+          <pre
+            className={cn(
+              "max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line-soft bg-surface p-3 font-mono text-[12px] leading-[1.6] text-ink"
+            )}
+          >
             {mdQ.data?.markdown ?? "（无）"}
           </pre>
         )}
       </Modal>
-    </Card>
+    </Section>
   );
 }

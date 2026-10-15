@@ -1,11 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Tooltip } from "antd";
-import {
-  DownloadOutlined,
-  EyeOutlined,
-  FileOutlined,
-  FolderOpenOutlined,
-} from "@ant-design/icons";
+import { Download, Eye, File, FolderOpen, Loader2 } from "lucide-react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import type { Artifact } from "../api/types";
 import {
@@ -15,6 +9,9 @@ import {
   apiDeployInfo,
 } from "../api/client";
 import { monacoLangOf } from "../monacoLang";
+/* 主题在这里注册（beforeMount 拿得到 monaco 实例），所以产物卡片不必为了换个
+   配色把 3.9MB 的 monaco 打进自己的包里 —— 见 monacoTheme.ts 的说明。 */
+import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
 import MarkdownView from "./MarkdownView";
 import { isMonacoKind, isUrlKind, opensInNewTab, viewerKindOf } from "./viewers";
 
@@ -33,9 +30,15 @@ function fmtSize(n?: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 小按钮：卡片头部那排操作统一的观感（24px 高、描边、hover 变蓝） */
+const BTN =
+  "inline-flex h-6 items-center gap-1 rounded-md border border-line px-1.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong";
+const ICON_BTN =
+  "flex h-6 w-6 items-center justify-center rounded-md border border-line text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50";
+
 const PLACEHOLDER_STYLE: React.CSSProperties = {
   padding: 16,
-  color: "#888",
+  color: "var(--kp-text-muted)",
   fontSize: 12,
   textAlign: "center",
 };
@@ -192,7 +195,10 @@ export function ArtifactCard({
           background: "var(--kp-surface)",
         }}
       >
-        <FileOutlined style={{ fontSize: 18, color: fileIconColor }} />
+        <File
+          className="h-[18px] w-[18px] shrink-0"
+          style={{ color: fileIconColor }}
+        />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
@@ -207,7 +213,7 @@ export function ArtifactCard({
           <div
             style={{
               fontSize: 12,
-              color: "#888",
+              color: "var(--kp-text-muted)",
               display: "flex",
               gap: 8,
             }}
@@ -218,56 +224,57 @@ export function ArtifactCard({
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           {useNewTab ? (
-            <Tooltip title="浏览器新窗口打开">
-              <Button
-                size="small"
-                icon={<EyeOutlined />}
+            <a
+              href={previewSrc}
+              target="_blank"
+              rel="noreferrer"
+              title="浏览器新窗口打开"
+              className={BTN}
+            >
+              <Eye className="h-3 w-3" />
+              {toggleLabel}
+            </a>
+          ) : canInline ? (
+            <button
+              type="button"
+              onClick={toggle}
+              title={expanded ? "收起" : "在对话内查看"}
+              className={BTN}
+            >
+              {toggleLabel}
+            </button>
+          ) : (
+            isPreviewable && (
+              <a
                 href={previewSrc}
                 target="_blank"
                 rel="noreferrer"
+                title="新标签页预览"
+                className={BTN}
               >
-                {toggleLabel}
-              </Button>
-            </Tooltip>
-          ) : canInline ? (
-            <Tooltip title={expanded ? "收起" : "在对话内查看"}>
-              <Button size="small" onClick={toggle}>
-                {toggleLabel}
-              </Button>
-            </Tooltip>
-          ) : (
-            isPreviewable && (
-              <Tooltip title="新标签页预览">
-                <Button
-                  size="small"
-                  icon={<EyeOutlined />}
-                  href={previewSrc}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  预览
-                </Button>
-              </Tooltip>
+                <Eye className="h-3 w-3" />
+                预览
+              </a>
             )
           )}
-          <Tooltip title="下载">
-            <Button
-              size="small"
-              icon={<DownloadOutlined />}
-              href={downloadSrc}
-            >
-              下载
-            </Button>
-          </Tooltip>
+          <a href={downloadSrc} title="下载" className={BTN}>
+            <Download className="h-3 w-3" />
+            下载
+          </a>
           {local && (
-            <Tooltip title="在文件管理器打开所在目录">
-              <Button
-                size="small"
-                icon={<FolderOpenOutlined />}
-                loading={revealing}
-                onClick={reveal}
-              />
-            </Tooltip>
+            <button
+              type="button"
+              title="在文件管理器打开所在目录"
+              disabled={revealing}
+              onClick={reveal}
+              className={ICON_BTN}
+            >
+              {revealing ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <FolderOpen className="h-3 w-3" />
+              )}
+            </button>
           )}
         </div>
       </div>
@@ -297,14 +304,22 @@ export function ArtifactCard({
             </span>
             <div style={{ display: "flex", gap: 4 }}>
               {kind === "markdown" && (
-                <Button size="small" onClick={() => setShowSource((v) => !v)}>
+                <button
+                  type="button"
+                  onClick={() => setShowSource((v) => !v)}
+                  className={BTN}
+                >
                   {showSource ? "预览" : "源码"}
-                </Button>
+                </button>
               )}
               {isMonacoKind(kind) && gitChanges && !showSource && (
-                <Button size="small" onClick={() => setAnno((a) => !a)}>
+                <button
+                  type="button"
+                  onClick={() => setAnno((a) => !a)}
+                  className={BTN}
+                >
                   {anno ? "隐藏改动标注" : "显示改动标注"}
-                </Button>
+                </button>
               )}
             </div>
           </div>
@@ -332,10 +347,12 @@ export function ArtifactCard({
                 <Editor
                   height="360px"
                   language={lang}
+                  theme={KEEPER_THEME}
+                  beforeMount={applyKeeperTheme}
                   value={codeText ?? ""}
                   options={MONACO_OPTIONS}
                 />
-                <div style={{ padding: "4px 8px", fontSize: 12, color: "#888" }}>
+                <div style={{ padding: "4px 8px", fontSize: 12, color: "var(--kp-text-muted)" }}>
                   不在 git 仓库内，仅展示文件内容
                 </div>
               </div>
@@ -343,6 +360,8 @@ export function ArtifactCard({
               <DiffEditor
                 height="360px"
                 language={lang}
+                theme={KEEPER_THEME}
+                beforeMount={applyKeeperTheme}
                 original={diffOriginal}
                 modified={diffModified}
                 options={{ ...MONACO_OPTIONS, renderSideBySide: false }}
@@ -351,6 +370,8 @@ export function ArtifactCard({
               <Editor
                 height="360px"
                 language={lang}
+                theme={KEEPER_THEME}
+                beforeMount={applyKeeperTheme}
                 value={codeText ?? diffModified}
                 options={MONACO_OPTIONS}
               />

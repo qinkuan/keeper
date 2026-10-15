@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>男人下 100 层 - Canvas 动作版</title>
+    <style>
+        body {
+            background-color: #1a1a1a; /* 深色背景，更有压迫感 */
+            color: white;
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 600px;
+            height: 800px;
+            background-color: #2d3436; /* 混凝土灰 */
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(255, 128, 0, 0.5);
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 18px;
+            text-shadow: 0 2px 4px black;
+            pointer-events: none; /* 让鼠标穿透，不影响点击 */
+        }
+
+        .bar-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            height: 20px;
+            background: #333;
+            border-radius: 10px;
+        }
+
+        #hp-bar {
+            width: 100%;
+            height: 100%;
+            background-color: #e74c3c; /* 红色 */
+            transition: width 0.1s linear;
+        }
+
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            font-size: 32px;
+            font-weight: bold;
+            display: none;
+        }
+
+        #game-over-text {
+            color: #e74c3c;
+            font-size: 24px;
+        }
+
+        #win-text {
+            color: #2ecc71;
+            font-size: 24px;
+        }
+
+        /* 楼层指示器 */
+        .floor-marker {
+            position: absolute;
+            right: 20px;
+            top: 25%; /* 初始位置 */
+            width: 30px;
+            text-align: center;
+            opacity: 0.7;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="canvas" width="600" height="800"></canvas>
+
+    <div id="ui-layer">
+        <div>📍 当前楼层：<span id="floor-display">1</span>/100</div>
+        <div style="margin-top: 10px;">💪 下坠速度：<span id="speed-display">50</span></div>
+        <div style="margin-top: 5px; font-size: 14px; color: #bdc3c7;">点击屏幕跳跃/加速躲避</div>
+    </div>
+
+    <div class="bar-container" style="bottom: 20px; left: 60px; right: 20px;">
+        <div id="hp-bar" style="width: 100%; background-color: #e74c3c;"></div>
+    </div>
+
+    <div id="message">
+        <span id="game-over-text">⚠️ 撞上了！</span><br>
+        <button onclick="startGame()" style="padding: 10px 20px; font-size: 18px; cursor: pointer;">准备就绪</button>
+    </div>
+
+    <!-- 模拟楼层标记 -->
+    <!-- JS 会动态生成这些线，简化 HTML -->
+    <div id="floor-marker" style="top: 50%; left: -20px; opacity: 0.3">第 1 层</div>
+</div>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const floorDisplay = document.getElementById('floor-display');
+    const speedDisplay = document.getElementById('speed-display');
+
+    // 游戏状态
+    let gameState = {
+        isRunning: false,
+        player: null,
+        obstacles: [],
+        particles: [],
+        floorLevel: 1,
+        maxFloors: 100,
+        startTime: null,
+        speed: 50, // 下落速度，随着时间增加
+        jumpCooldown: 0,
+        score: 0,
+        health: 100
+    };
+
+    // 初始设置
+    function init() {
+        window.addEventListener('mousedown', startGame);
+        canvas.addEventListener('mousemove', movePlayer);
+
+        drawFloorLines(); // 绘制楼层线背景
+
+        // 循环游戏逻辑
+        requestAnimationFrame(gameLoop);
+    }
+
+    function drawFloorLines() {
+        for (let i = 1; i <= gameState.maxFloors; i++) {
+            let height = 800 - ((i / 10) * 100); // 简化绘制，让线分布在不同位置
+            if(height < 20) continue;
+            let top = height + (Math.random() * 50); // 简单的随机位移制造视觉感
+            let left = 20 + i % 3 * 40; // 稍微错开一点
+
+            ctx.beginPath();
+            ctx.moveTo(10, top);
+            ctx.lineTo(590, top);
+            ctx.strokeStyle = `rgba(176, 176, 176, ${Math.max(0.2, 1 - i/100)})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 标注楼层数字
+            ctx.fillStyle = '#999';
+            ctx.font = '16px Arial';
+            ctx.fillText(i.toString(), 15 + (i % 4) * 45, top + 10);
+        }
+    }
+
+    function startGame() {
+        if(gameState.isRunning) return;
+
+        gameState.health = 100;
+        gameState.floorLevel = 1;
+        gameState.score = 0;
+        gameState.speed = 50;
+        gameState.player = { x: 100, y: -50, width: 30, height: 40, dx: 0, dy: 0 };
+        gameState.obstacles = [];
+        gameState.particles = [];
+
+        gameState.isRunning = true;
+        document.getElementById('message').style.display = 'none';
+        floorDisplay.innerText = gameState.floorLevel;
+    }
+
+    // 移动逻辑
+    canvas.addEventListener('mousemove', function(e) {
+        if(!gameState.isRunning) return;
+        let rect = canvas.getBoundingClientRect();
+        let x = e.clientX - rect.left;
+        // 玩家 X 轴受限制于屏幕宽度（左右跳跃）
+        gameState.player.x = Math.max(0, Math.min(gameState.maxFloors * 2 - 50, x));
+    });
+
+    // 键盘/点击操作
+    document.addEventListener('mousedown', (e) => {
+        if (!gameState.isRunning) return;
+        // 跳跃动作改变 Y 轴速度（向上）
+        gameState.player.dy = -30;
+        createParticles(gameState.player.x, gameState.player.y);
+    });
+
+    function createParticles(x, y) {
+        for (let i = 0; i < 5; i++) {
+            gameState.particles.push({
+                x: x + 20,
+                y: y + 20,
+                dx: (Math.random() - 0.5) * 4,
+                dy: (Math.random() - 1) * 4,
+                life: 20,
+                color: '#3498db'
+            });
+        }
+    }
+
+    function gameOver(isWin = false) {
+        gameState.isRunning = false;
+        document.getElementById('message').style.display = 'block';
+
+        let textContent = "";
+        if (gameState.floorLevel >= 100) {
+            textContent = "🏆 <span style='color:#f1c40f'>恭喜！男人下完 100 层！</span>";
+        } else {
+            textContent = "💀 生命归零！<br>当前楼层：" + gameState.floorLevel;
+        }
+
+        document.querySelector('#message > span').innerHTML = textContent;
+    }
+
+    function updatePhysics() {
+        // 更新玩家 Y 轴位置（重力）
+        if (gameState.player) {
+            gameState.player.y += gameState.speed; // 基础下落
+            gameState.player.dy += gameState.speed * 0.05; // 持续加速度
+
+            // 简单的弹跳效果
+            if(gameState.player.dx > 0) gameState.player.x -= gameState.player.dx * 0.1;
+            if(gameState.player.dx < 0) gameState.player.x += gameState.player.dx * 0.1;
+        }
+
+        // 障碍物生成逻辑
+        if (Math.random() < 0.05) { // 随机生成
+            let floor = Math.floor(Math.random() * 5); // 生成楼层索引
+            let obsY = -30 - (floor * 10); // 障碍物位置
+            gameState.obstacles.push({ x: -20, y: obsY, width: 40, height: 40 });
+        }
+
+        // 检测障碍物碰撞
+        for (let i = 0; i < gameState.obstacles.length; i++) {
+            let obs = gameState.obstacles[i];
+            let p = gameState.player;
+
+            if (p && p.x > obs.x - 10 && p.x + 30 < obs.x + 40 &&
+                p.y > obs.y && p.y + 40 < obs.y + 40) {
+
+                // 碰撞处理
+                createParticles(p.x, p.y);
+                gameState.health -= 25;
+
+                if (gameState.health <= 0) {
+                    gameOver(false);
+                }
+                return;
+            }
+        }
+
+        // 更新粒子
+        for(let i=0; i<gameState.particles.length; i++) {
+            let p = gameState.particles[i];
+            p.x += p.dx;
+            p.y += p.dy;
+            p.life -= 2;
+        }
+
+        // 清理粒子
+        gameState.particles = gameState.particles.filter(p => p.life > 0);
+
+        // 更新楼层
+        if (gameState.isRunning && Math.floor(gameState.player.y) % 10 === 0) {
+            gameState.floorLevel++;
+            floorDisplay.innerText = gameState.floorLevel;
+
+            // 简单的速度变化（每 10 层变快）
+            if (gameState.floorLevel > 5) gameState.speed *= 1.2;
+        }
+
+        // 胜利条件：到达第 100 层
+        if (gameState.floorLevel >= 100 && !isGameOver()) {
+            gameOver(true);
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 绘制背景（城市/地面）
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, gameState.player.y + 60, 500, 740); // 地板
+
+        // 绘制玩家 (男人)
+        if (gameState.player) {
+            ctx.fillStyle = '#3498db';
+            ctx.fillRect(gameState.player.x, gameState.player.y, 30, 40);
+
+            // 简单绘制头发/眼镜
+            ctx.fillStyle = '#2c3e50';
+            ctx.beginPath();
+            ctx.arc(gameState.player.x + 15, gameState.player.y - 5, 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 绘制障碍物
+        for(let obs of gameState.obstacles) {
+            ctx.fillStyle = '#e74c3c';
+            ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+            // 障碍物内部纹理
+            ctx.strokeStyle = 'white';
+            ctx.strokeRect(obs.x, obs.y, obs.width, obs.height);
+        }
+
+        // 绘制粒子
+        for(let p of gameState.particles) {
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3 * (p.life/20), 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        // 更新速度 UI
+        let speedDisplayVal = Math.floor(Math.min(100, gameState.speed));
+        if(speedDisplayVal < 20) {
+             document.getElementById('speed-display').innerText = "50";
+        } else {
+            document.getElementById('speed-display').innerText = "100"; // 游戏里速度太快直接显示满速或当前值
+        }
+    }
+
+    function isGameOver() {
+        return gameState.health <= 0;
+    }
+
+    function gameLoop() {
+        draw();
+        updatePhysics();
+        requestAnimationFrame(gameLoop);
+    }
+
+    init(); // 启动游戏
+
+</script>
+</body>
+</html>

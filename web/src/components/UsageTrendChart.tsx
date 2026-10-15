@@ -1,12 +1,15 @@
 import { useState } from "react";
-import { Empty, Segmented, Typography } from "antd";
+import { SegmentedControl } from "./ui/Segmented";
+import { cn } from "../lib/utils";
 
 import type { UsagePoint, UsageTimeseries } from "../api/types";
 import { fmtCost, fmtDuration, fmtTokens } from "./UsageTag";
 
-const C_IN = "#13c2c2"; // 输入 token
-const C_OUT = "#52c41a"; // 输出 token
-const C_BAR = "#1677ff"; // 成本 / 调用数
+/* 图表三色：走 CSS 变量（theme.css 里浅/深两套）。原来写死的是 antd 老色板
+   （青 / 绿 / 蓝），既不属于现在的品牌色，深色主题下也会变成刺眼的一组。 */
+const C_IN = "var(--kp-chart-1)"; // 输入 token
+const C_OUT = "var(--kp-chart-2)"; // 输出 token
+const C_BAR = "var(--kp-chart-3)"; // 成本 / 调用数
 
 type Metric = "tokens" | "cost" | "calls";
 
@@ -52,7 +55,11 @@ export default function UsageTrendChart({
   const points = data.points ?? [];
 
   if (points.length === 0) {
-    return <Empty description="该时间范围内没有数据" />;
+    return (
+      <div className="py-6 text-center text-[13px] text-ink-faint">
+        该时间范围内没有数据
+      </div>
+    );
   }
 
   const max = Math.max(1, ...points.map((p) => valueOf(p, metric)));
@@ -60,21 +67,21 @@ export default function UsageTrendChart({
 
   return (
     <div>
-      <Segmented
-        size="small"
+      <SegmentedControl
         value={metric}
-        onChange={(v) => setMetric(String(v) as Metric)}
+        onChange={(v) => setMetric(v as Metric)}
         options={[
           { label: "Token", value: "tokens" },
           { label: "成本", value: "cost" },
           { label: "调用次数", value: "calls" },
         ]}
+        className="mb-2.5"
       />
 
       {noCost ? (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <span className="text-[12px] text-ink-muted">
           未配单价，成本不可见（去「模型管理 → 单价」配置）
-        </Typography.Text>
+        </span>
       ) : null}
 
       <div
@@ -85,7 +92,8 @@ export default function UsageTrendChart({
           height: 130,
           marginTop: 10,
           padding: "0 2px",
-          borderBottom: "1px solid #f0f0f0",
+          // 底线用主题变量：写死浅灰在深色下会变成一条刺眼的亮线
+          borderBottom: "1px solid var(--kp-border-soft)",
         }}
       >
         {points.map((p) => {
@@ -96,6 +104,7 @@ export default function UsageTrendChart({
             <div
               key={p.bucket}
               title={titleOf(p, currency)}
+              className="group/bar"
               style={{
                 flex: 1,
                 minWidth: 4,
@@ -112,6 +121,10 @@ export default function UsageTrendChart({
                     display: "flex",
                     flexDirection: "column",
                     justifyContent: "flex-end",
+                    /* 顶部圆角 2px：纯方柱在细柱宽下显得生硬 */
+                    borderRadius: "2px 2px 0 0",
+                    overflow: "hidden",
+                    transition: "filter 0.15s",
                   }}
                 >
                   {/* 上：输出；下：输入 */}
@@ -129,12 +142,24 @@ export default function UsageTrendChart({
                   />
                 </div>
               ) : (
-                <div style={{ height: `${h}%`, background: C_BAR }} />
+                <div
+                  style={{
+                    height: `${h}%`,
+                    background: C_BAR,
+                    borderRadius: "2px 2px 0 0",
+                    transition: "filter 0.15s",
+                  }}
+                />
               )}
             </div>
           );
         })}
       </div>
+
+      {/* hover 提亮整根柱子：纯 CSS 实现，不为这点交互上状态 */}
+      <style>{`
+        .group\\/bar:hover > div { filter: brightness(1.12) saturate(1.05); }
+      `}</style>
 
       <div style={{ display: "flex", gap: 3, marginTop: 4, padding: "0 2px" }}>
         {points.map((p, i) => (
@@ -144,7 +169,7 @@ export default function UsageTrendChart({
               flex: 1,
               minWidth: 4,
               fontSize: 10,
-              color: "#bfbfbf",
+              color: "var(--kp-text-muted)",
               textAlign: "center",
               overflow: "hidden",
             }}
@@ -158,7 +183,7 @@ export default function UsageTrendChart({
       <div
         style={{
           fontSize: 11,
-          color: "#bfbfbf",
+          color: "var(--kp-text-muted)",
           marginTop: 6,
           lineHeight: 1.7,
         }}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Empty, Modal, Spin, Tag, Typography } from "antd";
+import { Loader2 } from "lucide-react";
 
 import { apiMessageTimeline } from "../api/client";
 import type {
@@ -8,6 +8,8 @@ import type {
   TimelineStep,
 } from "../api/types";
 import { fmtCost, fmtDuration, fmtTokens } from "./UsageTag";
+import { Modal } from "./ui/Modal";
+import { cn } from "../lib/utils";
 
 const C_LLM = "#1677ff"; // LLM 思考耗时
 const C_TOOL = "#fa8c16"; // 工具执行耗时
@@ -25,14 +27,8 @@ function Bar({
   const total = parts.reduce((s, p) => s + p.v, 0);
   return (
     <div
-      style={{
-        width: `${Math.max(width, 0.5)}%`,
-        display: "flex",
-        height: 8,
-        borderRadius: 4,
-        overflow: "hidden",
-        background: "#f5f5f5",
-      }}
+      style={{ width: `${Math.max(width, 0.5)}%` }}
+      className="flex h-2 overflow-hidden rounded bg-surface-soft"
     >
       {total > 0 &&
         parts
@@ -48,19 +44,25 @@ function Bar({
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+function Stat({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: string;
+  color?: string;
+}) {
   return (
-    <div
-      style={{
-        flex: 1,
-        minWidth: 88,
-        background: "#fafafa",
-        borderRadius: 8,
-        padding: "8px 10px",
-      }}
-    >
-      <div style={{ fontSize: 11, color: "#8c8c8c" }}>{label}</div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: color || "#262626" }}>
+    <div className="min-w-[88px] flex-1 rounded-lg bg-surface px-2.5 py-2">
+      <div className="text-[11px] text-ink-muted">{label}</div>
+      <div
+        className={cn(
+          "text-[15px] font-semibold",
+          !color && "text-ink-strong"
+        )}
+        style={color ? { color } : undefined}
+      >
         {value}
       </div>
     </div>
@@ -69,22 +71,33 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
 
 function Legend({ color, text }: { color: string; text: string }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+    <span className="inline-flex items-center gap-1">
       <span
-        style={{
-          width: 10,
-          height: 10,
-          borderRadius: 2,
-          background: color,
-          display: "inline-block",
-        }}
+        style={{ background: color }}
+        className="inline-block h-2.5 w-2.5 rounded-sm"
       />
       {text}
     </span>
   );
 }
 
-function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTok: number }) {
+/** 高亮用的状态色：空转（orange）/ 重取（purple）/ 压缩（green） */
+const ROW_TONE = {
+  compact:
+    "border-l-[3px] border-emerald-500 bg-emerald-500/[0.07] pl-1.5 py-0.5 rounded",
+  dup: "border-l-[3px] border-orange-500 bg-orange-500/[0.07] pl-1.5 py-0.5 rounded",
+  read: "border-l-[3px] border-purple-500 bg-purple-500/[0.07] pl-1.5 py-0.5 rounded",
+} as const;
+
+function StepRow({
+  s,
+  maxDur,
+  maxTok,
+}: {
+  s: TimelineStep;
+  maxDur: number;
+  maxTok: number;
+}) {
   const dur = s.duration_ms || 0;
   const llm = s.llm_duration_ms || 0;
   const tool = s.tool_duration_ms || 0;
@@ -93,101 +106,96 @@ function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTo
   const outTok = u?.completion_tokens || 0;
   // 具体内容（思考 / 工具入参 与 工具返回）默认收起，点开才展开——内容可能很长
   const [open, setOpen] = useState<"in" | "out" | null>(null);
-  // 空转 / 追回抖动的步：整行高亮 + 左侧色条，扫一眼就知道卡在哪一步
-  const flagged = !!s.dup || !!s.read_repeat;
   // 上下文压缩：不是步骤，但确实花了一次 LLM 调用的钱与时间——必须在时间线上
   // 看得见，否则只能靠 dump 文件名猜「哪一步压了」
   const isCompact = s.virtual === "compact";
+  // 空转 / 追回抖动的步：整行高亮 + 左侧色条，扫一眼就知道卡在哪一步
+  const tone = isCompact
+    ? ROW_TONE.compact
+    : s.dup
+    ? ROW_TONE.dup
+    : s.read_repeat
+    ? ROW_TONE.read
+    : "";
+
   return (
-    <div
-      style={{
-        marginBottom: 12,
-        ...(isCompact
-          ? {
-              background: "#f6ffed",
-              borderLeft: "3px solid #52c41a",
-              paddingLeft: 6,
-              paddingTop: 2,
-              paddingBottom: 2,
-              borderRadius: 4,
-            }
-          : flagged
-          ? {
-              background: s.dup ? "#fff7e6" : "#f9f0ff",
-              borderLeft: `3px solid ${s.dup ? "#fa8c16" : "#722ed1"}`,
-              paddingLeft: 6,
-              paddingTop: 2,
-              paddingBottom: 2,
-              borderRadius: 4,
-            }
-          : {}),
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          fontSize: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <span style={{ color: "#bfbfbf", width: 22 }}>
+    <div className={cn("mb-3", tone)}>
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <span className="w-[22px] text-ink-faint">
           {s.seq != null ? `#${s.seq}` : ""}
         </span>
+
         {isCompact ? (
-          <Tag color="green" style={{ marginInlineEnd: 0 }}>
+          <span className="rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-emerald-600 dark:text-emerald-300">
             上下文压缩
-          </Tag>
+          </span>
         ) : (
-          <Tag color={s.is_tool ? "orange" : "blue"} style={{ marginInlineEnd: 0 }}>
+          <span
+            className={cn(
+              "rounded-md px-1.5 py-0.5 text-[11px] leading-4",
+              s.is_tool
+                ? "bg-orange-500/15 text-orange-600 dark:text-orange-300"
+                : "bg-blue-500/15 text-blue-600 dark:text-blue-300"
+            )}
+          >
             {s.is_tool ? s.kind : "思考"}
-          </Tag>
+          </span>
         )}
+
         {s.dup && (
-          <Tag color="volcano" style={{ marginInlineEnd: 0 }}>
+          <span className="rounded-md bg-orange-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-orange-600 dark:text-orange-300">
             空转 ×{s.dup.nth}
             {s.dup.first_seq != null ? `（同 #${s.dup.first_seq} 步）` : ""}
-          </Tag>
+          </span>
         )}
         {s.read_repeat && (
-          <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+          <span className="rounded-md bg-purple-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-purple-600 dark:text-purple-300">
             重取同一块
-          </Tag>
+          </span>
         )}
-        <span style={{ color: "#595959" }}>
+
+        <span className="text-ink">
           {fmtDuration(dur)}
-          {tool > 0 &&
-            `（LLM ${fmtDuration(llm)} · 工具 ${fmtDuration(tool)}）`}
+          {tool > 0 && `（LLM ${fmtDuration(llm)} · 工具 ${fmtDuration(tool)}）`}
         </span>
-        <span style={{ color: "#8c8c8c" }}>
+        <span className="text-ink-muted">
           模型输入 {fmtTokens(inTok)} · 模型输出 {fmtTokens(outTok)}
         </span>
         {s.output_size > 0 && (
-          <span style={{ color: s.truncated ? "#fa8c16" : "#8c8c8c" }}>
+          <span
+            className={cn(
+              s.truncated
+                ? "text-orange-600 dark:text-orange-300"
+                : "text-ink-muted"
+            )}
+          >
             工具返回 {fmtTokens(s.output_size)}
             {s.truncated && "（已缩减）"}
           </span>
         )}
+
         {s.input_text && (
-          <Typography.Link
-            style={{ fontSize: 12 }}
+          <button
+            type="button"
             onClick={() => setOpen(open === "in" ? null : "in")}
+            className="text-[12px] text-brand transition-opacity hover:opacity-75"
           >
             {open === "in" ? "收起" : "思考"}
-          </Typography.Link>
+          </button>
         )}
         {s.output_text && (
-          <Typography.Link
-            style={{ fontSize: 12 }}
+          <button
+            type="button"
             onClick={() => setOpen(open === "out" ? null : "out")}
+            className="text-[12px] text-brand transition-opacity hover:opacity-75"
           >
             {open === "out" ? "收起" : "结果"}
-          </Typography.Link>
+          </button>
         )}
       </div>
-      <div style={{ display: "flex", gap: 10, marginTop: 4, paddingLeft: 30 }}>
-        <div style={{ flex: 1 }}>
+
+      <div className="mt-1 flex gap-2.5 pl-[30px]">
+        <div className="flex-1">
           <Bar
             width={(dur / maxDur) * 100}
             parts={[
@@ -196,7 +204,7 @@ function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTo
             ]}
           />
         </div>
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <Bar
             width={((inTok + outTok) / maxTok) * 100}
             parts={[
@@ -206,24 +214,9 @@ function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTo
           />
         </div>
       </div>
+
       {open && (
-        <pre
-          style={{
-            marginTop: 6,
-            marginBottom: 0,
-            marginLeft: 30,
-            padding: 10,
-            background: "#fafafa",
-            border: "1px solid #f0f0f0",
-            borderRadius: 6,
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxHeight: 320,
-            overflow: "auto",
-          }}
-        >
+        <pre className="ml-[30px] mt-1.5 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-line-soft bg-surface p-2.5 font-mono text-[12px] leading-[1.6] text-ink">
           {open === "in" ? s.input_text : s.output_text}
         </pre>
       )}
@@ -231,12 +224,6 @@ function StepRow({ s, maxDur, maxTok }: { s: TimelineStep; maxDur: number; maxTo
   );
 }
 
-/**
- * 一轮用量的详情可视化：总览 + 每个 ReAct 步骤的「耗时分解 / token 分解」。
- *
- * 数据按需拉取（点开才请求），因此对历史消息同样有效——历史消息只带汇总，
- * 分步明细不存在消息里。
- */
 /**
  * 本轮的空转（重复调用）与追回抖动。
  *
@@ -249,41 +236,49 @@ function DuplicateSection({ d }: { d?: DuplicateCalls | null }) {
   const hasRead = !!rd && rd.calls > 0;
   const clean = d.duplicate_count === 0 && (!hasRead || rd.repeats === 0);
   return (
-    <div style={{ marginTop: 18 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-          重复调用 / 空转
-          <span style={{ fontWeight: 400, color: "#8c8c8c", marginLeft: 6 }}>
-            （上面时间线里被高亮的就是这几步）
-          </span>
-        </div>
+    <div className="mt-5">
+      <div className="mb-1.5 text-[13px] font-semibold text-ink-strong">
+        重复调用 / 空转
+        <span className="ml-1.5 font-normal text-ink-muted">
+          （上面时间线里被高亮的就是这几步）
+        </span>
+      </div>
+
       {d.total === 0 ? (
-        <div style={{ fontSize: 12, color: "#8c8c8c" }}>这一轮没有工具调用记录。</div>
+        <div className="text-[12px] text-ink-muted">
+          这一轮没有工具调用记录。
+        </div>
       ) : clean ? (
-        <div style={{ fontSize: 12, color: "#52c41a" }}>
+        <div className="text-[12px] text-emerald-600 dark:text-emerald-300">
           共 {d.total} 次工具调用，没有发现空转。
         </div>
       ) : (
-        <div style={{ fontSize: 12, lineHeight: 1.9 }}>
+        <div className="text-[12px] leading-[1.9] text-ink">
           <div>
             共 {d.total} 次工具调用，其中{" "}
             <b style={{ color: C_TOOL }}>{d.duplicate_count} 次是重复</b>
             （同工具 + 同参数）· 空转率{" "}
             {(d.duplicate_rate * 100).toFixed(1)}%
           </div>
+
           {d.groups.length > 0 && (
-            <div style={{ marginTop: 4, color: "#595959" }}>
+            <div className="mt-1 text-ink-muted">
               {d.groups.map((g, i) => (
                 <div key={i}>
-                  <code>{g.tool}</code> ×{g.count}
+                  <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                    {g.tool}
+                  </code>{" "}
+                  ×{g.count}
                   {g.args_hash ? (
-                    <span style={{ color: "#bfbfbf" }}> · 入参 #{g.args_hash}</span>
+                    <span className="text-ink-faint"> · 入参 #{g.args_hash}</span>
                   ) : null}
                 </div>
               ))}
             </div>
           )}
+
           {hasRead ? (
-            <div style={{ marginTop: 4 }}>
+            <div className="mt-1">
               追回（read）：{rd.calls} 次，重复展开同一块 {rd.repeats} 次（
               {(rd.repeat_rate * 100).toFixed(1)}%）
               {rd.repeats > 0 ? (
@@ -300,6 +295,12 @@ function DuplicateSection({ d }: { d?: DuplicateCalls | null }) {
   );
 }
 
+/**
+ * 一轮用量的详情可视化：总览 + 每个 ReAct 步骤的「耗时分解 / token 分解」。
+ *
+ * 数据按需拉取（点开才请求），因此对历史消息同样有效——历史消息只带汇总，
+ * 分步明细不存在消息里。
+ */
 export default function UsageDetailModal({
   messageId,
   open,
@@ -340,18 +341,24 @@ export default function UsageDetailModal({
   const sum = data?.summary;
 
   return (
-    <Modal open={open} onCancel={onClose} footer={null} width={880} title="本轮用量详情">
+    <Modal open={open} onClose={onClose} width={880} title="本轮用量详情">
       {loading ? (
-        <div style={{ textAlign: "center", padding: 48 }}>
-          <Spin />
+        <div className="flex items-center justify-center py-12 text-ink-muted">
+          <Loader2 className="h-5 w-5 animate-spin" />
         </div>
       ) : !data || !sum ? (
-        <Empty description="没有查到这一轮的用量明细" />
+        <div className="py-12 text-center text-[13px] text-ink-faint">
+          没有查到这一轮的用量明细
+        </div>
       ) : (
         <div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="flex flex-wrap gap-2">
             <Stat label="模型输入" value={fmtTokens(sum.prompt_tokens)} color={C_IN} />
-            <Stat label="模型输出" value={fmtTokens(sum.completion_tokens)} color={C_OUT} />
+            <Stat
+              label="模型输出"
+              value={fmtTokens(sum.completion_tokens)}
+              color={C_OUT}
+            />
             <Stat
               label="缓存命中"
               value={
@@ -369,32 +376,29 @@ export default function UsageDetailModal({
               />
             ) : null}
             <Stat label="LLM 调用" value={`${sum.calls} 次`} />
-            <Stat label="LLM 耗时" value={fmtDuration(sum.duration_ms)} color={C_LLM} />
+            <Stat
+              label="LLM 耗时"
+              value={fmtDuration(sum.duration_ms)}
+              color={C_LLM}
+            />
             <Stat label="成本" value={fmtCost(sum.cost, sum.cost_currency)} />
           </div>
 
           {steps.length > 0 && (
             <>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 16,
-                  fontSize: 11,
-                  color: "#8c8c8c",
-                  margin: "16px 0 8px",
-                }}
-              >
-                <span style={{ color: "#595959" }}>耗时分解</span>
+              <div className="mb-2 mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-ink-muted">
+                <span className="text-ink">耗时分解</span>
                 <Legend color={C_LLM} text="LLM" />
                 <Legend color={C_TOOL} text="工具" />
-                <span style={{ marginLeft: 16, color: "#595959" }}>token 分解</span>
+                <span className="ml-4 text-ink">token 分解</span>
                 <Legend color={C_IN} text="输入" />
                 <Legend color={C_OUT} text="输出" />
               </div>
-              <div style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 8 }}>
+
+              <div className="mb-2 text-[12px] text-ink-muted">
                 共 {realSteps.length} 步
                 {steps.length > realSteps.length && (
-                  <span style={{ color: "#52c41a" }}>
+                  <span className="text-emerald-600 dark:text-emerald-300">
                     {" "}
                     · 另有 {steps.length - realSteps.length} 次上下文压缩
                   </span>
@@ -407,6 +411,7 @@ export default function UsageDetailModal({
                   </span>
                 )}
               </div>
+
               <div>
                 {steps.map((s, i) => (
                   // 压缩节点 step_id 为 null，不能拿它当 key（多个压缩节点会撞 key）
@@ -418,12 +423,13 @@ export default function UsageDetailModal({
                   />
                 ))}
               </div>
-              <div
-                style={{ fontSize: 11, color: "#bfbfbf", marginTop: 4, lineHeight: 1.7 }}
-              >
+
+              <div className="mt-1 text-[11px] leading-[1.7] text-ink-faint">
                 条形长度 = 该步相对最长一步的比例；左条为耗时（LLM/工具），右条为
                 token（输入/输出）。橙色 = 空转步，紫色 = 重取同一块，
-                <span style={{ color: "#52c41a" }}>绿色 = 上下文压缩</span>
+                <span className="text-emerald-600 dark:text-emerald-300">
+                  绿色 = 上下文压缩
+                </span>
                 （不是步骤，但是一次真实的 LLM 调用）。
                 <br />
                 「模型输入 / 模型输出」是<b>大模型调用</b>的真实 token；
@@ -432,8 +438,9 @@ export default function UsageDetailModal({
               </div>
             </>
           )}
+
           {steps.length === 0 && (
-            <div style={{ fontSize: 12, color: "#8c8c8c", marginTop: 12 }}>
+            <div className="mt-3 text-[12px] text-ink-muted">
               这一轮没有分步记录（可能是纯对话，未走 ReAct 工具循环）。
             </div>
           )}

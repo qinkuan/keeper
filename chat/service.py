@@ -60,11 +60,13 @@ def _guess_mime(name: str) -> str:
 
 from ..peer import PeerService
 from ..agent.executor import AgentExecutor
-from ..agent.keeper import get_keeper
+from ..agent.keeper import resolve_for_chat
 from .context import (
     WorkspaceCtx,
+    current_memory_day,
     current_task_id,
     set_agent,
+    set_memory_day,
     set_message_id,
     set_session_id,
     set_workspace,
@@ -121,6 +123,30 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
     return WorkspaceCtx(root=root, read_only=read_only, agent_space=agent_space)
+
+
+async def resolve_memory_day(session_id: Optional[str]) -> str:
+    """解析本会话的记忆作用域日期键（``YYYY-MM-DD``）。
+
+    取**会话创建那天**，不是"这一轮是哪天"：一个会话的记忆在它一生中固定落在同一个
+    目录里。理由是跨零点的长会话——若按"每轮当天"分段，23:00 开的话到 01:00 检索
+    就查不到自己半小时前说过的话，这在对话中途表现为"突然失忆"，比跨会话失忆更难解释。
+
+    会话行取不到（刚创建还没落库、或已被删）→ 退回当天。
+    """
+    if not session_id:
+        return day_of()
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            row = await db.get(ChatSession, session_id)
+            if row is not None and getattr(row, "created_at", None) is not None:
+                return day_of(row.created_at)
+    except Exception as e:  # noqa: BLE001 记忆日期取不到不该挡住本轮对话
+        logger.debug("解析会话 %s 的记忆日期失败，按当天处理: %s", session_id, e)
+    return day_of()
+
+
 async def _default_space_id() -> Optional[str]:
     """取默认用户空间（``user_space.name == "default"``）的 id；没有就 None。
 
@@ -178,7 +204,10 @@ class ChatService:
     ) -> None:
         self.agent_id = agent_id
         self.context_id = context_id
-        self.agent = get_keeper(agent_id)
+        # 不指定 agent 时落到核心 agent（主脑），而不是"没有 agent"——
+        # 会话是一等公民，默认那个角色一直都在。点名要某个 agent 时才用它，
+        # 取不到就报错，不悄悄换人。见 keeper.agent.keeper.resolve_for_chat。
+        self.agent = resolve_for_chat(agent_id)
         # 执行侧：一轮怎么跑全在 AgentExecutor，agent 本身只提供能力
         self.executor = AgentExecutor(self.agent) if self.agent is not None else None
         self.session_id = session_id
@@ -192,6 +221,7 @@ class ChatService:
         self.upsert = upsert
         # 本会话要绑定的用户空间（新建会话时由 ask 传入；已有会话沿用库里的绑定）
         self.user_space_id: Optional[str] = None
+        # 本会话要绑定的模型预设（新建会话时由 ask 传入；已有会话沿用库里的绑定）。
 
     async def ask(
         self,
@@ -263,6 +293,10 @@ class ChatService:
         # 会读它来记账。用 ContextVar 而非闭包，是因为工具表是多会话共享的，
         # 闭包捕获会在并发时串台。
         set_session_id(session_id)
+        # 记忆作用域与 session_id 成对设置：recall / read 按天共享记忆，光有
+        # session_id 定位不到"今天"那个目录（见 resolve_memory_day）
+        set_memory_day(await resolve_memory_day(session_id))
+        # 模型跟随会话（必须在session 确定之后——那一级的模型存在会话行里）
         # 标记所属 agent：日志据此区分多 agent（A2A 入站等不经 HTTP 端点的
         # 路径也靠这里补上）
         set_agent(self.agent_id, getattr(self.agent, "name", None))
@@ -478,8 +512,10 @@ class ChatService:
 
         session_id = await self._ensure_session()
         set_session_id(session_id)
+        set_memory_day(await resolve_memory_day(session_id))
         set_agent(self.agent_id, getattr(self.agent, "name", None))
         set_workspace(await resolve_workspace(self.agent, session_id))
+        # 模型跟随会话：会话定了才知道该用哪个模型
 
         # 与 ask 同理：同一会话串行执行，避免续跑与新一轮（或另一次续跑）并发写坏
         # seq、或互相覆盖挂起状态。
@@ -564,7 +600,10 @@ class ChatService:
         """
         from ..memory import SessionMemory
 
-        sm = SessionMemory(session_id)
+        # 用上下文里已设好的日期锚（由 ask / _resume 与 set_session_id 成对设置）：
+        # 读侧必须与写侧（_write_turn）落在同一天，否则 recall 读 A、写 B，
+        # 表现为"明明存过了却检索不到"
+        sm = SessionMemory(session_id, day=current_memory_day())
         try:
             recs = sm.load_recent_turns(limit=limit, exclude_message_id=exclude_message_id)
             recent_ids = {r.get("message_id") for r in recs}
@@ -615,7 +654,8 @@ class ChatService:
         """
         from ..memory import SessionMemory, summarize_turn
 
-        sm = SessionMemory(session_id)
+        # 与读侧同一个日期锚（见 _build_recall_block 里的说明）
+        sm = SessionMemory(session_id, day=current_memory_day())
         try:
             # 1) 以锚点消息为归属，从 DB 读整条步骤链（含追问），按 step 升序
             factory = get_session_factory()

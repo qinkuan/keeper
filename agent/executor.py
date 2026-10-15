@@ -28,7 +28,6 @@ class AgentExecutor:
 
     典型用法：``await AgentExecutor(agent).chat(text, session_message_id=...)``
     """
-
     def __init__(self, agent: "KeeperAgent") -> None:
         self.agent = agent
 

@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Button, Space, Tooltip } from "antd";
-import { CheckCircleFilled, CloseCircleFilled, LoadingOutlined } from "@ant-design/icons";
+import { CircleCheck, CircleX, Loader2 } from "lucide-react";
 import { apiAgentEnv } from "../api/client";
 import type { MarketAgent } from "../api/types";
 import { meetsVersion } from "./AgentEnvDrawer";
@@ -41,30 +40,44 @@ export default function AgentEnvCell({
     const detected = q.data?.detected ?? { python: [], node: [] };
     const ok = deps.every((dep) =>
       (detected[dep.kind] ?? []).some((r) =>
-        meetsVersion(r.version, dep.min_version, dep.max_version),
-      ),
+        meetsVersion(r.version, dep.min_version, dep.max_version)
+      )
     );
     status = ok ? "ok" : "bad";
   }
 
   return (
-    <Space size={6}>
-      <Button size="small" type={loaded ? "link" : "default"} onClick={onOpen}>
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={onOpen}
+        className={
+          loaded
+            ? "text-[13px] text-brand transition-opacity hover:opacity-75"
+            : "inline-flex h-6 items-center rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+        }
+      >
         {loaded ? "配置" : "查看"}
-      </Button>
-      {status === "loading" && <LoadingOutlined style={{ color: "#999" }} />}
+      </button>
+
+      {status === "loading" && (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-ink-faint" />
+      )}
       {status === "ok" && (
-        <Tooltip
-          title={noDeps ? "未声明环境依赖，无需检查" : "本地环境满足该 Agent 的要求"}
+        <span
+          title={
+            noDeps ? "未声明环境依赖，无需检查" : "本地环境满足该 Agent 的要求"
+          }
+          className="inline-flex"
         >
-          <CheckCircleFilled style={{ color: "#3fa46a", fontSize: 16 }} />
-        </Tooltip>
+          <CircleCheck className="h-4 w-4 text-emerald-500" />
+        </span>
       )}
       {status === "bad" && (
-        <Tooltip title="本地环境不满足该 Agent 的要求">
-          <CloseCircleFilled style={{ color: "#e0685f", fontSize: 16 }} />
-        </Tooltip>
+        <span title="本地环境不满足该 Agent 的要求" className="inline-flex">
+          <CircleX className="h-4 w-4 text-red-500" />
+        </span>
       )}
-    </Space>
+    </span>
   );
 }

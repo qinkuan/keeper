@@ -1,26 +1,64 @@
 import { useEffect, useState } from "react";
 import {
-  Button,
-  Empty,
-  Input,
-  Modal,
-  Popconfirm,
-  Spin,
-  Tag,
-  Typography,
-  message,
-} from "antd";
-import {
-  DeleteOutlined,
-  EditOutlined,
-  FileOutlined,
-  FileAddOutlined,
-  FolderOutlined,
-  FolderOpenOutlined,
-  FolderAddOutlined,
-  RightOutlined,
-  PlusOutlined,
-} from "@ant-design/icons";
+  ChevronRight,
+  File as FileIcon,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Loader2,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import { Modal } from "./ui/Modal";
+import { Pill } from "./ui/Pill";
+import { ConfirmButton } from "./ui/Confirm";
+import { toast } from "./ui/Toast";
+import { cn } from "../lib/utils";
+
+/** 行内小操作按钮（图标态，hover 才显眼） */
+const ACT_BTN =
+  "flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-ink";
+const HEAD_BTN =
+  "flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface hover:text-ink disabled:cursor-not-allowed disabled:opacity-40";
+
+/** 弹窗底部按钮 */
+const CANCEL_BTN =
+  "h-8 rounded-lg border border-line px-4 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50";
+const OK_BTN =
+  "flex h-8 items-center gap-1.5 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50";
+
+/** 输入框：弹窗里新建文件 / 文件夹、重命名共用 */
+function NameInput({
+  value,
+  onChange,
+  onEnter,
+  placeholder,
+  icon,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onEnter: () => void;
+  placeholder: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    /* 输入组：聚焦给「边框变品牌 + 一圈淡外发光」，与 Form.tsx 的 inputCls 同一规格 */
+    <div className="mt-2 flex items-center gap-2 rounded-[7px] border border-line bg-panel px-2.5 py-1.5 shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-all duration-150 focus-within:border-brand focus-within:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]">
+      <span className="shrink-0 text-ink-faint">{icon}</span>
+      <input
+        autoFocus
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onEnter();
+        }}
+        className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint"
+      />
+    </div>
+  );
+}
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   apiWorkspaceTree,
@@ -121,23 +159,23 @@ function TreeNode({
         entry.path,
         name
       );
-      message.success("已重命名");
+      toast.success("已重命名");
       setRenameOpen(false);
       invalidateTree();
       onRenamed?.(entry.path, res.path);
     } catch (e: any) {
-      message.error(e?.message || "重命名失败");
+      toast.error(e?.message || "重命名失败");
     }
   };
 
   const handleDelete = async () => {
     try {
       await apiDeleteWorkspaceFile(agentId, sessionId, entry.path);
-      message.success("已删除");
+      toast.success("已删除");
       invalidateTree();
       onDeleted?.(entry.path);
     } catch (e: any) {
-      message.error(e?.message || "删除失败");
+      toast.error(e?.message || "删除失败");
     }
   };
 
@@ -147,6 +185,7 @@ function TreeNode({
 
   return (
     <div>
+      {/* 行高与缩进：缩进靠 paddingLeft 而不是嵌套盒子，深层目录也不会多出 DOM 层 */}
       <div
         onClick={() => {
           if (entry.is_dir) {
@@ -156,96 +195,67 @@ function TreeNode({
             onOpenFile(entry.path);
           }
         }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          paddingTop: 5,
-          paddingBottom: 5,
-          paddingRight: 10,
-          paddingLeft: 8 + depth * 14,
-          cursor: "pointer",
-          fontSize: 13,
-          background: selected ? "var(--kp-primary-soft)" : "transparent",
-        }}
-        onMouseEnter={(ev) => {
-          if (!selected) ev.currentTarget.style.background = "var(--kp-surface)";
-        }}
-        onMouseLeave={(ev) => {
-          ev.currentTarget.style.background = selected ? "var(--kp-primary-soft)" : "transparent";
-        }}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        className={cn(
+          "group flex cursor-pointer items-center gap-1.5 py-[5px] pr-2.5 text-[13px] transition-colors",
+          selected
+            ? "bg-brand/10"
+            : "hover:bg-black/[0.04] dark:hover:bg-white/5"
+        )}
       >
         {entry.is_dir ? (
-          <RightOutlined
-            style={{
-              fontSize: 10,
-              color: "#999",
-              transition: "transform .15s",
-              transform: expanded ? "rotate(90deg)" : "none",
-            }}
+          <ChevronRight
+            className={cn(
+              "h-2.5 w-2.5 shrink-0 text-ink-faint transition-transform",
+              expanded && "rotate-90"
+            )}
           />
         ) : (
-          <span style={{ width: 10, display: "inline-block" }} />
+          <span className="inline-block w-2.5 shrink-0" />
         )}
         {entry.is_dir ? (
           expanded ? (
-            <FolderOpenOutlined style={{ color: "#e8b84b" }} />
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-amber-500" />
           ) : (
-            <FolderOutlined style={{ color: "#e8b84b" }} />
+            <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
           )
         ) : (
-          <FileOutlined style={{ color: "var(--kp-primary)" }} />
+          <FileIcon className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
         )}
         <span
-          style={{
-            flex: 1,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
+          className={cn(
+            "min-w-0 flex-1 truncate",
+            selected ? "text-brand" : "text-ink"
+          )}
         >
           {entry.name}
         </span>
-        {color && (
-          <Tag
-            color={color}
-            style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "16px" }}
-          >
-            {gitLabel(entry.git)}
-          </Tag>
-        )}
+        {color && <Pill tone="muted">{gitLabel(entry.git)}</Pill>}
         {!readOnly && (
-          <>
-            <Button
-              size="small"
-              type="text"
-              icon={<EditOutlined />}
+          /* 操作按钮平时淡出，hover 或键盘聚焦时才显眼——文件树的主任务是浏览，
+             每行常驻两个图标会把名字挤短 */
+          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+            <button
+              type="button"
+              title="重命名"
               onClick={(ev) => {
                 ev.stopPropagation();
                 openRename();
               }}
-              title="重命名"
-            />
-            <Popconfirm
-              title="确认删除？"
-              description={entry.is_dir ? "将删除整个目录" : "将删除该文件"}
-              okText="删除"
-              okButtonProps={{ danger: true }}
-              onConfirm={(e2) => {
-                e2?.stopPropagation();
-                handleDelete();
-              }}
-              onCancel={(e2) => e2?.stopPropagation()}
+              className={ACT_BTN}
             >
-              <Button
-                size="small"
-                type="text"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={(ev) => ev.stopPropagation()}
-              />
-            </Popconfirm>
-          </>
+              <Pencil className="h-3 w-3" />
+            </button>
+            <ConfirmButton
+              resetKey={entry.path}
+              confirmText="删除"
+              cancelText="取消"
+              onConfirm={handleDelete}
+              className={cn(ACT_BTN, "hover:text-red-600 dark:hover:text-red-400")}
+            >
+              <Trash2 className="h-3 w-3" />
+            </ConfirmButton>
+          </span>
         )}
       </div>
 
@@ -253,25 +263,16 @@ function TreeNode({
         <div>
           {q.isLoading ? (
             <div
-              style={{
-                paddingTop: 4,
-                paddingBottom: 4,
-                paddingLeft: 8 + (depth + 1) * 14,
-                color: "#999",
-                fontSize: 12,
-              }}
+              style={{ paddingLeft: 8 + (depth + 1) * 14 }}
+              className="flex items-center gap-1.5 py-1 text-[12px] text-ink-faint"
             >
-              <Spin size="small" /> 加载中…
+              <Loader2 className="h-3 w-3 animate-spin" />
+              加载中…
             </div>
           ) : children.length === 0 ? (
             <div
-              style={{
-                paddingTop: 4,
-                paddingBottom: 4,
-                paddingLeft: 8 + (depth + 1) * 14,
-                color: "#999",
-                fontSize: 12,
-              }}
+              style={{ paddingLeft: 8 + (depth + 1) * 14 }}
+              className="py-1 text-[12px] text-ink-faint"
             >
               空目录
             </div>
@@ -299,19 +300,29 @@ function TreeNode({
       <Modal
         title="重命名"
         open={renameOpen}
-        onOk={handleRename}
-        onCancel={() => setRenameOpen(false)}
-        okText="确定"
-        cancelText="取消"
-        destroyOnClose
+        onClose={() => setRenameOpen(false)}
+        width={420}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setRenameOpen(false)}
+              className={CANCEL_BTN}
+            >
+              取消
+            </button>
+            <button type="button" onClick={handleRename} className={OK_BTN}>
+              确定
+            </button>
+          </>
+        }
       >
-        <Input
-          autoFocus
-          placeholder="新名称"
+        <NameInput
           value={renameName}
-          onChange={(e) => setRenameName(e.target.value)}
-          onPressEnter={handleRename}
-          prefix={<EditOutlined />}
+          onChange={setRenameName}
+          onEnter={handleRename}
+          placeholder="新名称"
+          icon={<Pencil className="h-3.5 w-3.5" />}
         />
       </Modal>
     </div>
@@ -349,51 +360,35 @@ function RootNode({
 
   return (
     <div>
+      {/* 空间根节点：比普通行更重（加粗 + 主色），一眼能分清"根在哪" */}
       <div
         onClick={() => {
           setExpanded((v) => !v);
           onSelectDir("");
         }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          paddingTop: 5,
-          paddingBottom: 5,
-          paddingRight: 10,
-          paddingLeft: 8,
-          cursor: "pointer",
-          fontSize: 13,
-          fontWeight: 600,
-          background: selected ? "var(--kp-primary-soft)" : "transparent",
-        }}
-        onMouseEnter={(ev) => {
-          if (!selected) ev.currentTarget.style.background = "var(--kp-surface)";
-        }}
-        onMouseLeave={(ev) => {
-          ev.currentTarget.style.background = selected ? "var(--kp-primary-soft)" : "transparent";
-        }}
+        className={cn(
+          "flex cursor-pointer items-center gap-1.5 py-[5px] pl-2 pr-2.5 text-[13px] font-semibold transition-colors",
+          selected
+            ? "bg-brand/10"
+            : "hover:bg-black/[0.04] dark:hover:bg-white/5"
+        )}
       >
-        <RightOutlined
-          style={{
-            fontSize: 10,
-            color: "#999",
-            transition: "transform .15s",
-            transform: expanded ? "rotate(90deg)" : "none",
-          }}
+        <ChevronRight
+          className={cn(
+            "h-2.5 w-2.5 shrink-0 text-ink-faint transition-transform",
+            expanded && "rotate-90"
+          )}
         />
         {expanded ? (
-          <FolderOpenOutlined style={{ color: "#e8b84b" }} />
+          <FolderOpen className="h-3.5 w-3.5 shrink-0 text-amber-500" />
         ) : (
-          <FolderOutlined style={{ color: "#e8b84b" }} />
+          <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
         )}
         <span
-          style={{
-            flex: 1,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
+          className={cn(
+            "min-w-0 flex-1 truncate",
+            selected ? "text-brand" : "text-ink-strong"
+          )}
         >
           {label}
         </span>
@@ -479,13 +474,13 @@ export default function FileExplorer({
     const path = joinPath(name);
     try {
       await apiSaveWorkspaceFile(agentId, sessionId, path, "");
-      message.success("已创建");
+      toast.success("已创建");
       setCreateOpen(false);
       setNewName("");
       invalidateTree();
       onOpenFile(path);
     } catch (e: any) {
-      message.error(e?.message || "创建失败");
+      toast.error(e?.message || "创建失败");
     }
   };
 
@@ -495,39 +490,35 @@ export default function FileExplorer({
     const path = joinPath(name);
     try {
       await apiCreateWorkspaceFolder(agentId, sessionId, path);
-      message.success("已创建目录");
+      toast.success("已创建目录");
       setFolderOpen(false);
       setFolderName("");
       invalidateTree();
     } catch (e: any) {
-      message.error(e?.message || "创建失败");
+      toast.error(e?.message || "创建失败");
     }
   };
 
   if (!sessionId) {
     return (
-      <div style={{ padding: 16 }}>
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="请先选择或新建会话，再浏览其工作空间"
-        />
+      <div className="p-4 text-center text-[13px] text-ink-muted">
+        请先选择或新建会话，再浏览其工作空间
       </div>
     );
   }
 
   if (rootQ.isLoading) {
     return (
-      <div style={{ padding: 24, textAlign: "center" }}>
-        <Spin /> <Typography.Text type="secondary">加载目录…</Typography.Text>
+      <div className="flex items-center justify-center gap-2 p-6 text-[13px] text-ink-muted">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        加载目录…
       </div>
     );
   }
   if (rootQ.isError || !rootQ.data) {
     return (
-      <div style={{ padding: 16 }}>
-        <Typography.Text type="secondary">
-          无法读取工作空间目录。
-        </Typography.Text>
+      <div className="p-4 text-[13px] text-ink-muted">
+        无法读取工作空间目录。
       </div>
     );
   }
@@ -541,64 +532,48 @@ export default function FileExplorer({
     (rootPath ? rootPath.split(/[\\/]/).pop() || "工作空间" : "工作空间");
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        height: "100%",
-      }}
-    >
-      {/* 头部：标题 + 新建 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "6px 8px",
-          borderBottom: "1px solid var(--kp-border-soft)",
-          fontSize: 12,
-          color: "#666",
-        }}
-      >
-        <span>资源管理器</span>
-        <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
-          {readOnly ? "只读" : "可写"}
-        </Typography.Text>
-        <Button
-          size="small"
-          type="text"
-          icon={<PlusOutlined />}
+    <div className="flex h-full min-h-0 flex-col">
+      {/* 头部：标题 + 权限 + 新建 */}
+      <div className="flex items-center gap-1.5 border-b border-line-soft px-2 py-1.5 text-[12px]">
+        <span className="text-ink-muted">资源管理器</span>
+        <span className="ml-auto">
+          <Pill tone={readOnly ? "orange" : "green"}>
+            {readOnly ? "只读" : "可写"}
+          </Pill>
+        </span>
+        <button
+          type="button"
           disabled={readOnly}
+          title="在选中目录新建文件"
           onClick={() => {
             setNewName("");
             setCreateOpen(true);
           }}
-          title="在选中目录新建文件"
-        />
-        <Button
-          size="small"
-          type="text"
-          icon={<FolderAddOutlined />}
+          className={HEAD_BTN}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
           disabled={readOnly}
+          title="在选中目录新建文件夹"
           onClick={() => {
             setFolderName("");
             setFolderOpen(true);
           }}
-          title="在选中目录新建文件夹"
-        />
+          className={HEAD_BTN}
+        >
+          <FolderPlus className="h-3.5 w-3.5" />
+        </button>
       </div>
 
-      {/* 新建位置提示 */}
-      <Typography.Text
-        type="secondary"
-        style={{ fontSize: 11, padding: "4px 10px", display: "block" }}
-      >
+      {/* 新建位置提示：常驻一行，避免"新建到哪去了"的疑问 */}
+      <div className="truncate px-2.5 py-1 text-[11px] text-ink-faint">
         新建位置：{selectedDir ? selectedDir : `${rootLabel}（根）`}
-      </Typography.Text>
+      </div>
 
       {/* 文件树：顶端为可收缩的空间根节点 */}
-      <div style={{ flex: 1, overflow: "auto", padding: "4px 0" }}>
+      <div className="flex-1 overflow-auto py-1">
         <RootNode
           label={rootLabel}
           agentId={agentId}
@@ -617,46 +592,68 @@ export default function FileExplorer({
       <Modal
         title="新建文件"
         open={createOpen}
-        onOk={handleCreate}
-        onCancel={() => setCreateOpen(false)}
-        okText="创建"
-        cancelText="取消"
-        destroyOnClose
+        onClose={() => setCreateOpen(false)}
+        width={420}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setCreateOpen(false)}
+              className={CANCEL_BTN}
+            >
+              取消
+            </button>
+            <button type="button" onClick={handleCreate} className={OK_BTN}>
+              创建
+            </button>
+          </>
+        }
       >
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <p className="text-[12px] text-ink-muted">
           {selectedDir ? `位于 ${selectedDir}/` : "位于工作空间根"}
-        </Typography.Text>
-        <Input
-          autoFocus
-          placeholder="文件名，如 add.py"
+        </p>
+        <NameInput
           value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onPressEnter={handleCreate}
-          style={{ marginTop: 8 }}
-          prefix={<FileAddOutlined />}
+          onChange={setNewName}
+          onEnter={handleCreate}
+          placeholder="文件名，如 add.py"
+          icon={<FileIcon className="h-3.5 w-3.5" />}
         />
       </Modal>
 
       <Modal
         title="新建文件夹"
         open={folderOpen}
-        onOk={handleCreateFolder}
-        onCancel={() => setFolderOpen(false)}
-        okText="创建"
-        cancelText="取消"
-        destroyOnClose
+        onClose={() => setFolderOpen(false)}
+        width={420}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setFolderOpen(false)}
+              className={CANCEL_BTN}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={handleCreateFolder}
+              className={OK_BTN}
+            >
+              创建
+            </button>
+          </>
+        }
       >
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <p className="text-[12px] text-ink-muted">
           {selectedDir ? `位于 ${selectedDir}/` : "位于工作空间根"}
-        </Typography.Text>
-        <Input
-          autoFocus
-          placeholder="文件夹名"
+        </p>
+        <NameInput
           value={folderName}
-          onChange={(e) => setFolderName(e.target.value)}
-          onPressEnter={handleCreateFolder}
-          style={{ marginTop: 8 }}
-          prefix={<FolderAddOutlined />}
+          onChange={setFolderName}
+          onEnter={handleCreateFolder}
+          placeholder="文件夹名"
+          icon={<Folder className="h-3.5 w-3.5" />}
         />
       </Modal>
     </div>

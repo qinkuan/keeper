@@ -369,7 +369,9 @@ export function apiHealth() {
   return apiGet<Health>("/health");
 }
 export function apiListAgents() {
-  return apiGet<{ agents: AgentItem[] }>("/agents");
+  /* core_agent_id：新建会话的默认落点。前端「开始对话」直接用它，
+     于是"会话"可以是一级入口，不必先让用户挑一个智能体。 */
+  return apiGet<{ agents: AgentItem[]; core_agent_id?: string | null }>("/agents");
 }
 
 // ---- 对话（按 agentId 路由到本进程内实例）----

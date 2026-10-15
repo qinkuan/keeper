@@ -1,8 +1,17 @@
 <!doctype html>
+<!-- 默认浅色。要切深色：给 <html> 加上 class="dark"（theme.css 里已备好深色变量）。 -->
 <html lang="zh">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 首屏就上底色，避免 JS/CSS 加载前的白闪 -->
+    <meta name="theme-color" content="#f6f7f9" />
+    <style>
+      html,
+      body {
+        background: #f6f7f9;
+      }
+    </style>
     <title>Keeper 记忆助手</title>
   </head>
   <body>

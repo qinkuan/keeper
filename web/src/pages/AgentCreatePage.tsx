@@ -1,25 +1,17 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Button,
-  Card,
-  Form,
-  Input,
-  Select,
-  Space,
-  Typography,
-  message,
-} from "antd";
-import { ArrowLeftOutlined } from "@ant-design/icons";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import {
   apiCreateLocalAgent,
   apiListPlugins,
   apiListUserSpaces,
 } from "../api/client";
 import type { LibraryPlugin } from "../api/types";
-
-const { Text, Paragraph } = Typography;
+import { Field, SelectInput, TextInput } from "../components/ui/Form";
+import { Hint, PageHeader, Section } from "../components/ui/Page";
+import { Pill } from "../components/ui/Pill";
+import { toast } from "../components/ui/Toast";
+import { cn } from "../lib/utils";
 
 /** 一条环境要求压成一行短文字，给插件多选项当后缀用。 */
 function envHint(p: LibraryPlugin): string {
@@ -30,6 +22,15 @@ function envHint(p: LibraryPlugin): string {
       .map((d) => `${d.kind} ${d.minVersion ? `≥${d.minVersion}` : ""}`)
       .join("、")
   );
+}
+
+/** 表单状态：整份 agent 配置就是一个对象，保存时整体提交 */
+interface CreateForm {
+  name: string;
+  description: string;
+  status: string;
+  persona: string;
+  workspace_space_id: string;
 }
 
 /**
@@ -44,9 +45,21 @@ function envHint(p: LibraryPlugin): string {
  * 点提交之前就知道有哪几项环境依赖。
  */
 export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
-  const [form] = Form.useForm();
   const [plugins, setPlugins] = useState<string[]>([]);
   const qc = useQueryClient();
+
+  // 状态直接放在 useState，不再走 antd Form 实例：整份表单就是一个对象，
+  // 校验也只有「名称必填」一条，用 Form 反而要把值在两处之间同步。
+  const [form, setForm] = useState<CreateForm>({
+    name: "",
+    description: "",
+    status: "active",
+    persona: "",
+    workspace_space_id: "",
+  });
+  const patch = (k: keyof CreateForm, v: string) =>
+    setForm((p) => ({ ...p, [k]: v }));
+  const [nameErr, setNameErr] = useState("");
 
   const libQ = useQuery({ queryKey: ["plugins"], queryFn: apiListPlugins });
   const spacesQ = useQuery({
@@ -55,202 +68,246 @@ export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
   });
 
   // 默认选「default」空间：它是系统的默认工作区，几乎每个 agent 都要用它。
-  // 放在 effect 里而不是 initialValues —— 空间列表是异步拿到的，
+  // 放在 effect 里而不是初始值 —— 空间列表是异步拿到的，
   // 初次渲染时还不知道 default 的 id 是什么。
   useEffect(() => {
     const list = spacesQ.data?.user_spaces ?? [];
     if (!list.length) return;
     const def = list.find((s) => s.name === "default") ?? list[0];
-    if (def) form.setFieldsValue({ workspace_space_id: def.id });
-  }, [spacesQ.data, form]);
+    if (def) setForm((p) => (p.workspace_space_id ? p : { ...p, workspace_space_id: def.id }));
+  }, [spacesQ.data]);
 
   const create = useMutation({
     mutationFn: apiCreateLocalAgent,
     onSuccess: (r) => {
-      message.success(`已创建「${r.name}」，已链接 ${r.plugins.length} 个插件`);
+      toast.success(`已创建「${r.name}」，已链接 ${r.plugins.length} 个插件`);
       qc.invalidateQueries({ queryKey: ["localAgents"] });
       onDone?.();
     },
     onError: (e: any) => {
-      message.error(String(e?.message ?? e));
+      toast.error(String(e?.message ?? e));
     },
   });
 
   const lib = libQ.data;
-  const options = (lib?.plugins ?? [])
-    // 清单坏掉的插件不让选：选了也装不起来，报错还更难指向
-    .filter((p) => !p.error)
-    .map((p) => {
-      const hint = envHint(p);
-      const kinds = p.kinds.join("/");
-      return {
-        value: p.dirname,
-        label: (
-          <Space size={6}>
-            <Text strong>{p.dirname}</Text>
-            {p.version ? <Text type="secondary">{p.version}</Text> : null}
-            {kinds ? <Text type="secondary">· {kinds}</Text> : null}
-            {hint ? (
-              <Text type="warning" style={{ fontSize: 12 }}>
-                {hint}
-              </Text>
-            ) : null}
-          </Space>
-        ),
-      };
-    });
+  const libPlugins = (lib?.plugins ?? []).filter((p) => !p.error);
+  const spaces = spacesQ.data?.user_spaces ?? [];
 
-  const onFinish = (v: any) => {
+  const onFinish = () => {
+    if (!form.name.trim()) {
+      setNameErr("给 agent 起个名字");
+      return;
+    }
+    setNameErr("");
     create.mutate({
-      name: String(v.name ?? "").trim(),
-      description: v.description ?? null,
-      persona: v.persona ?? "",
-      status: v.status ?? "active",
+      name: form.name.trim(),
+      description: form.description || null,
+      persona: form.persona || "",
+      status: form.status || "active",
       // 只给「选了哪个用户空间」，路径与只读由后端从 user_space 那条记录取。
       // 前端不再手填路径 / 摆只读开关：只读是**工作空间**的属性，两处各填一份
       // 曾经把 agent 的工作区判成只读，写类工具（bash__run）在界面上凭空消失。
-      workspace_space_id: v.workspace_space_id || null,
+      workspace_space_id: form.workspace_space_id || null,
       plugins,
     });
   };
 
   return (
-    <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <Card
-        size="small"
+    <div className="mx-auto w-full max-w-[720px]">
+      <PageHeader
         title="创建 Agent"
-        extra={
-          <Button size="small" icon={<ArrowLeftOutlined />} onClick={onDone}>
+        desc="只做创建。创建完去「智能体」页管理它的启用开关与插件绑定。"
+        actions={
+          <button
+            type="button"
+            onClick={onDone}
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
             返回
-          </Button>
+          </button>
         }
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={onFinish}
-          initialValues={{
-            status: "active",
-          }}
-          style={{ maxWidth: 720 }}
-        >
-          <Form.Item
-            label="名称"
-            name="name"
-            rules={[{ required: true, message: "给 agent 起个名字" }]}
-            extra="本机唯一"
-          >
-            <Input placeholder="比如 code-reviewer" maxLength={64} />
-          </Form.Item>
+      />
 
-          <Form.Item label="说明" name="description">
-            <Input placeholder="一句话说明它做什么（可空）" maxLength={200} />
-          </Form.Item>
-
-          <Form.Item label="状态" name="status">
-            <Select
-              style={{ width: 160 }}
-              options={[
-                { value: "active", label: "active" },
-                { value: "disabled", label: "disabled" },
-                { value: "archived", label: "archived" },
-              ]}
+      <Section>
+        <div className="space-y-4">
+          <Field label="名称" extra="本机唯一">
+            <TextInput
+              value={form.name}
+              onChange={(v) => {
+                patch("name", v);
+                if (nameErr) setNameErr("");
+              }}
+              placeholder="比如 code-reviewer"
             />
-          </Form.Item>
+            {nameErr && (
+              <p className="mt-1 text-[12px] text-red-600 dark:text-red-300">
+                {nameErr}
+              </p>
+            )}
+          </Field>
 
-          <Form.Item
-            label="画像"
-            name="persona"
-            extra="每次对话都会带上。可以留空。"
-          >
-            <Input.TextArea rows={4} placeholder="角色、语气、该关注什么…" />
-          </Form.Item>
+          <Field label="说明">
+            <TextInput
+              value={form.description}
+              onChange={(v) => patch("description", v)}
+              placeholder="一句话说明它做什么（可空）"
+            />
+          </Field>
 
-          <Form.Item
+          <div className="w-[180px]">
+            <Field label="状态">
+              <SelectInput
+                value={form.status}
+                onChange={(v) => patch("status", v)}
+                options={[
+                  { value: "active", label: "active" },
+                  { value: "disabled", label: "disabled" },
+                  { value: "archived", label: "archived" },
+                ]}
+              />
+            </Field>
+          </div>
+
+          <Field label="画像" extra="每次对话都会带上。可以留空。">
+            <textarea
+              rows={4}
+              value={form.persona}
+              onChange={(e) => patch("persona", e.target.value)}
+              placeholder="角色、语气、该关注什么…"
+              className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
+            />
+          </Field>
+
+          <Field
             label="工作区"
-            name="workspace_space_id"
             extra="选项来自「用户空间」。只读是工作空间自己的属性，在「用户空间」里改；这里选哪个，agent 就用哪个目录。"
           >
-            <Select
-              allowClear
-              placeholder="不选 = 无工作区"
+            <SelectInput
+              value={form.workspace_space_id}
+              onChange={(v) => patch("workspace_space_id", v)}
               options={[
-                { value: "", label: "无工作区", disabled: true },
-                ...(spacesQ.data?.user_spaces ?? []).map((s) => ({
+                { value: "", label: "不选 = 无工作区" },
+                ...spaces.map((s) => ({
                   value: s.id,
-                  label: (
-                    <Space size={6}>
-                      <Text strong>{s.name}</Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {s.path}
-                      </Text>
-                      {s.read_only ? (
-                        <Text type="warning" style={{ fontSize: 12 }}>
-                          只读
-                        </Text>
-                      ) : null}
-                    </Space>
-                  ),
+                  label: `${s.name}  ${s.path}${s.read_only ? "（只读）" : ""}`,
                 })),
               ]}
             />
-          </Form.Item>
+          </Field>
 
-          <Form.Item
-            label="能力绑定（插件）"
-            extra={
-              <>
-                从插件库里挑。插件本体不在 agent 目录里，而是在
-                <Text code> ~/.keeper/agents/&lt;id&gt;/plugins/</Text>
-                下建一个**符号链接**指回库里的真实目录——所以库里改了，所有
-                agent 立刻生效，不用重新装。
-              </>
-            }
-          >
-            <Select
-              mode="multiple"
-              value={plugins}
-              onChange={setPlugins}
-              loading={libQ.isLoading}
-              placeholder={
-                lib?.plugins.length
-                  ? "选插件（可多选）"
-                  : "插件库是空的——先往插件库里放插件包"
-              }
-              options={options}
-              optionFilterProp="label"
-              style={{ width: "100%" }}
-            />
-          </Form.Item>
+          <div>
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="text-[13px] font-medium text-ink">
+                能力绑定（插件）
+              </span>
+              {plugins.length > 0 && (
+                <Pill tone="brand">已选 {plugins.length} 个</Pill>
+              )}
+            </div>
+            {/* 复选框列表而不是多选下拉：插件库通常只有几个，一屏列出来比
+                「点开下拉 → 逐个勾 → 关掉」少三步操作，还能顺带看到环境要求 */}
+            <div className="max-h-[300px] space-y-1 overflow-auto rounded-lg border border-line-soft p-2">
+              {libQ.isLoading ? (
+                <div className="flex items-center justify-center py-6 text-ink-muted">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                </div>
+              ) : libPlugins.length === 0 ? (
+                <div className="py-6 text-center text-[13px] text-ink-faint">
+                  {lib?.plugins.length
+                    ? "插件库里没有可用的插件（清单都坏了）"
+                    : "插件库是空的——先往插件库里放插件包"}
+                </div>
+              ) : (
+                libPlugins.map((p) => {
+                  const on = plugins.includes(p.dirname);
+                  const hint = envHint(p);
+                  return (
+                    <label
+                      key={p.dirname}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors",
+                        on ? "bg-brand/[0.07]" : "hover:bg-surface"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) =>
+                          setPlugins((s) =>
+                            e.target.checked
+                              ? [...s, p.dirname]
+                              : s.filter((x) => x !== p.dirname)
+                          )
+                        }
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--kp-primary)]"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-[13px] text-ink">
+                            {p.dirname}
+                          </span>
+                          {p.version && <Pill tone="muted">{p.version}</Pill>}
+                          {p.kinds.length > 0 && (
+                            <Pill tone="indigo">{p.kinds.join("/")}</Pill>
+                          )}
+                        </span>
+                        {hint && (
+                          <span className="mt-0.5 block text-[12px] text-amber-600 dark:text-amber-400">
+                            {hint}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+            <p className="mt-1.5 text-[12px] leading-5 text-ink-faint">
+              插件本体不在 agent 目录里，而是在{" "}
+              <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                ~/.keeper/agents/&lt;id&gt;/plugins/
+              </code>{" "}
+              下建一个<strong>符号链接</strong>指回库里的真实目录——所以库里改了，
+              所有 agent 立刻生效，不用重新装。
+            </p>
+          </div>
 
           {lib && !lib.exists ? (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: 12 }}
-              message="插件库目录不存在"
-              description={
-                <span>
-                  <Text code>{lib.root}</Text> 还没建，可以先不选插件创建，之后再补。
-                </span>
-              }
-            />
+            <Hint tone="warn" title="插件库目录不存在">
+              <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[12px]">
+                {lib.root}
+              </code>{" "}
+              还没建，可以先不选插件创建，之后再补。
+            </Hint>
           ) : null}
 
-          <Paragraph type="secondary" style={{ fontSize: 12 }}>
-            提示：选了环境要求满足不了的插件，**创建会直接被拒绝**并告诉你缺什么
-            ——这是故意的。环境不满足的症状是子进程起不来、命令 not found，跟
+          <p className="text-[12px] leading-6 text-ink-muted">
+            提示：选了环境要求满足不了的插件，创建会直接被拒绝并告诉你缺什么——
+            这是故意的。环境不满足的症状是子进程起不来、命令 not found，跟
             "插件坏了"长得很像，等到真去调的时候根本想不起来是创建时就没验过。
-          </Paragraph>
+          </p>
 
-          <Space>
-            <Button type="primary" htmlType="submit" loading={create.isPending}>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              disabled={create.isPending}
+              onClick={onFinish}
+              className="flex items-center gap-1.5 rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {create.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               创建
-            </Button>
-            <Button onClick={onDone}>取消</Button>
-          </Space>
-        </Form>
-      </Card>
-    </Space>
+            </button>
+            <button
+              type="button"
+              onClick={onDone}
+              className="rounded-lg border border-line bg-panel px-4 py-[7px] text-[13px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:bg-surface hover:text-ink-strong active:scale-[0.98]"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      </Section>
+    </div>
   );
 }

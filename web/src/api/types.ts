@@ -851,11 +851,32 @@ export interface CreateLocalAgentInput {
   plugins?: string[];
 }
 
+/**
+ * 核心 agent：新建会话默认落到谁，以及它的人设覆盖。
+ *
+ * 四项都可空 = 走回落规则（不指定则用第一个已装载的 agent、persona 沿用画像），
+ * 所以「完全没配」是合法状态，不是未完成配置。
+ */
+export interface CoreAgentSettings {
+  name?: string | null;
+  id?: string | null;
+  /** 直接写的 persona 文本；persona_file 优先于它 */
+  persona?: string | null;
+  /** 长篇人设放独立文件时用；支持 ~ 开头 */
+  persona_file?: string | null;
+  /** **实际生效**的 agent（走完回落链后的结果），只读。用户没配时配置是空的，
+      只看配置值无法显示"当前在跟谁对话"，所以后端额外给这一份。 */
+  resolved?: { id: string | null; name: string } | null;
+  /** 可选的核心 agent 清单（已装载的那些），供下拉选择 */
+  agents?: { id: string | null; name: string }[];
+}
+
 /** 本地设置（写回 config.yaml）：按管理的内容分段 */
 export interface SettingsResp {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
+  core_agent: CoreAgentSettings;
   /** 各对端当前的熔断状态（只读） */
   a2a_breakers: BreakerState[];
   /** 手动重置熔断后返回：重置了几个对端 */
@@ -864,11 +885,12 @@ export interface SettingsResp {
   error?: string;
 }
 
-/** 设置页整体提交：两段一起，避免改 A 冲掉 B */
+/** 设置页整体提交：各段一起，避免改 A 冲掉 B */
 export interface SettingsInput {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
+  core_agent: CoreAgentSettings;
 }
 
 /** 趋势图上的一个点（一个时间桶） */

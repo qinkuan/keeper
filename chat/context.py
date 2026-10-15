@@ -18,6 +18,11 @@ _current_session_id: ContextVar[Optional[str]] = ContextVar(
 _current_message_id: ContextVar[Optional[str]] = ContextVar(
     "keeper_message_id", default=None
 )
+# 当前会话的记忆作用域（YYYY-MM-DD，见 memory/store.py 的说明）。记忆按天共享，
+# 所以光有 session_id 不够——recall/read 这两个工具要能取到"今天"的目录。
+_current_memory_day: ContextVar[Optional[str]] = ContextVar(
+    "keeper_memory_day", default=None
+)
 
 
 def current_session_id() -> Optional[str]:
@@ -28,6 +33,20 @@ def current_session_id() -> Optional[str]:
 def set_session_id(session_id: Optional[str]) -> None:
     """标记当前任务所处的会话。一般在 ChatService.ask 确定 session 后调用。"""
     _current_session_id.set(session_id)
+
+
+def current_memory_day() -> Optional[str]:
+    """取当前会话的记忆作用域日期键；不在会话中时为 None。"""
+    return _current_memory_day.get()
+
+
+def set_memory_day(day: Optional[str]) -> None:
+    """标记当前任务的记忆作用域。由 ChatService 在确定 session 后一并设置。
+
+    必须与 :func:`set_session_id` **成对调用**：记忆工具（recall / read）只认日期，
+    不认 session_id——它们按天共享记忆，所以"今天是几号"才是它们需要的锚。
+    """
+    _current_memory_day.set(day)
 
 
 def current_message_id() -> Optional[str]:

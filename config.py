@@ -248,6 +248,30 @@ class PluginSection:
 
 
 @dataclass
+class AgentSection:
+    """核心 agent：产品意义上的「主脑」，**从本地目录装配，不进数据库**。
+
+    见 ``agent/core.py`` 的模块文档：核心 agent 与其它 agent 的生命周期不同
+    （没有"未装载"、不参与平台分发、不该被随手卸载），所以不塞进 ``agent`` 表。
+
+    - ``dir``：核心 agent 的目录，默认 ``~/.keeper/core-agent``。留空用默认，
+      所以不配也能跑（首次启动会自动铺一份带注释的定义文件）。
+    - ``name`` / ``id``：**只用于兼容上一版设计**。那一版把核心 agent 指向数据库里
+      的某条 agent 记录；现在那条记录（如果还在）只是普通 agent，与核心角色无关。
+      这两个字段仍可读，用于在旧配置下继续工作，但新的文件装配不依赖它们。
+
+    以下 persona 相关字段同理保留：文件装配下画像以 ``soul.md`` 为准，
+    这几个字段作为覆盖层继续生效（``persona_file`` 指向 soul.md 本身即可）。
+    """
+
+    dir: Optional[str] = None
+    name: Optional[str] = None
+    id: Optional[str] = None
+    persona: Optional[str] = None
+    persona_file: Optional[str] = None
+
+
+@dataclass
 class KeeperConfig:
     """框架配置：keeper 这个**进程**怎么跑。
 
@@ -260,6 +284,10 @@ class KeeperConfig:
     # 用哪个 agent 画像：装配器据此去数据库的 agent 表读（name 与 id 二选一）
     agent_name: Optional[str] = None
     agent_id: Optional[str] = None
+    # 核心 agent（会话的默认落点）。语义与上面两个字段重叠，但用途不同：
+    # 上面两个是"这个进程跑哪个 agent"（单 agent 部署），core 是"会话默认找谁"
+    # （多 agent 部署下仍要有一个主脑）。留空时回落，所以不加这一段也照旧运行。
+    core_agent: AgentSection = field(default_factory=AgentSection)
     # 上游配置平台（拉 agent 定义用）
     platform: PlatformSection = field(default_factory=PlatformSection)
     # framework 运行时下载源（镜像 / 自建）
@@ -287,6 +315,7 @@ class KeeperConfig:
         server_section = d.pop("server", {}) or {}
         auth_section = server_section.get("auth") or {}
         agent_section = d.pop("agent", {}) or {}
+        core_section = d.pop("core_agent", {}) or {}
         platform_section = d.pop("platform", {}) or {}
         framework_section = d.pop("framework", {}) or {}
         llm_section = d.pop("llm", {}) or {}
@@ -306,6 +335,13 @@ class KeeperConfig:
             ),
             agent_name=agent_section.get("name"),
             agent_id=agent_section.get("id"),
+            core_agent=AgentSection(
+                dir=core_section.get("dir"),
+                name=core_section.get("name"),
+                id=core_section.get("id"),
+                persona=core_section.get("persona"),
+                persona_file=core_section.get("persona_file"),
+            ),
             platform=PlatformSection(
                 url=platform_section.get("url") or "http://localhost:9095",
                 token=platform_section.get("token") or "",
@@ -406,6 +442,51 @@ def load_config(path: Optional[str | os.PathLike] = None) -> KeeperConfig:
     return cfg
 
 
+def core_agent_selector(cfg: Optional["KeeperConfig"] = None) -> tuple:
+    """解析「核心 agent」的选择结果，返回 ``(name, id)``（都可为 None）。
+
+    三级回落，保证**永远能选出一个主脑**（除非库里一个 agent 都没有）：
+
+    1. ``core_agent.name`` / ``core_agent.id`` —— 显式指定，设置页里配的那个；
+    2. 顶层 ``agent.name`` / ``agent.id`` —— 元配置里的"这个进程跑谁"，
+       单 agent 部署下它本来就是主脑，直接沿用；
+    3. 都不给 → 交给调用方按"第一个已装载的 agent"兜底（见 ``resolve_core_agent``）。
+
+    这样不加任何配置也能正常运行，老部署的行为完全不变。
+    """
+    cfg = cfg or load_config()
+    core = cfg.core_agent
+    return (
+        core.name or cfg.agent_name,
+        core.id or cfg.agent_id,
+    )
+
+
+def core_agent_persona(cfg: Optional["KeeperConfig"] = None) -> Optional[str]:
+    """核心 agent 的**覆盖人设**：读 ``core_agent.persona`` / ``persona_file``。
+
+    ``persona_file`` 优先（长篇人设放独立文件便于版本管理）；文件读不到时
+    打 warning 并回落 ``persona``，绝不因为一个路径写错就让启动失败。
+
+    返回 ``None`` 表示"没有覆盖"，此时装配层沿用 agent 画像里的 persona。
+    """
+    cfg = cfg or load_config()
+    core = cfg.core_agent
+    path = (core.persona_file or "").strip()
+    if path:
+        try:
+            text = Path(path).expanduser().read_text(encoding="utf-8").strip()
+            if text:
+                return text
+            logger.warning("核心 agent 的人设文件是空的，忽略: %s", path)
+        except OSError as e:
+            logger.warning(
+                "核心 agent 的人设文件读不到（%s），回落到 persona 字段: %s", path, e
+            )
+    text = (core.persona or "").strip()
+    return text or None
+
+
 def _apply_user_settings(cfg: "KeeperConfig") -> None:
     """用 settings.yaml 覆盖用户可调段（只覆盖文件里**显式写了**的键）。"""
     try:
@@ -420,6 +501,11 @@ def _apply_user_settings(cfg: "KeeperConfig") -> None:
         return
     if not raw:
         return
+
+    # 核心 agent（core_agent 段）：设置页会改，所以必须在这里覆盖
+    core = raw.get("core_agent")
+    if isinstance(core, dict):
+        _overlay(cfg.core_agent, core)
 
     obs = raw.get("observability")
     if isinstance(obs, dict):
@@ -499,16 +585,22 @@ def save_settings(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    core_agent: Optional[Dict[str, Any]] = None,
 ) -> None:
     """保存用户设置（写 ``settings.yaml``，**不碰** config.yaml）。
 
     设置页的写入口在这里统一转发，调用方不必知道文件到底在哪——也让
     「元配置不被程序回写」这条约束只有一处需要维护。
 
-    ``context`` 必须在这里列出来：设置页提交时会带上整段，而这一层只转发
-    **显式列出**的段——漏一个就是运行时 ``TypeError``，而且是在用户点保存
+    ``context`` / ``core_agent`` 必须在这里列出来：设置页提交时会带上整段，而这一层
+    只转发**显式列出**的段——漏一个就是运行时 ``TypeError``，而且是在用户点保存
     那一刻才炸，测试里点不到就发现不了。
     """
     from .setting import save_sections
 
-    save_sections(prompt_dump=prompt_dump, a2a=a2a, context=context)
+    save_sections(
+        prompt_dump=prompt_dump,
+        a2a=a2a,
+        context=context,
+        core_agent=core_agent,
+    )

@@ -1,5 +1,5 @@
-import { Typography } from "antd";
 import type { StepUsage, UsageSummary } from "../api/types";
+import { cn } from "../lib/utils";
 
 /** token 数紧凑写法：1.2k / 3.4M */
 export function fmtTokens(n?: number): string {
@@ -22,6 +22,29 @@ export function fmtCost(cost?: number | null, currency?: string | null): string 
   if (cost === null || cost === undefined) return "—";
   const symbol = currency === "USD" ? "$" : "¥";
   return `${symbol}${cost < 0.01 ? cost.toFixed(6) : cost.toFixed(4)}`;
+}
+
+/** 行内文字按钮：用于「查看详情 / 查看 dump」这类紧跟在数字后面的入口 */
+function InlineLink({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick();
+      }}
+      className="text-[12px] text-brand transition-opacity hover:opacity-75"
+    >
+      {children}
+    </button>
+  );
 }
 
 /**
@@ -62,49 +85,37 @@ export function UsageTag({
   if (wallMs) parts.push(`共耗时 ${fmtDuration(wallMs)}`);
   if (showCost) parts.push(fmtCost(usage.cost, usage.cost_currency));
   // 上下文水位告警：ReAct 多轮最容易出问题的地方，单独标出来
-  if (usage.context_warning) {
+  const warning = !!usage.context_warning;
+  if (warning) {
     parts.push(
       `⚠ 上下文 ${((usage.context_usage_rate ?? 0) * 100).toFixed(0)}%`
     );
   }
   if (usage.errors) parts.push(`失败 ${usage.errors} 次`);
+
   return (
-    <Typography.Text
-      type={usage.context_warning ? "warning" : "secondary"}
-      style={{ fontSize: 12 }}
+    <span
+      className={cn(
+        "text-[12px]",
+        warning
+          ? "text-amber-600 dark:text-amber-300"
+          : "text-ink-muted"
+      )}
     >
       {parts.join(" · ")}
       {onDetail && (
         <>
           {" · "}
-          <Typography.Link
-            style={{ fontSize: 12 }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onDetail();
-            }}
-          >
-            查看详情
-          </Typography.Link>
+          <InlineLink onClick={onDetail}>查看详情</InlineLink>
         </>
       )}
       {onDump && (
         <>
           {" · "}
-          <Typography.Link
-            style={{ fontSize: 12 }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onDump();
-            }}
-          >
-            查看 dump
-          </Typography.Link>
+          <InlineLink onClick={onDump}>查看 dump</InlineLink>
         </>
       )}
-    </Typography.Text>
+    </span>
   );
 }
 
@@ -115,13 +126,13 @@ export function StepUsageTag({ usage }: { usage?: StepUsage | null }) {
     ? `缓存 ${(usage.cache_hit_rate * 100).toFixed(0)}%`
     : "缓存未上报";
   return (
-    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+    <span className="text-[12px] text-ink-muted">
       模型输入 {fmtTokens(usage.prompt_tokens)} · 模型输出{" "}
       {fmtTokens(usage.completion_tokens)}
       {usage.reasoning_tokens ? `（思考 ${fmtTokens(usage.reasoning_tokens)}）` : ""}
       · {cache} ·{" "}
       {fmtDuration(usage.duration_ms ?? usage.llm_duration_ms)}
       {usage.duration_ms ? `（LLM ${fmtDuration(usage.llm_duration_ms)}）` : ""}
-    </Typography.Text>
+    </span>
   );
 }

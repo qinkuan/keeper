@@ -1,34 +1,40 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+
 import {
-  Alert,
-  Button,
-  Input,
-  Select,
-  Spin,
-  Tag,
-  Typography,
-  message,
-} from "antd";
-import {
-  UnorderedListOutlined,
-  CloseOutlined,
-  SettingOutlined,
-  FolderOutlined,
-  CodeOutlined,
-} from "@ant-design/icons";
+  ArrowLeft,
+  ArrowUp,
+  Code2,
+  FolderOpen,
+  List,
+  ListChecks,
+  Loader2,
+  Plus,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Square,
+} from "lucide-react";
+import { cn } from "../lib/utils";
+import { X } from "lucide-react";
+import { SegmentedControl } from "../components/ui/Segmented";
+import { Hint as AlertHint } from "../components/ui/Page";
+import { toast } from "../components/ui/Toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ChatBubble from "../components/ChatBubble";
 import SessionList from "../components/SessionList";
 import AskBox from "../components/AskBox";
-import FileExplorer from "../components/FileExplorer";
-import CodeView from "../components/CodeView";
+/*
+ * 编码工作台按需加载：monaco 有 3.9MB，而多数人多数时候不开工作台。
+ * 静态 import 的话，进对话页就要先下载它——首屏被一个用不到的编辑器拖住。
+ */
+const FileExplorer = lazy(() => import("../components/FileExplorer"));
+const CodeView = lazy(() => import("../components/CodeView"));
 import AgentInfoDrawer from "../components/AgentInfoDrawer";
 import UsageDetailModal from "../components/UsageDetailModal";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import type { UsageSummary } from "../api/types";
-import TaskPage from "./TaskPage";
+
 
 /** 可拖拽竖分隔条：拖动时按水平位移回调，由父级调整列宽。 */
 function Resizer({ onResize }: { onResize: (dx: number) => void }) {
@@ -73,6 +79,7 @@ import {
   apiResumeChatStream,
   newRunId,
   apiDeployInfo,
+  apiListAgents,
   apiListTasks,
   apiListUserSpaces,
   apiSessionMessages,
@@ -88,6 +95,13 @@ import type {
   SessionWorkspace,
   UserSpace,
 } from "../api/types";
+
+/*
+ * 任务视图按需加载：TaskPage 有 49KB 源码，而且它静态引入了 ArtifactCard，
+ * 后者又用 Monaco 做代码/diff 展示——静态引入的话，即使只用「会话」模式，
+ * 首屏也要把 monaco 一起下载下来。
+ */
+const TaskPage = lazy(() => import("./TaskPage"));
 
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -130,7 +144,15 @@ type StreamRun = {
   abort: AbortController | null;
 };
 
-export default function ChatPage({ agentId }: { agentId: string }) {
+export default function ChatPage({
+  agentId,
+  onExit,
+}: {
+  agentId: string;
+  /* 退出对话。原来由外层顶栏的「返回」按钮提供；顶栏移除后改由本页自渲染
+     （角标式返回钮，见下方左上角），所以从 props 传进来。 */
+  onExit?: () => void;
+}) {
   /**
    * 消息列表**按会话索引**。
    *
@@ -357,7 +379,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       });
     } catch {
       // 翻页失败不该打断使用：游标不变，用户可以再点一次
-      message.warning("加载更早的消息失败，请稍后重试");
+      toast.error("加载更早的消息失败，请稍后重试");
     } finally {
       setLoadingOlder(false);
     }
@@ -739,6 +761,17 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     setActiveFilePath(null);
   }, [sessionId]);
 
+  /**
+   * 消息头显示的 agent 名。
+   *
+   * 从已装载列表里查（那个 query 在「概览」页已经拉过，命中缓存不会再发请求）；
+   * 查不到就退化成 agentId 前 8 位——总比显示「Agent」强，至少能对上号。
+   */
+  const agentsQ = useQuery({ queryKey: ["agents"], queryFn: apiListAgents });
+  const agentName =
+    agentsQ.data?.agents.find((a) => a.id === agentId)?.name?.trim() ||
+    agentId.slice(0, 8);
+
   const handleSelect = (sid: string) => {
     setSessionId(sid);
     setChatSessionId(sid);
@@ -815,6 +848,30 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, agentId]);
+
+  /**
+   * 重新生成：把上一条用户消息重发一遍。
+   *
+   * 实现上没有走"让后端重放"的路径，而是直接复用 send —— 这轮的 prompt 由
+   * 服务端从历史重算，所以重发同一句话得到的就是重新生成的效果。代价是会在
+   * 历史里多留一条用户消息，但比起再加一个"只重跑不回话"的接口，这个取舍更划算。
+   */
+  const regenerate = useCallback(
+    (messageId: string) => {
+      const list = visibleMsgs;
+      const idx = list.findIndex((m) => m.id === messageId);
+      if (idx < 0) return;
+      // 往上找最近的一条用户消息
+      for (let i = idx - 1; i >= 0; i--) {
+        if (list[i].role === "user" && list[i].text) {
+          void send(list[i].text);
+          return;
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [input, sending]
+  );
 
   const send = async (raw?: string, stepId?: string) => {
     const q = (raw ?? input).trim();
@@ -1143,37 +1200,18 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       // 工作空间变了，关闭当前打开的文件并刷新编码工作台文件树
       setActiveFilePath(null);
       setExplorerRefresh((n) => n + 1);
-      if (val) message.success("已切换工作空间");
-      else message.success("已回落到 agent 默认目录");
+      if (val) toast.success("已切换工作空间");
+      else toast.success("已回落到 agent 默认目录");
     } catch (e: any) {
-      message.error(e?.message || "切换失败");
+      toast.error(e?.message || "切换失败");
     }
   };
 
-  const usOptions = [
-    ...userSpaces.map((u) => ({
-      value: u.id,
-      label: (
-        <span>
-          <span
-            style={{
-              display: "inline-block",
-              maxWidth: 70,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              verticalAlign: "middle",
-            }}
-          >
-            {u.name}
-          </span>
-          <Tag color={u.read_only ? "orange" : "green"} style={{ marginLeft: 6 }}>
-            {u.read_only ? "只读" : "可写"}
-          </Tag>
-        </span>
-      ),
-    })),
-  ];
+  // 原生 select 的 option 只能放纯文本，所以把「只读 / 可写」并进文案
+  const usOptions = userSpaces.map((u) => ({
+    value: u.id,
+    label: `${u.name}（${u.read_only ? "只读" : "可写"}）`,
+  }));
 
   /** 输入框高度（可拖把手放大，向上拖变大） */
   const [inputH, setInputH] = useState(64);
@@ -1201,46 +1239,34 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     };
   }, []);
 
-  /** 顶栏控件分组：极淡圆角底托住一组控件，形成"分段控件"观感 */
-  const toolbarGroup: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    background: "var(--kp-bg-app)",
-    borderRadius: 10,
-    padding: 4,
-  };
-
   // 聊天列：消息流 + 输入框（两种模式共用，外层容器不同；工作空间已移到顶栏）
   const chatInner = (
     <>
-      <div
-        ref={listRef}
-        style={{
-          flex: 1,
-          overflow: "auto",
-          background: "var(--kp-bg)",
-          borderRadius: 18,
-          padding: 20,
-          boxShadow: "0 1px 3px rgba(0, 0, 0, 0.04)",
-        }}
-      >
+      {/*
+        消息流：纯白底 + 居中单列。
+
+        这里原来挂的是 .kp-canvas（顶部带一道品牌色光晕）。光晕在"有顶栏压着"
+        的时候还有层次感，顶栏一去掉，它就变成画面上唯一一块没来由的蓝雾——
+        所以内容页直接退回干净的白，让消息本身成为唯一的视觉主体。
+      */}
+      <div ref={listRef} className="relative min-h-0 flex-1 overflow-auto bg-panel px-4 py-5">
+        <div className="mx-auto w-full max-w-[46rem]">
         {/*
           「加载更早的消息」：会话可能很长，接口单次只给最近一段。显式按钮而不是
           无限滚动——气泡里常带着一长串思考步骤，自动加载既容易让用户失去位置感，
           一次拉太多也会明显卡。
         */}
         {paging[curBucket]?.hasMore && (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              padding: "0 0 14px",
-            }}
-          >
-            <Button size="small" type="text" loading={loadingOlder} onClick={loadOlder}>
+          <div className="flex justify-center pb-3.5">
+            <button
+              type="button"
+              disabled={loadingOlder}
+              onClick={loadOlder}
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink disabled:opacity-50"
+            >
+              {loadingOlder && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               加载更早的消息
-            </Button>
+            </button>
           </div>
         )}
         {visibleMsgs.map((m) => (
@@ -1248,6 +1274,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             <ChatBubble
               msg={m}
               agentId={agentId}
+              agentName={agentName}
               isLocal={isLocal}
               onUsageDetail={openUsageDetail}
               onUsageDump={
@@ -1255,6 +1282,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                   ? openUsageDump
                   : undefined
               }
+              onRegenerate={sending ? undefined : regenerate}
             />
             {m.waiting && m.stepId && (
               <AskBox
@@ -1265,38 +1293,41 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             )}
           </div>
         ))}
-        {sending && (
-          <div style={{ textAlign: "center", padding: 8 }}>
-            <Spin size="small" />{" "}
-            <Typography.Text type="secondary">检索中…</Typography.Text>
+          {sending && (
+            /* 呼吸点比转圈更克制：流式正文本身就在动，再加一个旋转图标
+               会把注意力从内容上抢走。 */
+            <div className="flex items-center justify-center gap-2 py-2.5 text-[12.5px] text-ink-muted">
+              <span className="kp-pulse-dot h-1.5 w-1.5 rounded-full bg-brand" />
+              正在生成…
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 配额 / 累计用量：跟输入框同列宽，不要贴着窗口边缘 */}
+      <div className="mx-auto w-full max-w-[46rem] px-4">
+        {budget && budget.limit > 0 && (
+          <div className="mt-3">
+            <AlertHint
+              tone={budget.over ? "danger" : budget.warning ? "warn" : "info"}
+              title={`本会话配额：${fmtTokens(budget.used)} / ${fmtTokens(
+                budget.limit
+              )}（${(budget.rate * 100).toFixed(0)}%）`}
+            >
+              {budget.over
+                ? "已超出配额上限，后续执行会被拦住。"
+                : budget.warning
+                ? "已用掉 80% 以上，快到上限了。"
+                : undefined}
+            </AlertHint>
+          </div>
+        )}
+        {sessionUsage && sessionUsage.calls > 0 && (
+          <div className="mt-1.5 text-right text-[12px] text-ink-muted">
+            本会话累计：<UsageTag usage={sessionUsage} />
           </div>
         )}
       </div>
-
-      {budget && budget.limit > 0 && (
-        <Alert
-          style={{ marginBottom: 8 }}
-          type={budget.over ? "error" : budget.warning ? "warning" : "info"}
-          showIcon
-          message={`本会话配额：${fmtTokens(budget.used)} / ${fmtTokens(
-            budget.limit
-          )}（${(budget.rate * 100).toFixed(0)}%）`}
-          description={
-            budget.over
-              ? "已超出配额上限，后续执行会被拦住。"
-              : budget.warning
-              ? "已用掉 80% 以上，快到上限了。"
-              : undefined
-          }
-        />
-      )}
-      {sessionUsage && sessionUsage.calls > 0 && (
-        <div style={{ marginTop: 6, textAlign: "right" }}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            本会话累计：<UsageTag usage={sessionUsage} />
-          </Typography.Text>
-        </div>
-      )}
 
       <UsageDetailModal
         messageId={detailMessageId}
@@ -1310,70 +1341,122 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         onClose={() => setDumpMessageId(null)}
       />
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "stretch",
-          gap: 10,
-          marginTop: 14,
-        }}
-      >
-        <Input.TextArea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-          style={{
-            height: inputH,
-            resize: "none",
-            borderRadius: 12,
-            padding: "10px 12px",
-            fontSize: 14,
-          }}
-          onPressEnter={(e) => {
-            if (!e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        {/* 右侧列：把手在发送按钮正上方，向上拖放大输入框（64–320px） */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
+      {/*
+        输入区：整块做成一个「容器」，聚焦时整块描边高亮（现代对话产品的通行做法），
+        比「裸输入框 + 旁边一个按钮」更像一个整体。
+      */}
+      {/*
+        输入区（截图里最标志性的元素）：一个**大圆角白色浮块**，带明显阴影，
+        悬在页面底部。它不是一个"贴着窗口边的输入条"——浮起来这一点很关键，
+        让输入框在视觉上独立于内容流。
+        结构自上而下：正文输入 → 一条工具行（左：+ / 权限 / 计划；右：模型 / 发送）。
+      */}
+      <div className="shrink-0 bg-panel px-4 pb-3.5 pt-2">
+        <div className="mx-auto w-full max-w-[46rem]">
+          {/* 浮块投影给足两层（近处贴地一层、远处散开一层），并让它"浮"在内容
+              之上——输入区是整个页面唯一需要离开纸面感的东西，投影太弱就变成
+              一个贴着边的多行文本框。聚焦时再加一圈品牌色描边，光标落点一眼可见。 */}
           <div
-            className="kp-grip"
-            title="向上拖动放大输入框"
-            onMouseDown={(e) => {
-              dragRef.current = { startY: e.clientY, startH: inputH };
-              document.body.style.cursor = "row-resize";
-              document.body.style.userSelect = "none";
-            }}
+            className={cn(
+              "rounded-[18px] border border-line-soft bg-panel px-3.5 py-2.5",
+              "shadow-[0_8px_28px_-8px_rgba(0,0,0,0.16),0_2px_6px_-2px_rgba(0,0,0,0.06)]",
+              "transition-all duration-200 ease-apple",
+              "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(91,155,245,0.4)]"
+            )}
           >
-            <i />
+            {/* 正文输入：无边无底色，融进浮块 */}
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="今天帮你做什么？@ 添加上下文，/ 调用技能与指令"
+              style={{ height: inputH }}
+              className="w-full resize-none bg-transparent px-1 pt-0.5 text-[13.5px] leading-6 text-ink outline-none placeholder:text-ink-faint"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+
+            {/* 工具行：左边低频动作、右边模型与发送。整行高度固定 30px */}
+            <div className="mt-1 flex items-center gap-1">
+              {/* 附件 / 添加上下文 */}
+              <button
+                type="button"
+                title="添加上下文"
+                className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/[0.05] hover:text-ink dark:hover:bg-white/10"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+
+              {/* 权限模式：显示当前模式，点击切换（这里简化为提示） */}
+              <span className="hidden items-center gap-1 rounded-full px-1.5 py-0.5 text-[11.5px] text-ink-muted sm:flex">
+                <ShieldCheck className="h-3 w-3" />
+                默认权限
+              </span>
+
+              {/* 模式标签：当前处于哪种工作视图。这是输入区里唯一的彩色元素，
+                  给它品牌淡底，输入框就不会因为"全是灰控件"显得寡淡。 */}
+              <span className="flex items-center gap-1 rounded-full bg-brand/10 py-[3px] pl-1.5 pr-2 text-[11.5px] font-medium text-brand">
+                <ListChecks className="h-3 w-3" />
+                {mode === "task" ? "任务" : "对话"}
+              </span>
+
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                {/* 当前 agent / 模型标识 */}
+                <span className="hidden max-w-[140px] items-center gap-1 truncate text-[11.5px] text-ink-muted sm:flex">
+                  <Sparkles className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{agentId.slice(0, 12)}</span>
+                </span>
+
+                {/* 高度把手：向上拖放大输入框 */}
+                <div
+                  className="kp-grip hidden sm:flex"
+                  title="向上拖动放大输入框"
+                  onMouseDown={(e) => {
+                    dragRef.current = { startY: e.clientY, startH: inputH };
+                    document.body.style.cursor = "row-resize";
+                    document.body.style.userSelect = "none";
+                  }}
+                >
+                  <i />
+                </div>
+
+                {sending ? (
+                  <button
+                    type="button"
+                    onClick={stopSend}
+                    title="停止生成"
+                    className="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-ink-strong text-panel shadow-[0_2px_8px_rgba(0,0,0,0.25)] transition-all duration-150 hover:opacity-90 active:scale-95"
+                  >
+                    <Square className="h-2.5 w-2.5" fill="currentColor" />
+                  </button>
+                ) : (
+                  /* 发送键：品牌渐变 + 同色投影。按下缩 5%，比纯变色更有物理感。 */
+                  <button
+                    type="button"
+                    onClick={() => send()}
+                    disabled={!input.trim()}
+                    title="发送（Enter）"
+                    className={cn(
+                      "flex h-[30px] w-[30px] items-center justify-center rounded-full transition-all duration-150 ease-apple active:scale-95",
+                      input.trim()
+                        ? "bg-brand-gradient text-white shadow-brand hover:brightness-110"
+                        : "cursor-not-allowed bg-black/[0.06] text-ink-faint dark:bg-white/[0.08]"
+                    )}
+                  >
+                    <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
-          {sending ? (
-            // 生成中：按钮变「停止」，点了立刻断流并通知后端收尾
-            <Button
-              danger
-              onClick={stopSend}
-              style={{ height: 40, minWidth: 88, marginTop: "auto" }}
-            >
-              停止
-            </Button>
-          ) : (
-            <Button
-              type="primary"
-              onClick={() => send()}
-              style={{ height: 40, minWidth: 88, marginTop: "auto" }}
-            >
-              发送
-            </Button>
-          )}
+
+          {/* 底部免责声明：截图里是居中的极小灰字 */}
+          <p className="mt-2 text-center text-[10.5px] text-ink-faint">
+            内容由 AI 生成，请核实重要信息
+          </p>
         </div>
       </div>
     </>
@@ -1381,6 +1464,8 @@ export default function ChatPage({ agentId }: { agentId: string }) {
 
   return (
     <div
+      /* group/chat：内容区 hover 时唤出左上角那个「会话」回退入口 */
+      className="group/chat"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -1388,109 +1473,63 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         position: "relative",
       }}
     >
-      {/* 顶栏：分三组（会话视图 / 工作台 / 配置），细竖线分隔 */}
+      {/*
+        原来这里有一条 44px 顶栏（列表入口 / 视图切换 / 工作台 / 工作空间 / 配置）。
+        已整体移除：那条带子把「内容」往下压了一行，而它承载的全部是**导航类**
+        操作——它们本就属于列表所在的那一侧。
+        这些控件没有丢，全部搬进了左侧「会话」抽屉的头部（见下方 drawer），
+        抽屉打开时才出现，正好和"选哪个会话"是同一件事。
+
+        代价是丢掉了「打开列表」的常驻入口（顶栏那个列表按钮），所以这里补一个
+        浮在内容区左上角的小按钮顶上：抽屉关闭时才出现，且只在 hover 内容区时
+        显形——它是个"随时可唤出"的回退入口，不该常驻抢注意力。
+        没有会话时（新会话空态）则始终显示，否则用户找不到入口。
+      */}
+      {/* 左上角悬浮控件组：返回 + 列表入口。
+          原来是外层那条 44px 顶栏里的「返回」，顶栏移除后落到这里——
+          对话页没有 h1、也没有别回去的路，这个入口不能省。
+          两者一起用同一个显隐规则，视觉上是一组"随时可唤出"的回退控件。 */}
       <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "10px 20px",
-          minHeight: 52,
-          // 与上方全局顶栏、下方内容卡片同为白底，只用细线分层：
-          // 避免一条灰带夹在两片白之间（原来那样显脏）
-          background: "var(--kp-bg)",
-          borderBottom: "1px solid var(--kp-border-soft)",
-          flexWrap: "wrap",
-        }}
+        className={cn(
+          "absolute left-3 top-3 z-10 flex items-center gap-1.5",
+          "transition-opacity duration-200 ease-apple",
+          drawerOpen && "pointer-events-none opacity-0",
+          !sessionId
+            ? "opacity-100"
+            : "opacity-0 focus-within:opacity-100 group-hover/chat:opacity-100"
+        )}
       >
-        {/* 组1：会话列表 + 视图切换 */}
-        <span style={toolbarGroup}>
-          <Button
-            size="small"
-            icon={<UnorderedListOutlined />}
-            onClick={() => setDrawerOpen(true)}
+        {onExit && (
+          <button
+            type="button"
+            onClick={onExit}
+            title="返回"
+            className="flex h-8 w-8 items-center justify-center rounded-[9px] border border-line-soft bg-panel text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
           >
-            {mode === "task" ? "任务" : "会话"}
-          </Button>
-          <Select
-            size="small"
-            style={{ width: 110 }}
-            value={mode}
-            onChange={(v) => setMode(v as "chat" | "task")}
-            options={[
-              { label: "会话", value: "chat" },
-              { label: "任务", value: "task" },
-            ]}
-          />
-        </span>
-
-        {/* 组2：工作台 */}
-        <span style={toolbarGroup}>
-          {/* 图标前置，与工作目录组对称 */}
-          <CodeOutlined
-            style={{ color: "var(--kp-text-muted)", fontSize: 13 }}
-          />
-          <Select
-            size="small"
-            style={{ width: 150 }}
-            value={workbenchType}
-            onChange={(v) => setWorkbenchType(v as "off" | "coding")}
-            options={[
-              { label: "工作台：关", value: "off" },
-              { label: "编码工作台", value: "coding" },
-            ]}
-          />
-        </span>
-
-        {/* 组3：工作目录（与工作台各自成组，避免两个下拉连成一片） */}
-        <span style={toolbarGroup}>
-          <FolderOutlined
-            style={{ color: "var(--kp-text-muted)", fontSize: 13 }}
-          />
-          {/* 工作空间：会话 / 任务模式共用顶栏一行（合并进下拉框） */}
-          {(() => {
-            const dflt = userSpaces.find((u) => u.name === "default")?.id ?? "";
-            const cur = sessionId ? workspace?.user_space?.id || dflt : userSpaceId || dflt;
-            // 显式给「默认」一项。agent 与会话都没绑定用户空间时 user_space_id 就是
-            // 空字符串，此时下拉里一个能匹配上的选项都没有，Select 只能渲染成空白——
-            // 看着就像"配置丢了"，其实只是没有可选项。给它个名字，空值才读得懂。
-            const opts = [
-              ...usOptions,
-              // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
-              // 否则下拉显示空白，用户看不出当前究竟在哪个目录
-              ...(cur && !usOptions.some((o) => o.value === cur)
-                ? [{ value: cur, label: cur }]
-                : []),
-            ];
-            return (
-              <Select
-                size="small"
-                style={{ width: 150 }}
-                value={cur}
-                options={opts}
-                onChange={(v) => (sessionId ? switchWorkspace(v) : setUserSpaceId(v))}
-                placeholder="选择工作空间"
-              />
-            );
-          })()}
-        </span>
-
-        {/* 组4：Agent 配置（最右，同样托底保持一致） */}
-        <span style={{ ...toolbarGroup, marginLeft: "auto" }}>
-          <Button
-            size="small"
-            icon={<SettingOutlined />}
-            onClick={() => setConfigOpen(true)}
-          >
-            Agent 配置
-          </Button>
-        </span>
+            <ArrowLeft className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setDrawerOpen(true)}
+          title={mode === "task" ? "任务列表" : "会话列表"}
+          className="flex h-8 items-center gap-1.5 rounded-[9px] border border-line-soft bg-panel px-2.5 text-[12.5px] font-medium text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
+        >
+          <List className="h-3.5 w-3.5" />
+          {mode === "task" ? "任务" : "会话"}
+        </button>
       </div>
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* 工作台区域：编码工作台 = 文件浏览器 + 编辑器（叠加在工作模式左侧） */}
         {workbenchType === "coding" && (
-          <>
+          <Suspense
+            fallback={
+              <div className="flex w-[240px] shrink-0 items-center justify-center border-r border-line-soft text-[13px] text-ink-muted">
+                加载编辑器…
+              </div>
+            }
+          >
             <div
               style={{
                 width: workbenchWidth,
@@ -1552,7 +1591,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 setWorkbenchWidth((w) => Math.max(360, Math.min(1100, w + dx)))
               }
             />
-          </>
+          </Suspense>
         )}
 
         {/* 工作模式区域：会话视图(对话) 或 任务视图(对话+计划) */}
@@ -1562,15 +1601,28 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             display: "flex",
             flexDirection: "column",
             minWidth: 0,
-            padding: mode === "task" ? 0 : 16,
+            // 内边距交给 chatInner 自己（里面是居中的单列容器），外层再加会翻倍
+            padding: 0,
             boxSizing: "border-box",
           }}
         >
-          {mode === "chat" ? chatInner : <TaskPage agentId={agentId} sessionId={sessionId} />}
+          {mode === "chat" ? (
+            chatInner
+          ) : (
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-[13px] text-ink-muted">
+                  加载任务视图…
+                </div>
+              }
+            >
+              <TaskPage agentId={agentId} sessionId={sessionId} />
+            </Suspense>
+          )}
         </div>
       </div>
 
-      {/* Agent 配置抽屉（入口在顶栏右侧） */}
+      {/* Agent 配置抽屉（入口在会话抽屉头部 / 没有会话时悬浮在左上角） */}
       <AgentInfoDrawer
         open={configOpen}
         onClose={() => setConfigOpen(false)}
@@ -1606,10 +1658,11 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               top: 0,
               bottom: 0,
               left: 0,
-              width: 260,
-              background: "#fff",
+              width: 264,
+              // 用主题变量而不是写死 #fff：否则深色主题下这块面板会亮成一块
+              background: "var(--kp-bg)",
               borderRight: "1px solid var(--kp-border-soft)",
-              boxShadow: "2px 0 8px rgba(0,0,0,0.10)",
+              boxShadow: "16px 0 48px -20px rgba(0,0,0,0.28)",
               zIndex: 11,
               display: "flex",
               flexDirection: "column",
@@ -1618,22 +1671,108 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 : "kp-slide-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 12px",
-                borderBottom: "1px solid var(--kp-border-soft)",
-              }}
-            >
-              <Typography.Text strong>会话</Typography.Text>
-              <Button
-                type="text"
-                size="small"
-                icon={<CloseOutlined />}
-                onClick={closeDrawer}
-              />
+            {/*
+              抽屉头部承接了原顶栏的全部控件：
+                第一行「会话 / 任务」切换 + 关闭；
+                第二行「工作台」「工作空间」「配置」。
+              它们和"选哪个会话"本来就是同一件事，放在这里比悬在内容区上方
+              更合理；内容区则不再被一条工具带切掉一行高度。
+            */}
+            <div className="shrink-0 border-b border-line-soft px-3 pb-2.5 pt-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-[13px] font-semibold tracking-[-0.01em] text-ink-strong">
+                  会话
+                </span>
+                <SegmentedControl
+                  value={mode}
+                  onChange={(v) => setMode(v as "chat" | "task")}
+                  options={[
+                    { label: "会话", value: "chat" },
+                    { label: "任务", value: "task" },
+                  ]}
+                />
+                <button
+                  type="button"
+                  title="关闭"
+                  onClick={closeDrawer}
+                  className="ml-auto flex h-7 w-7 items-center justify-center rounded-[7px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="mt-2.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setWorkbenchType(workbenchType === "off" ? "coding" : "off")
+                  }
+                  title={
+                    workbenchType === "coding"
+                      ? "关闭编码工作台"
+                      : "打开编码工作台"
+                  }
+                  className={cn(
+                    "flex h-7 items-center gap-1.5 rounded-[7px] px-2 text-[12px] font-medium transition-colors",
+                    workbenchType === "coding"
+                      ? "bg-brand/12 text-brand"
+                      : "text-ink-muted hover:bg-surface hover:text-ink"
+                  )}
+                >
+                  <Code2 className="h-3.5 w-3.5" />
+                  工作台
+                </button>
+
+                {/* 工作空间选择：会话 / 任务模式共用 */}
+                {(() => {
+                  const dflt =
+                    userSpaces.find((u) => u.name === "default")?.id ?? "";
+                  const cur = sessionId
+                    ? workspace?.user_space?.id || dflt
+                    : userSpaceId || dflt;
+                  // 显式给「默认」一项。agent 与会话都没绑定用户空间时 user_space_id
+                  // 就是空字符串，此时下拉里一个能匹配上的选项都没有，Select 只能渲染
+                  // 成空白——看着就像"配置丢了"，其实只是没有可选项。
+                  const opts = [
+                    ...usOptions,
+                    // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
+                    // 否则下拉显示空白，用户看不出当前究竟在哪个目录
+                    ...(cur && !usOptions.some((o) => o.value === cur)
+                      ? [{ value: cur, label: cur }]
+                      : []),
+                  ];
+                  return (
+                    <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <FolderOpen className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                      <select
+                        title="切换工作空间"
+                        value={cur}
+                        onChange={(e) =>
+                          sessionId
+                            ? switchWorkspace(e.target.value)
+                            : setUserSpaceId(e.target.value)
+                        }
+                        className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-[12px] font-medium text-ink-muted outline-none"
+                      >
+                        {opts.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
+
+                <button
+                  type="button"
+                  onClick={() => setConfigOpen(true)}
+                  title="Agent 配置"
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
             <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
               <SessionList

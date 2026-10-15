@@ -75,6 +75,9 @@ class ChatSession(Base):
     user_space_id: Mapped[Optional[str]] = mapped_column(
         String(26), ForeignKey("user_space.id"), nullable=True, index=True
     )
+    # 注意：这里**没有**模型字段。模型绑定在 agent 上（agent_llm_binding），
+    # 不随会话变——多 agent 协作时各 agent 用各自的模型跑，模型是 agent 的属性，
+    # 不是这次对话的参数。
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     # 会话种类：chat=普通会话，task=任务绑定会话（D1：一个任务一个 session）。
     # 用于在同一个会话列表里区分两种来源，而不必分两套 UI。

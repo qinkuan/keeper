@@ -1057,10 +1057,31 @@ def _build_config(
     ``workspace_read_only`` 必须由调用方用 :func:`_resolve_workspace` 从
     ``user_space`` 记录解析后传入（只读的真源在那里，agent 表上已不存这一列）。
     缺省 True 是「没有工作区上下文时按最保守处理」，不是给调用方偷懒的默认值。
+
+    **核心 agent 的人设覆盖**：若本行就是核心 agent，且设置里配了
+    ``core_agent.persona(_file)``，则用它盖掉画像里的 persona。放在这一层
+    而不是另建记录，是为了不动数据库——用户改的是一份"偏好"，不是 agent 画像。
     """
+    persona = row.persona or ""
+    try:
+        from ..config import core_agent_persona, core_agent_selector, load_config
+
+        cfg = load_config()
+        _name, _id = core_agent_selector(cfg)
+        # 只认显式指定过的核心 agent：没配时 _name/_id 都为 None，
+        # 此时绝不做任何覆盖（否则"第一个已装载的 agent"会莫名被人设盖掉）
+        is_core = (_id and _id == row.id) or (_name and _name == row.name)
+        if is_core:
+            override = core_agent_persona(cfg)
+            if override:
+                logger.info("核心 agent[%s]：使用配置里的 persona 覆盖", row.id)
+                persona = override
+    except Exception as e:  # noqa: BLE001 读配置失败不该让 agent 装配不了
+        logger.debug("解析核心 agent 人设失败，沿用画像里的 persona: %s", e)
+
     return AgentConfig(
         name=row.name,
-        persona=row.persona or "",
+        persona=persona,
         description=row.description or "",
         workspace=WorkspaceConfig(
             # agent 不再绑定工作区：path 留空、kind=none，运行期 resolve_workspace

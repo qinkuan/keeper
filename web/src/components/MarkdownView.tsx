@@ -1,6 +1,11 @@
 import { memo, useEffect, useState } from "react";
-import { Button, message } from "antd";
-import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
+import { toast } from "./ui/Toast";
+import { Check, Copy } from "lucide-react";
+
+/** 代码块右上角的小按钮：跟着代码块的浅色底走（原来写的 hover:bg-white/10 是
+    上一版深色代码块的残留，放在浅底上等于没有 hover 反馈） */
+const BTN =
+  "inline-flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11.5px] font-medium text-ink-muted transition-all duration-150 hover:bg-black/[0.06] hover:text-ink-strong";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remend from "remend";
@@ -91,7 +96,7 @@ function CodeBlock({ lang, text }: { lang?: string; text: string }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      message.error("复制失败");
+      toast.error("复制失败");
     }
   };
 
@@ -99,14 +104,10 @@ function CodeBlock({ lang, text }: { lang?: string; text: string }) {
     <div className="kp-md-code">
       <div className="kp-md-code-bar">
         <span>{lang || "code"}</span>
-        <Button
-          size="small"
-          type="text"
-          icon={copied ? <CheckOutlined /> : <CopyOutlined />}
-          onClick={copy}
-        >
+        <button type="button" onClick={copy} className={BTN}>
+          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
           {copied ? "已复制" : "复制"}
-        </Button>
+        </button>
       </div>
       {html ? (
         // Shiki 生成的 HTML 已对代码内容转义，可安全插入

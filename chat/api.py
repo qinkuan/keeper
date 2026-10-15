@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from ..agent.keeper import get_keeper, list_keepers
+from ..agent.keeper import get_keeper, list_keepers, resolve_core_agent
 from ..store import SessionMessage, get_session_factory
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, resolve_artifact_uri
@@ -105,7 +105,11 @@ async def list_agents(request: Request) -> Dict[str, Any]:
     base = str(request.base_url).rstrip("/")
     keepers = list_keepers()
     descs, origins = await _agent_descriptions([a.agent_id for a in keepers])
+    core = resolve_core_agent()
     return {
+        # 核心 agent：新建会话的默认落点。前端「新建对话」直接用它，
+        # 不必再让用户先选一个 agent——会话因此成为一等公民。
+        "core_agent_id": core.agent_id if core is not None else None,
         "agents": [
             {
                 "id": a.agent_id,

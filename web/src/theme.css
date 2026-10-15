@@ -1,48 +1,148 @@
 /*
- * 淡色 · 简约主题（全项目统一）
+ * 设计 token —— 全站换肤只改这一个文件。
  *
- * 取向：白底 + 极淡冷灰分层，强调色用柔和蓝（与会话气泡同一色系）；
- * 边框、阴影都很淡，靠留白与圆角建立层次，避免重色块。
+ * 取向：**现代桌面应用**（Linear / WorkBuddy / macOS Sonoma 一路）的观感，
+ * 而不是网页后台。三条决定：
+ *
+ * 1. **靠微差分层，而不是靠描边**。相邻表面之间只差 2~4% 明度
+ *    （sidebar < surface < panel），边框一律是极淡的发丝线；一旦边框
+ *    深到能看见，界面立刻退回"表格后台"的样子。
+ * 2. **品牌色只出现在该出现的地方**：选中态、主按钮、焦点环、活跃图标。
+ *    其余全部中性。中性是**微冷灰**（zinc 系）而不是暖灰——冷灰更像
+ *    工具，暖灰更像纸。
+ * 3. **阴影给得少但给得准**：只在浮层（弹窗 / 抽屉 / 输入浮块）用，
+ *    且用带环境色的双层阴影（近处一层紧、远处一层散），这比单层黑影更像
+ *    真实光照，卡片 hover 才有"抬起来"的感觉。
+ *
+ * 变量名沿用 --kp-* 前缀。Tailwind 那边用 channel 形式
+ * （--*-rgb: "79 70 229"）暴露给 bg-brand/10 这类透明度修饰符，
+ * 所以改 hex 时 rgb 那组要同步改。
  */
 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
-  /* 主色：与智能体页「已添加」同款的 antd blue，清爽干净；用于按钮 / 图标 / 品牌 */
-  --kp-primary: #1677ff;
-  --kp-primary-hover: #4096ff;
-  --kp-primary-active: #0958d9;
-  --kp-primary-strong: #0958d9;
-  /* 展示类（气泡、选中底）用的淡蓝，与「已添加」标签底色一致 */
-  --kp-primary-soft: #e6f4ff;
-  --kp-primary-ring: rgba(22, 119, 255, 0.18);
+  /* ===== 品牌色 =====
+     主色 #5B9BF5：在上一版 #74A6F8 的明度上"往蓝里挪"——
+     红/绿分量各砍约 10 点、蓝分量基本不动，明度仍在 68% 附近，
+     但色相从 220° 移到 216°，观感明显更蓝、不再发灰（不"黑"）。
+     浅蓝 #D3E2FD：同色相的高亮底，承担"静态背景"的角色（菜单栏等）。 */
+  --kp-primary: #5b9bf5;
+  /* hover 提亮、active 压深：三态各自可辨，又不跳出色系 */
+  --kp-primary-hover: #7aadf7;
+  --kp-primary-active: #4189ee;
+  --kp-primary-strong: #4189ee;
+  /* 展示类（选中底、气泡、图标底）用的淡蓝 */
+  --kp-primary-soft: rgba(91, 155, 245, 0.2);
+  --kp-primary-ring: rgba(91, 155, 245, 0.42);
+  --kp-primary-rgb: 91 155 245;
+  /* 渐变第二端：主题浅蓝 #D3E2FD（比主色更亮一档） */
+  --kp-accent: #d3e2fd;
+  --kp-accent-rgb: 211 226 253;
 
-  /* 中性色：极淡冷灰阶 */
+  /* ===== 中性阶 ===== */
+  /* 灰阶的基准取 Chrome 工具栏的 #DFDFDF（真正的中性灰，不带色相）。
+     层级：sidebar(最暗) < surface < surface-soft < panel(白)。
+     原来的灰偏冷（带一点蓝），和新的 Chrome 蓝放在一起会显得脏；
+     中性灰才是它的正确底色。 */
+  --kp-bg-app: #dfdfdf;
   --kp-bg: #ffffff;
-  --kp-bg-app: #f7f8fa;
-  --kp-surface: #f5f7fa;
-  --kp-surface-soft: #f2f5f9;
-  --kp-border: #e2e5ea;
-  --kp-border-soft: #edeff3;
-  /* 正文色；标题 / 项目名称等强调文案用 strong（带一点蓝调，与主题呼应） */
-  --kp-text: #2b2f36;
-  --kp-text-strong: #1f2a37;
-  --kp-text-secondary: #7a8290;
-  --kp-text-muted: #a3aab5;
+  --kp-surface: #f2f2f2;
+  --kp-surface-soft: #f8f8f8;
+  --kp-border: #d8d8d8;
+  --kp-border-soft: #e8e8e8;
 
-  /* 圆角：卡片大圆角，控件与按钮胶囊 */
-  --kp-radius: 12px;
-  --kp-radius-lg: 18px;
+  /* 正文色取 #474747（纯中性灰，无蓝调），以它为基准往两端推：
+     strong 更深（标题/强调）、secondary / muted 更浅。
+     基准色不能动，其余三档保持与它的相对关系，层级才不会塌。 */
+  --kp-text: #474747;
+  --kp-text-strong: #262626;
+  --kp-text-secondary: #6b6b6b;
+  --kp-text-muted: #8f8f8f;
+
+  /* 菜单栏：直接用主题浅蓝 #D3E2FD，不叠透明度。
+     它本身已经足够淡（明度约 96%），再稀释就成了白，看不出是蓝色。 */
+  --kp-sidebar: #d3e2fd;
+  /* 侧栏与内容区的分隔线：取同色相的深化版。
+     用纯灰线会在这块淡蓝上显得"脏"，同色相蓝线才融得进去。 */
+  --kp-sidebar-line: #b6cdf5;
+  /* 顶栏走玻璃：白色半透明压在灰底上，透出底色的同时比内容区更亮 */
+  --kp-toolbar: rgba(255, 255, 255, 0.72);
+
+  /* 随主题变化的「表面细节」：玻璃顶栏、滚动条、拖拽把手 */
+  --kp-header-bg: rgba(255, 255, 255, 0.72);
+  --kp-scrollbar: rgba(0, 0, 0, 0.18);
+  --kp-scrollbar-hover: rgba(0, 0, 0, 0.32);
+  --kp-grip: #cccccc;
+  --kp-lift-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.16),
+    0 2px 6px -2px rgba(0, 0, 0, 0.06);
+  --kp-hairline: rgba(0, 0, 0, 0.08);
+
+  /* channel 形式：给 Tailwind 透明度修饰符用（bg-brand/10、text-ink/60） */
+  --kp-bg-app-rgb: 223 223 223;
+  --kp-bg-rgb: 255 255 255;
+  --kp-surface-rgb: 242 242 242;
+  --kp-surface-soft-rgb: 248 248 248;
+  --kp-border-rgb: 216 216 216;
+  --kp-border-soft-rgb: 232 232 232;
+  --kp-text-rgb: 71 71 71;
+  --kp-text-strong-rgb: 38 38 38;
+  --kp-text-secondary-rgb: 107 107 107;
+  --kp-text-muted-rgb: 143 143 143;
+  --kp-toolbar-rgb: 255 255 255;
+
+  /* 圆角：桌面应用尺度。控件 8、卡片 12、浮层 16、胶囊 980 */
+  --kp-radius: 8px;
+  --kp-radius-lg: 12px;
+  --kp-radius-xl: 16px;
   --kp-pill: 980px;
 
-  /* 阴影：极淡、带一点冷调 */
-  --kp-shadow-sm: 0 2px 8px rgba(31, 45, 61, 0.04);
-  --kp-shadow-md: 0 8px 24px rgba(31, 45, 61, 0.07);
+  /* ===== 阴影 ===== */
+  /* 双层（近处紧、远处散）比单层更接近真实光照，这是"廉价 vs 精致"的分水岭 */
+  --kp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --kp-shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.09),
+    0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --kp-shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.2),
+    0 6px 14px -8px rgba(0, 0, 0, 0.1);
+  /* 品牌投影：用主色本身，按钮才有"自己发光"而不是"贴了层黑" */
+  --kp-shadow-brand: 0 6px 18px -6px rgba(91, 155, 245, 0.48);
+
+  /* 品牌渐变：按钮 / 徽标 / 头像共用一条。
+     从主色 #5B9BF5 走到 accent #D3E2FD，明度差一档，过渡很轻。 */
+  --kp-gradient-brand: linear-gradient(135deg, #5b9bf5 0%, #d3e2fd 100%);
+  /* 展示类淡底（气泡 / 图标底 / 高亮块） */
+  --kp-gradient-brand-soft: linear-gradient(
+    135deg,
+    rgba(91, 155, 245, 0.18) 0%,
+    rgba(211, 226, 253, 0.5) 100%
+  );
+
+  /* 图表色板：同一支蓝的三档明度。图表里的颜色不能直接写 hex——
+     深色主题下写死的中性灰会变成一条刺眼的线。 */
+  --kp-chart-1: #5b9bf5; /* 输入 token */
+  --kp-chart-2: #9dc0f8; /* 输出 token */
+  --kp-chart-3: #4189ee; /* 成本 / 调用次数 */
+
+  /* 主色底上的前景色（文字/图标）。
+     主色 #5B9BF5 明度约 67%，属于**浅底**，必须用深色前景。
+     深蓝 #0A1F4D 在这块底上有 5.6:1，读起来很稳，
+     也维持了"浅蓝底 + 深蓝字"的观感。 */
+  --kp-primary-deep: #0a1f4d;
+
+  /* 焦点环：主色偏浅时，靠加大不透明度才看得见 */
+  --kp-ring: rgba(91, 155, 245, 0.5);
 
   /* Apple 缓动 */
   --kp-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --kp-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 html {
   scroll-behavior: smooth;
+  /* 桌面应用是桌面优先：字号不随系统放大而失控，只允许用户级缩放 */
+  -webkit-text-size-adjust: 100%;
 }
 
 html,
@@ -56,33 +156,35 @@ body {
   background: var(--kp-bg-app);
   color: var(--kp-text);
   font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* 等宽数字 + 标点挤压：用量、耗时、token 数这类值才能对齐成列 */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "cv02", "cv03", "cv04";
+  text-rendering: optimizeLegibility;
 }
 
-/* 标题：半粗 + 紧字距 */
+/* 标题：字重收在 600，再重就"网页 banner"了。字距负值是现代 UI 的通例，
+   小字号下尤其明显——同样的字，紧一点就显得更精致。 */
 h1,
 h2,
 h3,
 h4,
 h5 {
-  color: var(--kp-text);
+  color: var(--kp-text-strong);
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
 }
 
-/* 顶栏：毛玻璃 + 极淡底边 */
-.ant-layout-header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: rgba(255, 255, 255, 0.78) !important;
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border-bottom: 1px solid var(--kp-border-soft) !important;
+/* 数字统一等宽（表格 / 用量 / 耗时） */
+.kp-num,
+table td,
+table th {
+  font-variant-numeric: tabular-nums;
 }
 
-/* 细窄滚动条 */
+/* 细窄滚动条：8px，滑块两侧留白使其看起来只有 2px */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -93,41 +195,110 @@ h5 {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(31, 45, 61, 0.16);
+  background: var(--kp-scrollbar);
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(31, 45, 61, 0.3);
+  background: var(--kp-scrollbar-hover);
   background-clip: content-box;
 }
 
-/* 按钮：胶囊 + Apple 缓动 + 按压反馈 */
-.ant-btn {
-  border-radius: var(--kp-pill) !important;
-  transition: all 0.3s var(--kp-ease) !important;
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
-.ant-btn:active {
-  transform: scale(0.97);
+/* ===== 原生表单控件复位 =====
+ *
+ * Tailwind 的 preflight 在本项目里是关掉的（见 tailwind.config.js），
+ * 所以浏览器自带的 UA 样式还在。裸 `<button>` 的默认值尤其显眼：
+ *   border: 2px outset ButtonBorder;   → 一圈浅色立体边框
+ *   background-color: buttonface;      → 灰底
+ *   padding: 1px 6px;                  → 自带内边距
+ *   font: 400 13.3333px Arial;         → 自带的字体与字号
+ * 结果是"没写任何边框的按钮"看起来依然有框、有灰底，且字号被锁在
+ * 13.33px——这就是导航项"有边框 / 文字偏小"的真正原因。
+ *
+ * 这里做最小复位：清掉边框、底色、内边距和原生字体，其余（颜色、尺寸、
+ * 过渡）一律交给各处的 Tailwind 类。antd 在的时候是它全局重置了 UA 样式，
+ * 移除之后这层保障就没了，必须自己补上——否则任何忘记显式写 border /
+ * background 的按钮都会露出 UA 样式。
+ */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background-color: transparent;
+  background-image: none;
+  /* Safari 会额外加一道内发光，按钮形状不规则时尤其难看 */
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
 }
 
 /* 交互元素统一缓动 */
 a,
-.ant-menu-item,
-.ant-select-selector,
-.ant-input,
-.ant-card {
+button {
   transition: all 0.3s var(--kp-ease);
 }
 
-/* 入场动画：淡入 + 轻微上浮 */
+/* 键盘 focus 才画环，鼠标点击不画——后者是"廉价感"的常见来源 */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--kp-ring);
+  border-radius: 6px;
+}
+
+/* ===== 玻璃材质 ===== */
+/* 顶栏、浮层用：饱和度补偿 + 大半径模糊，macOS 材质的关键是
+   backdrop 的 saturate，否则隔着它看底色会发灰发闷。 */
+.kp-glass {
+  background: var(--kp-header-bg);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* ===== 内容画布 ===== */
+/* 大面积纯白在屏幕上会"发死"。顶部压一道极淡的品牌色光晕（7% 不透明度，
+   肉眼几乎察觉不到，只是不再死白），内容滚下去自然消失。
+   右下角补一道浅蓝，让光晕有个方向感，不至于像一块污渍。 */
+.kp-canvas {
+  background:
+    radial-gradient(
+      1100px 360px at 50% -10%,
+      rgba(91, 155, 245, 0.09),
+      transparent 70%
+    ),
+    radial-gradient(
+      800px 300px at 100% 100%,
+      rgba(211, 226, 253, 0.6),
+      transparent 70%
+    ),
+    var(--kp-bg);
+}
+
+/* ===== 入场动画 ===== */
 @keyframes kp-fade-up {
   from {
     opacity: 0;
-    transform: translateY(16px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -136,7 +307,7 @@ a,
 }
 
 .kp-fade-up {
-  animation: kp-fade-up 0.6s var(--kp-ease) both;
+  animation: kp-fade-up 0.42s var(--kp-ease-out) both;
 }
 
 @keyframes kp-fade-in {
@@ -149,24 +320,24 @@ a,
 }
 
 .kp-fade-in {
-  animation: kp-fade-in 0.5s var(--kp-ease) both;
+  animation: kp-fade-in 0.4s var(--kp-ease-out) both;
 }
 
 .kp-lift {
-  transition: transform 0.3s var(--kp-ease), box-shadow 0.3s var(--kp-ease),
-    border-color 0.3s var(--kp-ease);
+  transition: transform 0.28s var(--kp-ease-out), box-shadow 0.28s var(--kp-ease-out),
+    border-color 0.28s var(--kp-ease-out);
 }
 
 .kp-lift:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 12px 28px rgba(31, 45, 61, 0.1);
+  transform: translateY(-2px);
+  box-shadow: var(--kp-lift-shadow);
   border-color: var(--kp-border);
 }
 
 /* 卡片内「进入」箭头：hover 微移 */
 .kp-arrow {
-  transition: transform 0.3s var(--kp-ease), opacity 0.3s var(--kp-ease);
-  opacity: 0.5;
+  transition: transform 0.28s var(--kp-ease-out), opacity 0.28s var(--kp-ease-out);
+  opacity: 0;
 }
 
 .kp-lift:hover .kp-arrow {
@@ -178,7 +349,7 @@ a,
 @keyframes kp-bubble-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -187,7 +358,7 @@ a,
 }
 
 .kp-bubble-in {
-  animation: kp-bubble-in 0.35s var(--kp-ease) both;
+  animation: kp-bubble-in 0.3s var(--kp-ease-out) both;
 }
 
 /* 流式输出光标：回答生成中在末尾闪烁 */
@@ -204,13 +375,51 @@ a,
 
 .kp-caret {
   display: inline-block;
-  width: 6px;
+  width: 5px;
   height: 14px;
   margin-left: 3px;
   vertical-align: -2px;
   border-radius: 2px;
   background: var(--kp-primary);
   animation: kp-caret-blink 1s steps(1, end) infinite;
+}
+
+/* 「正在生成」的呼吸光点：给一点生命感，而不是死板的转圈 */
+@keyframes kp-pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+.kp-pulse-dot {
+  animation: kp-pulse-dot 1.4s var(--kp-ease) infinite;
+}
+
+/* 骨架屏微光 */
+@keyframes kp-shimmer {
+  from {
+    background-position: -220% 0;
+  }
+  to {
+    background-position: 220% 0;
+  }
+}
+
+.kp-skeleton {
+  background: linear-gradient(
+    100deg,
+    var(--kp-surface) 30%,
+    var(--kp-surface-soft) 50%,
+    var(--kp-surface) 70%
+  );
+  background-size: 220% 100%;
+  animation: kp-shimmer 1.4s linear infinite;
 }
 
 /* 输入框拖拽把手：默认浅灰，hover 变主色并微放大，便于发现 */
@@ -227,21 +436,21 @@ a,
 
 .kp-grip i {
   display: block;
-  width: 56px;
-  height: 6px;
+  width: 48px;
+  height: 4px;
   border-radius: 999px;
-  background: #c3c9d4;
-  transition: background 0.15s var(--kp-ease), transform 0.15s var(--kp-ease);
+  background: var(--kp-grip);
+  transition: background 0.2s var(--kp-ease), transform 0.2s var(--kp-ease);
 }
 
 .kp-grip:hover i {
   background: var(--kp-primary);
-  transform: scaleX(1.06);
+  transform: scaleX(1.12);
 }
 
 /* ===== Markdown 渲染（助手回复 / 工作台 .md 预览共用） ===== */
 .kp-md {
-  font-size: 14px;
+  font-size: 14.5px;
   line-height: 1.75;
   color: var(--kp-text);
   word-break: break-word;
@@ -259,9 +468,10 @@ a,
 .kp-md h2,
 .kp-md h3,
 .kp-md h4 {
-  margin: 18px 0 10px;
+  margin: 20px 0 10px;
   font-weight: 600;
   line-height: 1.4;
+  letter-spacing: -0.015em;
   color: var(--kp-text-strong);
 }
 
@@ -274,11 +484,11 @@ a,
 }
 
 .kp-md h3 {
-  font-size: 15px;
+  font-size: 15.5px;
 }
 
 .kp-md h4 {
-  font-size: 14px;
+  font-size: 14.5px;
 }
 
 .kp-md p {
@@ -288,6 +498,7 @@ a,
 /* 显式声明，不依赖浏览器默认样式表 */
 .kp-md strong {
   font-weight: 600;
+  color: var(--kp-text-strong);
 }
 
 .kp-md em {
@@ -304,11 +515,15 @@ a,
   margin: 4px 0;
 }
 
+.kp-md li::marker {
+  color: var(--kp-text-muted);
+}
+
 .kp-md blockquote {
   margin: 12px 0;
-  padding: 2px 14px;
-  border-left: 3px solid var(--kp-primary-ring);
-  border-radius: 0 6px 6px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--kp-primary);
+  border-radius: 0 8px 8px 0;
   background: var(--kp-surface);
   color: var(--kp-text-secondary);
 }
@@ -316,44 +531,55 @@ a,
 .kp-md a {
   color: var(--kp-primary);
   text-decoration: none;
+  border-bottom: 1px solid var(--kp-primary-ring);
 }
 
 .kp-md a:hover {
-  text-decoration: underline;
+  border-bottom-color: var(--kp-primary);
 }
 
 .kp-md hr {
-  margin: 16px 0;
+  margin: 18px 0;
   border: none;
   border-top: 1px solid var(--kp-border-soft);
 }
 
 .kp-md table {
   width: 100%;
-  margin: 12px 0;
-  border-collapse: collapse;
+  margin: 14px 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--kp-border);
+  border-radius: 8px;
+  overflow: hidden;
   font-size: 13px;
 }
 
 .kp-md th,
 .kp-md td {
-  padding: 6px 10px;
-  border: 1px solid var(--kp-border);
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--kp-border-soft);
   text-align: left;
+}
+
+.kp-md tr:last-child td {
+  border-bottom: none;
 }
 
 .kp-md th {
   background: var(--kp-surface);
   font-weight: 600;
+  color: var(--kp-text-strong);
 }
 
 /* 代码块：MarkdownView 的 CodeBlock 结构（.kp-md-code > bar + Shiki/pre） */
 .kp-md-code {
-  margin: 12px 0;
+  margin: 14px 0;
   overflow: hidden;
-  border: 1px solid var(--kp-border-soft);
-  border-radius: 8px;
-  background: var(--kp-surface);
+  border: 1px solid var(--kp-border);
+  border-radius: 10px;
+  background: var(--kp-surface-soft);
+  box-shadow: var(--kp-shadow-sm);
 }
 
 .kp-md-code-bar {
@@ -361,17 +587,17 @@ a,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 8px 4px 12px;
+  padding: 5px 8px 5px 12px;
   border-bottom: 1px solid var(--kp-border-soft);
-  background: var(--kp-surface-soft);
-  font-size: 12px;
+  background: var(--kp-surface);
+  font-size: 11.5px;
   color: var(--kp-text-muted);
 }
 
 /* Shiki 输出 <pre class="shiki">：背景交给外层容器，免得主题色盖掉项目配色 */
 .kp-md-code .shiki {
   margin: 0;
-  padding: 12px;
+  padding: 13px 14px;
   max-height: 520px;
   overflow: auto;
   background: transparent !important;
@@ -389,7 +615,7 @@ a,
 /* 高亮未就绪 / 语言不支持时的降级：纯文本代码块 */
 .kp-md-code pre {
   margin: 0;
-  padding: 12px;
+  padding: 13px 14px;
   max-height: 520px;
   overflow: auto;
   font-size: 12.5px;
@@ -400,9 +626,97 @@ a,
 /* 行内代码 */
 .kp-md-inline-code {
   padding: 1px 5px;
-  border: 1px solid var(--kp-border-soft);
-  border-radius: 4px;
+  border: 1px solid var(--kp-border);
+  border-radius: 5px;
   background: var(--kp-surface);
   font-size: 12.5px;
+  color: var(--kp-text-strong);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ===== 深色主题（可选）：给 <html> 加 class="dark" 即整体切换 =====
+   同样只换变量值，组件一行都不用改。 */
+.dark {
+  /* 深色下主色沿用同一支蓝（同样偏蓝的 216° 色相），但**比浅色主题再提亮一档**：
+     浅色主题里的 #5B9BF5 放在黑底上只有 4.5:1，按不太动；
+     提到 #8FB4F8（明度约 72%）后落在深色主题该有的高度上。
+     hover 再提亮，active 压回中间调。 */
+  --kp-primary: #8fb4f8;
+  --kp-primary-hover: #aecaf9;
+  --kp-primary-active: #5b9bf5;
+  --kp-primary-strong: #aecaf9;
+  --kp-primary-soft: rgba(143, 180, 248, 0.18);
+  --kp-primary-ring: rgba(143, 180, 248, 0.48);
+  --kp-primary-rgb: 143 180 248;
+  /* 深色下浅蓝"反过来用"：#D3E2FD 当高亮底太刺眼，
+     改作浅色文字/描边，背景角色交给 primary-soft */
+  --kp-accent: #d3e2fd;
+  --kp-accent-rgb: 211 226 253;
+
+  /* 深色下层级反过来：越靠前的表面越亮 = app < bg < surface < surface-soft */
+  --kp-bg-app: #09090b;
+  --kp-bg: #101013;
+  --kp-surface: #17171b;
+  --kp-surface-soft: #1e1e23;
+  --kp-border: #2a2a31;
+  --kp-border-soft: #1f1f25;
+
+  --kp-text: #d4d4d8;
+  --kp-text-strong: #fafafa;
+  --kp-text-secondary: #a1a1aa;
+  --kp-text-muted: #71717a;
+
+  --kp-header-bg: rgba(16, 16, 19, 0.72);
+  --kp-scrollbar: rgba(255, 255, 255, 0.14);
+  --kp-scrollbar-hover: rgba(255, 255, 255, 0.26);
+  --kp-grip: #3f3f46;
+  --kp-lift-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6),
+    0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --kp-hairline: rgba(255, 255, 255, 0.08);
+
+  --kp-bg-app-rgb: 9 9 11;
+  --kp-bg-rgb: 16 16 19;
+  --kp-surface-rgb: 23 23 27;
+  --kp-surface-soft-rgb: 30 30 35;
+  --kp-border-rgb: 42 42 49;
+  --kp-border-soft-rgb: 31 31 37;
+  --kp-text-rgb: 212 212 216;
+  --kp-text-strong-rgb: 250 250 250;
+  --kp-text-secondary-rgb: 161 161 170;
+  --kp-text-muted-rgb: 113 113 122;
+  /* 深色下把蓝色压成一层冷色膜，而不是换成另一个色相——
+     这样"这里还是那个蓝"的认知能跨主题保留 */
+  --kp-sidebar: rgba(143, 180, 248, 0.1);
+  --kp-sidebar-line: rgba(143, 180, 248, 0.16);
+  --kp-toolbar: rgba(16, 16, 19, 0.72);
+  --kp-toolbar-rgb: 16 16 19;
+
+  --kp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --kp-shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.5),
+    0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --kp-shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.7),
+    0 6px 14px -8px rgba(0, 0, 0, 0.5);
+  --kp-shadow-brand: 0 6px 18px -6px rgba(143, 180, 248, 0.48);
+
+  /* 深色下渐变方向反过来：从左端提亮到右端更亮，整体落在深底可读的区间 */
+  --kp-gradient-brand: linear-gradient(135deg, #5b9bf5 0%, #9dc0f8 100%);
+  --kp-gradient-brand-soft: linear-gradient(
+    135deg,
+    rgba(143, 180, 248, 0.16) 0%,
+    rgba(211, 226, 253, 0.1) 100%
+  );
+
+  /* 深色下主色底上同样用**深色前景**：#8FB4F8 上白字只有 1.9:1，
+     深蓝字有 6.7:1 —— 两条主题的规律一致 */
+  --kp-primary-deep: #0a1f4d;
+
+  --kp-ring: rgba(143, 180, 248, 0.52);
+
+  /* 深色下图表色整体提亮一档，否则柱子在黑底上糊成一片 */
+  --kp-chart-1: #8fb4f8;
+  --kp-chart-2: #d3e2fd;
+  --kp-chart-3: #5b9bf5;
+
+  /* 让浏览器原生控件（滚动条、输入框、日期面板）跟随深色 */
+  color-scheme: dark;
 }

@@ -13,24 +13,17 @@
  * 3. **失败信息必须可执行**。「答案里找不到 8080；实际答案：…」比「不通过」有用
  *    得多——前者能直接拿去修。
  */
-import {
-  Alert,
-  Button,
-  Col,
-  Divider,
-  Row,
-  Space,
-  Statistic,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-} from "antd";
-import type { ColumnsType } from "antd/es/table";
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
 
 import type { EvalCaseResult, EvalCaseStatus, EvalReport } from "../api/types";
-
-const { Text } = Typography;
+import { Hint, Section } from "./ui/Page";
+import { Pill } from "./ui/Pill";
+import type { PillTone } from "./ui/Pill";
+import { Stat } from "./ui/Stat";
+import { Table } from "./ui/Table";
+import type { Column } from "./ui/Table";
+import { cn } from "../lib/utils";
 
 export function fmtPct(v: number | null | undefined) {
   return v == null ? "—" : `${(v * 100).toFixed(1)}%`;
@@ -50,82 +43,88 @@ export function fmtSec(ms: number | null | undefined) {
 
 export const STATUS_META: Record<
   EvalCaseStatus,
-  { label: string; color: string }
+  { label: string; tone: PillTone }
 > = {
-  broken: { label: "回归", color: "red" },
-  fixed: { label: "修复", color: "green" },
-  new: { label: "新增", color: "blue" },
-  kept: { label: "保持", color: "default" },
-  skipped: { label: "跳过", color: "default" },
+  broken: { label: "回归", tone: "red" },
+  fixed: { label: "修复", tone: "green" },
+  new: { label: "新增", tone: "blue" },
+  kept: { label: "保持", tone: "muted" },
+  skipped: { label: "跳过", tone: "muted" },
 };
 
 export type EvalRow = { c: EvalCaseResult; st: EvalCaseStatus };
 
+/** 判定依据单元格：失败时优先给第一条失败原因（可直接拿去修） */
+function VerdictCell({ r }: { r: EvalRow }) {
+  if (r.c.error) return <Pill tone="red">运行异常</Pill>;
+  if (!r.c.passed && r.c.failures.length) {
+    const f = r.c.failures[0];
+    return (
+      <span
+        title={r.c.failures.map((x) => `${x.assert}：${x.detail}`).join("\n")}
+        className="block max-w-[320px] truncate text-[12px] text-red-600 dark:text-red-300"
+      >
+        {f.assert}：{f.detail}
+      </span>
+    );
+  }
+  return (
+    <span className="block max-w-[320px] truncate text-[12px] text-ink-muted">
+      {r.c.summary || "—"}
+    </span>
+  );
+}
+
 /** 逐条用例表：状态 / 用例 / 判定依据 / 步 / token / 耗时。 */
-export function buildColumns(): ColumnsType<EvalRow> {
+export function buildColumns(): Column<EvalRow>[] {
   return [
     {
+      key: "status",
       title: "状态",
-      dataIndex: "st",
       width: 74,
-      render: (st: EvalCaseStatus, r) =>
+      render: (r) =>
         r.c.skipped ? (
-          <Tag>跳过</Tag>
+          <Pill tone="muted">跳过</Pill>
         ) : (
-          <Tag color={STATUS_META[st].color}>{STATUS_META[st].label}</Tag>
+          <Pill tone={STATUS_META[r.st].tone}>{STATUS_META[r.st].label}</Pill>
         ),
     },
     {
+      key: "case",
       title: "用例",
-      dataIndex: ["c", "case_id"],
       width: 200,
-      render: (_, r) => (
-        <Space direction="vertical" size={0}>
-          <Text code>{r.c.case_id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+      render: (r) => (
+        <span className="block">
+          <span className="block font-mono text-[12px] text-ink">
+            {r.c.case_id}
+          </span>
+          <span className="block truncate text-[12px] text-ink-muted">
             {r.c.title}
-          </Text>
-        </Space>
+          </span>
+        </span>
       ),
     },
+    { key: "verdict", title: "判定依据", render: (r) => <VerdictCell r={r} /> },
     {
-      title: "判定依据",
-      dataIndex: ["c", "summary"],
-      render: (_, r) => {
-        if (r.c.error) return <Tag color="red">运行异常</Tag>;
-        if (!r.c.passed && r.c.failures.length) {
-          const f = r.c.failures[0];
-          return (
-            <Tooltip
-              title={r.c.failures
-                .map((x) => `${x.assert}：${x.detail}`)
-                .join("\n")}
-            >
-              <Text type="danger" style={{ fontSize: 12 }}>
-                {f.assert}：{f.detail}
-              </Text>
-            </Tooltip>
-          );
-        }
-        return (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {r.c.summary || "—"}
-          </Text>
-        );
-      },
+      key: "steps",
+      title: "步",
+      width: 60,
+      align: "right",
+      render: (r) => r.c.metrics?.steps ?? "—",
     },
-    { title: "步", dataIndex: ["c", "metrics", "steps"], width: 50 },
     {
+      key: "tokens",
       title: "token",
-      dataIndex: ["c", "metrics", "total_tokens"],
       width: 86,
-      render: (v: number) => fmtNum(v),
+      align: "right",
+      render: (r) => fmtNum(r.c.metrics?.total_tokens),
     },
     {
+      key: "duration",
       title: "耗时",
-      dataIndex: ["c", "metrics", "duration_ms"],
       width: 76,
-      render: (v: number) => fmtSec(v),
+      align: "right",
+      render: (r) => fmtSec(r.c.metrics?.duration_ms),
     },
   ];
 }
@@ -143,13 +142,39 @@ export function DeltaText({
   if (Math.abs(p) < 1) return null; // 抖动小于 1% 不展示，否则全是噪音
   const better = invert ? d.delta < 0 : d.delta > 0;
   return (
-    <Text
-      type={better ? "success" : "danger"}
-      style={{ fontSize: 12, marginLeft: 4 }}
+    <span
+      className={cn(
+        "ml-1 text-[12px]",
+        better
+          ? "text-emerald-600 dark:text-emerald-400"
+          : "text-red-600 dark:text-red-400"
+      )}
     >
       {d.delta > 0 ? "+" : ""}
       {p.toFixed(0)}%
-    </Text>
+    </span>
+  );
+}
+
+/** 折行的用例详情（展开行内容） */
+function CaseDetail({ c }: { c: EvalCaseResult }) {
+  return (
+    <div className="space-y-1 text-[12px]">
+      <div className="text-ink-muted">输入：{c.input}</div>
+      {c.tool_calls.length > 0 && (
+        <div className="text-ink-muted">
+          调用工具：{c.tool_calls.join("、")}
+        </div>
+      )}
+      {c.answer_preview && (
+        <div className="text-ink-muted">答案节选：{c.answer_preview}</div>
+      )}
+      {c.failures.map((f, i) => (
+        <div key={i} className="text-red-600 dark:text-red-300">
+          {f.assert}：{f.detail}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -162,6 +187,9 @@ export default function EvalReportView({
   rows: EvalRow[];
   onOpenMd: () => void;
 }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [showByCase, setShowByCase] = useState(true);
+
   const cmp = report.compare;
   const s = report.summary;
   const fp = report.fingerprint;
@@ -172,55 +200,44 @@ export default function EvalReportView({
   const subset = report.selection?.mode === "subset";
 
   return (
-    <>
+    <div className="space-y-3">
       {subset && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={`选集运行：本次只跑了 ${rows.length} 条，下面的通过率只针对这几条`}
-          description="完整基线请看历史里 mode=all 的那次（latest 不会被选集运行覆盖）。"
-        />
+        <Hint
+          tone="warn"
+          title={`选集运行：本次只跑了 ${rows.length} 条，下面的通过率只针对这几条`}
+        >
+          完整基线请看历史里 mode=all 的那次（latest 不会被选集运行覆盖）。
+        </Hint>
       )}
+
       {broken.length > 0 && (
-        <Alert
-          type="error"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={`${broken.length} 条用例回归`}
-          description={
-            <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-              {broken.map((b) => (
-                <li key={b.c.case_id}>
-                  <Text code>{b.c.case_id}</Text>
-                  {b.c.failures.length ? `　${b.c.failures[0].detail}` : ""}
-                </li>
-              ))}
-            </ul>
-          }
-        />
+        <Hint tone="danger" title={`${broken.length} 条用例回归`}>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {broken.map((b) => (
+              <li key={b.c.case_id}>
+                <code className="rounded bg-surface px-1 py-0.5 font-mono text-[11px]">
+                  {b.c.case_id}
+                </code>
+                {b.c.failures.length ? `　${b.c.failures[0].detail}` : ""}
+              </li>
+            ))}
+          </ul>
+        </Hint>
       )}
       {cmp?.has_baseline && broken.length === 0 && (
-        <Alert
-          type="success"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={cmp.verdict}
-        />
+        <Hint tone="info">{cmp.verdict}</Hint>
       )}
       {!cmp?.has_baseline && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="这是首次基线，没有对比对象。再跑一次才会有「相对上次」的变化。"
-        />
+        <Hint tone="warn">
+          这是首次基线，没有对比对象。再跑一次才会有「相对上次」的变化。
+        </Hint>
       )}
+
       {/* 对比方向必须写明：拿一份**更早**的报告当对比对象时，「回归 1 条」
           指的是「那份老报告比现在差」，很容易被读成「现在退化了」 */}
       {cmp?.has_baseline && (
-        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
-          对比对象：{cmp.baseline_run_id}
+        <div className="text-[12px] text-ink-muted">
+          对比对象：<code className="font-mono">{cmp.baseline_run_id}</code>
           {(() => {
             const d = cmp.summary?.passed;
             if (!d) return null;
@@ -230,116 +247,98 @@ export default function EvalReportView({
               ? `　—— 当前比它好 ${diff} 条`
               : `　—— 当前比它差 ${Math.abs(diff)} 条`;
           })()}
-        </Text>
+        </div>
       )}
+
       {cmp?.fingerprint_changed?.length ? (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="被测配置变了，下面的指标 delta 不能归因给代码改动"
-          description={cmp.fingerprint_changed.join("；")}
-        />
+        <Hint
+          tone="warn"
+          title="被测配置变了，下面的指标 delta 不能归因给代码改动"
+        >
+          {cmp.fingerprint_changed.join("；")}
+        </Hint>
       ) : null}
 
-      <Row gutter={16}>
-        <Col span={6}>
-          <Statistic
-            title="通过率"
-            value={fmtPct(s.pass_rate)}
-            valueStyle={{
-              color:
-                s.pass_rate >= 0.9
-                  ? "#389e0d"
-                  : s.pass_rate >= 0.7
-                  ? "#fa8c16"
-                  : "#cf1322",
-            }}
-            suffix={
-              <Text type="secondary" style={{ fontSize: 14 }}>
-                {s.passed}/{s.total}
-              </Text>
-            }
-          />
-        </Col>
-        <Col span={5}>
-          <Statistic
-            title="平均步数"
-            value={fmtNum(s.avg_steps, 1)}
-            suffix={<DeltaText d={cmp?.summary?.avg_steps} invert />}
-          />
-        </Col>
-        <Col span={5}>
-          <Statistic
-            title="平均 token"
-            value={fmtNum(s.avg_tokens)}
-            suffix={<DeltaText d={cmp?.summary?.avg_tokens} invert />}
-          />
-        </Col>
-        <Col span={4}>
-          <Statistic
-            title="平均耗时"
-            value={fmtSec(s.avg_duration_ms)}
-            suffix={<DeltaText d={cmp?.summary?.avg_duration_ms} invert />}
-          />
-        </Col>
-        <Col span={4}>
-          <Statistic
-            title="成本合计"
-            value={s.total_cost ?? "—"}
-            precision={s.total_cost != null ? 4 : undefined}
-          />
-        </Col>
-      </Row>
+      {/* 指标：通过率是主角，所以单列一块并按阈值染色；其余吃同一套 Stat */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        <Stat
+          label="通过率"
+          value={fmtPct(s.pass_rate)}
+          sub={`${s.passed}/${s.total}`}
+          tone={s.pass_rate >= 0.9 ? "success" : s.pass_rate >= 0.7 ? "warn" : "danger"}
+        />
+        <Stat
+          label="平均步数"
+          value={fmtNum(s.avg_steps, 1)}
+          sub={<DeltaText d={cmp?.summary?.avg_steps} invert />}
+        />
+        <Stat
+          label="平均 token"
+          value={fmtNum(s.avg_tokens)}
+          sub={<DeltaText d={cmp?.summary?.avg_tokens} invert />}
+        />
+        <Stat
+          label="平均耗时"
+          value={fmtSec(s.avg_duration_ms)}
+          sub={<DeltaText d={cmp?.summary?.avg_duration_ms} invert />}
+        />
+        <Stat
+          label="成本合计"
+          value={s.total_cost ?? "—"}
+        />
+      </div>
 
-      <Text type="secondary" style={{ fontSize: 12 }}>
+      <div className="text-[12px] text-ink-muted">
         模型 {fp?.model || "—"}　工具 {fp?.tool_count ?? 0} 个 / 技能{" "}
         {fp?.skill_count ?? 0} 个　追问 {s.asked_cases} 条 / 预算收尾{" "}
         {s.budget_stopped_cases} 条 / 跑挂 {s.error_cases} 条 / 工具调用{" "}
         {s.tool_calls} 次
-      </Text>
+      </div>
 
-      <Divider style={{ margin: "12px 0" }} />
+      <div className="border-t border-line-soft pt-3">
+        <div className="mb-2 flex items-center gap-3">
+          <span className="text-[13px] font-semibold text-ink-strong">
+            逐条用例
+          </span>
+          {failedCount > 0 && (
+            <span className="text-[12px] text-red-600 dark:text-red-400">
+              {failedCount} 条未通过
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onOpenMd}
+            className="text-[12px] text-brand transition-opacity hover:opacity-75"
+          >
+            查看 Markdown
+          </button>
+          {/* 40 多条用例时表格会很长，允许收起，把观感让给上面的指标 */}
+          <button
+            type="button"
+            onClick={() => setShowByCase((v) => !v)}
+            className="ml-auto flex items-center gap-1 text-[12px] text-ink-muted transition-colors hover:text-ink"
+          >
+            {showByCase ? "收起" : "展开"}
+            <ChevronDown
+              className={cn(
+                "h-3.5 w-3.5 transition-transform",
+                showByCase && "rotate-180"
+              )}
+            />
+          </button>
+        </div>
 
-      <Space style={{ marginBottom: 8 }}>
-        <Text strong>逐条用例</Text>
-        {failedCount > 0 && (
-          <Text type="danger" style={{ fontSize: 12 }}>
-            {failedCount} 条未通过
-          </Text>
+        {showByCase && (
+          <Table
+            rows={rows}
+            columns={buildColumns()}
+            rowKey={(r) => r.c.case_id}
+            minWidth={860}
+            expandedKey={expandedKey}
+            renderExpanded={(r) => <CaseDetail c={r.c} />}
+          />
         )}
-        <Button size="small" type="link" onClick={onOpenMd}>
-          查看 Markdown
-        </Button>
-      </Space>
-      <Table
-        size="small"
-        rowKey={(r) => r.c.case_id}
-        columns={buildColumns()}
-        dataSource={rows}
-        pagination={false}
-        scroll={{ y: 420 }}
-        expandable={{
-          expandedRowRender: (r) => (
-            <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
-              <Text type="secondary">输入：{r.c.input}</Text>
-              {r.c.tool_calls.length > 0 && (
-                <Text type="secondary">
-                  调用工具：{r.c.tool_calls.join("、")}
-                </Text>
-              )}
-              {r.c.answer_preview && (
-                <Text type="secondary">答案节选：{r.c.answer_preview}</Text>
-              )}
-              {r.c.failures.map((f, i) => (
-                <Text key={i} type="danger">
-                  {f.assert}：{f.detail}
-                </Text>
-              ))}
-            </Space>
-          ),
-        }}
-      />
-    </>
+      </div>
+    </div>
   );
 }

@@ -1,18 +1,5 @@
 import { useState } from "react";
-import {
-  Alert,
-  Button,
-  Modal,
-  Select,
-  Space,
-  Switch,
-  Table,
-  TableColumnsType,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from "antd";
+import { Loader2, RefreshCw } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   apiDeleteLocalAgent,
@@ -24,8 +11,19 @@ import {
   unloadAgent,
 } from "../api/client";
 import type { LocalAgent } from "../api/types";
+import { Hint, PageHeader, Section } from "../components/ui/Page";
+import { Table } from "../components/ui/Table";
+import type { Column } from "../components/ui/Table";
+import { Toggle } from "../components/ui/Form";
+import { Modal } from "../components/ui/Modal";
+import { Pill } from "../components/ui/Pill";
+import { ConfirmButton, DANGER_BTN, PLAIN_BTN } from "../components/ui/Confirm";
+import { toast } from "../components/ui/Toast";
+import { cn } from "../lib/utils";
 
-const { Paragraph, Text } = Typography;
+/** 行内小按钮（表格操作列统一这个规格） */
+const ROW_BTN =
+  "inline-flex h-6 items-center gap-1 rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50";
 
 /**
  * 智能体 —— **我已有的**（本地创建的 + 从平台装载的）。
@@ -43,6 +41,8 @@ export default function AgentList({ onCreate }: { onCreate?: () => void }) {
   const qc = useQueryClient();
   const [pluginEdit, setPluginEdit] = useState<LocalAgent | null>(null);
   const [pluginSel, setPluginSel] = useState<string[]>([]);
+  /** 让每行的「删除」确认态在切页/刷新后自动复原 */
+  const [confirmDelReset, setConfirmDelReset] = useState(0);
 
   const listQ = useQuery({ queryKey: ["allAgents"], queryFn: apiListAllAgents });
   const libQ = useQuery({ queryKey: ["plugins"], queryFn: apiListPlugins });
@@ -51,6 +51,7 @@ export default function AgentList({ onCreate }: { onCreate?: () => void }) {
   const runningIds = new Set((runningQ.data?.agents ?? []).map((a) => a.id));
 
   const refresh = () => {
+    setConfirmDelReset((n) => n + 1);
     qc.invalidateQueries({ queryKey: ["allAgents"] });
     qc.invalidateQueries({ queryKey: ["agents"] });
     qc.invalidateQueries({ queryKey: ["health"] });
@@ -60,239 +61,307 @@ export default function AgentList({ onCreate }: { onCreate?: () => void }) {
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       apiSetAgentEnabled(id, enabled),
     onSuccess: (d, v) => {
-      message.success(v.enabled ? (d.running ? "已启用，正在运行" : "已启用") : "已停用");
+      toast.success(
+        v.enabled ? (d.running ? "已启用，正在运行" : "已启用") : "已停用"
+      );
       refresh();
     },
-    onError: (e: Error) => message.error("操作失败：" + e.message),
+    onError: (e: Error) => toast.error("操作失败：" + e.message),
   });
 
   const unloadM = useMutation({
     mutationFn: (id: string) => unloadAgent(id),
     onSuccess: () => {
-      message.success("已卸载（配置缓存保留，重新装载即可再跑）");
+      toast.success("已卸载（配置缓存保留，重新装载即可再跑）");
       refresh();
     },
-    onError: (e: Error) => message.error("卸载失败：" + e.message),
+    onError: (e: Error) => toast.error("卸载失败：" + e.message),
   });
 
   const setPluginsM = useMutation({
     mutationFn: ({ id, plugins }: { id: string; plugins: string[] }) =>
       apiSetLocalAgentPlugins(id, plugins),
     onSuccess: (d: any) => {
-      message.success(d?.restarted ? "已更新插件绑定，实例已重建" : "已更新插件绑定");
+      toast.success(d?.restarted ? "已更新插件绑定，实例已重建" : "已更新插件绑定");
       refresh();
     },
-    onError: (e: Error) => message.error("更新失败：" + e.message),
+    onError: (e: Error) => toast.error("更新失败：" + e.message),
   });
 
   const deleteM = useMutation({
     mutationFn: (id: string) => apiDeleteLocalAgent(id),
     onSuccess: () => {
-      message.success("已删除");
+      toast.success("已删除");
       refresh();
     },
-    onError: (e: Error) => message.error("删除失败：" + e.message),
+    onError: (e: Error) => toast.error("删除失败：" + e.message),
   });
 
-  const cols: TableColumnsType<LocalAgent> = [
+  const cols: Column<LocalAgent>[] = [
     {
+      key: "name",
       title: "名称",
-      dataIndex: "name",
-      render: (n: string, r) => (
-        <Space size={6}>
-          <Text strong>{n}</Text>
-          <Tag color={r.origin === "local" ? "green" : "blue"}>
+      width: 180,
+      render: (r) => (
+        <span className="flex items-center gap-1.5">
+          <span className="truncate font-medium text-ink-strong">{r.name}</span>
+          <Pill tone={r.origin === "local" ? "green" : "blue"}>
             {r.origin === "local" ? "本地创建" : "平台装载"}
-          </Tag>
-        </Space>
+          </Pill>
+        </span>
       ),
     },
     {
+      key: "description",
       title: "说明",
-      dataIndex: "description",
-      ellipsis: true,
-      render: (d?: string | null) => d || "—",
+      render: (r) => (
+        <span className="block max-w-[280px] truncate text-ink-muted">
+          {r.description || "—"}
+        </span>
+      ),
     },
     {
+      key: "plugins",
       title: "插件",
-      dataIndex: "plugins",
       width: 220,
-      render: (ps: string[], r: LocalAgent) => {
-        if (!ps?.length) return <Text type="secondary">未绑定</Text>;
+      render: (r) => {
+        const ps = r.plugins ?? [];
+        if (!ps.length) return <span className="text-ink-faint">未绑定</span>;
         const missing = new Set(r.missing_plugins ?? []);
         return (
-          <Space size={4} wrap>
+          <span className="flex flex-wrap gap-1">
             {ps.map((p) =>
               missing.has(p) ? (
-                <Tooltip key={p} title="插件库里已经没有这个目录，装载时会跳过">
-                  <Tag color="error">{p} · 缺失</Tag>
-                </Tooltip>
+                // 库里目录没了但绑定还在：装载时会被跳过，保存一次即可清掉
+                <Pill
+                  key={p}
+                  tone="red"
+                  title="插件库里已经没有这个目录，装载时会跳过"
+                >
+                  {p} · 缺失
+                </Pill>
               ) : (
-                <Tag key={p}>{p}</Tag>
-              ),
+                <Pill key={p} tone="muted">
+                  {p}
+                </Pill>
+              )
             )}
-          </Space>
+          </span>
         );
       },
     },
     {
+      key: "enabled",
       title: "启用",
-      dataIndex: "enabled",
-      width: 130,
-      render: (v: boolean, r: LocalAgent) => (
-        <Space size={6}>
-          <Switch
-            size="small"
-            checked={v}
-            loading={enableM.isPending && enableM.variables?.id === r.id}
-            onChange={(on) => enableM.mutate({ id: r.id, enabled: on })}
-          />
-          {runningIds.has(r.id) ? (
-            <Tag color="green">运行中</Tag>
-          ) : v ? (
-            <Tag>已启用</Tag>
-          ) : (
-            <Tag>已停用</Tag>
-          )}
-        </Space>
-      ),
+      width: 150,
+      render: (r) => {
+        const busy = enableM.isPending && enableM.variables?.id === r.id;
+        return (
+          <span className="flex items-center gap-2">
+            <Toggle
+              checked={r.enabled}
+              disabled={busy}
+              onChange={(on) => enableM.mutate({ id: r.id, enabled: on })}
+            />
+            {runningIds.has(r.id) ? (
+              <Pill tone="green">运行中</Pill>
+            ) : r.enabled ? (
+              <Pill tone="muted">已启用</Pill>
+            ) : (
+              <Pill tone="muted">已停用</Pill>
+            )}
+          </span>
+        );
+      },
     },
     {
-      title: "操作",
       key: "ops",
-      width: 200,
-      render: (_: unknown, r: LocalAgent) => (
-        <Space size={4} wrap>
+      title: "操作",
+      width: 210,
+      render: (r) => (
+        <span className="flex flex-wrap items-center gap-1">
           {r.origin === "platform" ? (
             // 只有「卸载」。卸载后它就从本页消失（本地配置一并清掉），装回去去
             // 「智能体市场」——那边按本地装载状态显示「装载」/「重新装载」。
-            <Button
-              size="small"
-              loading={unloadM.isPending && unloadM.variables === r.id}
+            <button
+              type="button"
+              disabled={unloadM.isPending && unloadM.variables === r.id}
               onClick={() => unloadM.mutate(r.id)}
+              className={ROW_BTN}
             >
+              {unloadM.isPending && unloadM.variables === r.id && (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              )}
               卸载
-            </Button>
+            </button>
           ) : (
-            <Button
-              size="small"
+            <button
+              type="button"
               onClick={() => {
                 setPluginEdit(r);
                 setPluginSel(r.plugins ?? []);
               }}
+              className={ROW_BTN}
             >
               管理插件
-            </Button>
+            </button>
           )}
           {r.origin === "local" && (
-            <Button
-              size="small"
-              danger
-              loading={deleteM.isPending && deleteM.variables === r.id}
-              onClick={() => {
-                if (window.confirm(`删除「${r.name}」？插件链接会被清掉，工作区文件不动。`)) {
-                  deleteM.mutate(r.id);
-                }
-              }}
+            <ConfirmButton
+              resetKey={confirmDelReset}
+              disabled={deleteM.isPending && deleteM.variables === r.id}
+              onConfirm={() => deleteM.mutate(r.id)}
+              className={cn(DANGER_BTN, "h-6 text-[12px]")}
             >
               删除
-            </Button>
+            </ConfirmButton>
           )}
-        </Space>
+        </span>
       ),
     },
   ];
 
   const agents = listQ.data?.agents ?? [];
+  const libPlugins = (libQ.data?.plugins ?? []).filter((p) => !p.error);
 
   return (
     <>
-      <div
-        style={{
-          marginBottom: 16,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          智能体
-        </Typography.Title>
-        <Space>
-          <Button size="small" onClick={() => listQ.refetch()}>
-            刷新
-          </Button>
-          <Button size="small" type="primary" onClick={onCreate}>
-            创建 Agent
-          </Button>
-        </Space>
-      </div>
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="这里是我已有的 agent：本地创建的 + 从平台装载的"
-        description={
-          <Paragraph style={{ marginBottom: 0 }}>
-            启用开关决定它跑不跑、进不进概览，缺省是开的；停用不会删东西，也不会被下一次平台同步撤销。
-            平台上还没拿过来的 agent 在<strong>智能体市场</strong>那一页。
-          </Paragraph>
+      <PageHeader
+        title="智能体"
+        desc="这里是我已有的 agent：本地创建的 + 从平台装载的"
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => listQ.refetch()}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              刷新
+            </button>
+            <button
+              type="button"
+              onClick={onCreate}
+              className="rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+            >
+              创建 Agent
+            </button>
+          </>
         }
       />
 
-      <Table
-        rowKey="id"
-        size="small"
-        loading={listQ.isLoading}
-        dataSource={agents}
-        columns={cols}
-        locale={{ emptyText: "还没有 agent——点右上角「创建 Agent」，或去智能体市场装载" }}
-      />
+      <div className="mb-3">
+        <Hint>
+          启用开关决定它跑不跑、进不进概览，缺省是开的；停用不会删东西，也不会被下一次平台同步撤销。
+          平台上还没拿过来的 agent 在
+          <strong className="text-ink-strong">智能体市场</strong>那一页。
+        </Hint>
+      </div>
+
+      <Section bodyClassName="p-0">
+        <Table
+          rows={agents}
+          columns={cols}
+          rowKey={(r) => r.id}
+          loading={listQ.isLoading}
+          minWidth={980}
+          empty="还没有 agent——点右上角「创建 Agent」，或去智能体市场装载"
+        />
+      </Section>
 
       <Modal
         open={!!pluginEdit}
+        onClose={() => setPluginEdit(null)}
+        width={560}
         title={`插件绑定：${pluginEdit?.name ?? ""}`}
-        okText="保存"
-        cancelText="取消"
-        confirmLoading={setPluginsM.isPending}
-        onCancel={() => setPluginEdit(null)}
-        onOk={() => {
-          if (!pluginEdit) return;
-          setPluginsM.mutate(
-            { id: pluginEdit.id, plugins: pluginSel },
-            { onSuccess: () => setPluginEdit(null) },
-          );
-        }}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setPluginEdit(null)}
+              className={cn(PLAIN_BTN, "h-8 px-4")}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={setPluginsM.isPending}
+              onClick={() => {
+                if (!pluginEdit) return;
+                setPluginsM.mutate(
+                  { id: pluginEdit.id, plugins: pluginSel },
+                  { onSuccess: () => setPluginEdit(null) }
+                );
+              }}
+              className="flex h-8 items-center gap-1.5 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50"
+            >
+              {setPluginsM.isPending && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
+              保存
+            </button>
+          </>
+        }
       >
-        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+        <div className="space-y-3">
+          <p className="text-[12px] leading-5 text-ink-muted">
             插件本体在插件库里，这里改的是「勾哪些」。保存后链接立刻建好 / 删掉，agent
             在跑的话会重建实例。
-          </Text>
-          <Select
-            mode="multiple"
-            value={pluginSel}
-            onChange={setPluginSel}
-            loading={libQ.isLoading}
-            style={{ width: "100%" }}
-            placeholder="选插件（可多选）"
-            options={(libQ.data?.plugins ?? [])
-              .filter((p) => !p.error)
-              .map((p) => ({
-                value: p.dirname,
-                label: `${p.dirname}${p.version ? ` · ${p.version}` : ""}`,
-              }))}
-          />
+          </p>
+
+          {/* 多选插件：用复选框列表而不是多选下拉——插件库通常只有几个，
+              一屏列出来比"点开下拉、逐个勾、再关掉"少三步操作 */}
+          <div className="max-h-[320px] space-y-1 overflow-auto rounded-lg border border-line-soft p-2">
+            {libQ.isLoading ? (
+              <div className="flex items-center justify-center py-6 text-ink-muted">
+                <Loader2 className="h-4 w-4 animate-spin" />
+              </div>
+            ) : libPlugins.length === 0 ? (
+              <div className="py-6 text-center text-[13px] text-ink-faint">
+                插件库是空的
+              </div>
+            ) : (
+              libPlugins.map((p) => {
+                const on = pluginSel.includes(p.dirname);
+                return (
+                  <label
+                    key={p.dirname}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors",
+                      on ? "bg-brand/[0.07]" : "hover:bg-surface"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={(e) =>
+                        setPluginSel((s) =>
+                          e.target.checked
+                            ? [...s, p.dirname]
+                            : s.filter((x) => x !== p.dirname)
+                        )
+                      }
+                      className="h-3.5 w-3.5 shrink-0 accent-[var(--kp-primary)]"
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
+                      {p.dirname}
+                    </span>
+                    {p.version && <Pill tone="muted">{p.version}</Pill>}
+                  </label>
+                );
+              })
+            )}
+          </div>
+
           {(pluginEdit?.missing_plugins ?? []).length ? (
-            <Alert
-              type="warning"
-              showIcon
-              message={`库里已经找不到：${pluginEdit!.missing_plugins.join("、")}`}
-              description="这些绑定还在，但插件目录没了，装载时会跳过。保存一次即可清掉。"
-            />
+            <Hint
+              tone="warn"
+              title={`库里已经找不到：${pluginEdit!.missing_plugins.join("、")}`}
+            >
+              这些绑定还在，但插件目录没了，装载时会跳过。保存一次即可清掉。
+            </Hint>
           ) : null}
-        </Space>
+        </div>
       </Modal>
     </>
   );

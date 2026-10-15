@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from ..chat.context import current_session_id
+from ..chat.context import current_memory_day, current_session_id
 from ..tools.base import ProcessorTool, ToolRegistry
 from .store import SessionMemory
 
@@ -105,7 +105,8 @@ async def _recall(args: dict) -> str:
     queries = _as_list((args or {}).get("queries")) or _as_list((args or {}).get("query"))
     if not queries:
         return "[recall: 至少需要一个非空 query（query 或 queries）]"
-    sm = SessionMemory(sid)
+    # 记忆按天共享：目录由「今天是哪天」决定，不是 session_id
+    sm = SessionMemory(sid, day=current_memory_day())
     try:
         # 多 query 各自 OR 召回后按 block_id 去重合并（取首次出现的摘要），上限 MAX_RECALL
         seen: dict = {}
@@ -157,7 +158,8 @@ async def _read(args: dict) -> str:
     ids = _as_list((args or {}).get("block_ids")) or _as_list((args or {}).get("block_id"))
     if not ids:
         return "[read: 至少需要一个 block_id（block_id 或 block_ids）]"
-    sm = SessionMemory(sid)
+    # 记忆按天共享：目录由「今天是哪天」决定，不是 session_id
+    sm = SessionMemory(sid, day=current_memory_day())
     try:
         blocks = []
         for bid in ids:

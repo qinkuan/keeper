@@ -8,6 +8,7 @@ import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import { applyKeeperTheme } from "./monacoTheme";
 
 // 配置 Web Worker。纯只读展示/ diff 只需 editorWorker，
 // 但 TS/JS/JSON/CSS/HTML 的语言服务（校验、提示）也一并接好更稳。
@@ -41,3 +42,6 @@ self.MonacoEnvironment = {
 
 // 让 @monaco-editor/react 使用本地 monaco 实例，而非从 CDN 加载。
 loader.config({ monaco });
+
+// 注册应用自己的编辑器主题（见 monacoTheme.ts：为何单独成文件）
+applyKeeperTheme(monaco);

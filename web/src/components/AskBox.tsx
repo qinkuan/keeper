@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Button, Input, Space, Typography } from "antd";
 
 interface Props {
   /** 模型给出的候选，直接点即提交 */
@@ -20,56 +19,51 @@ export default function AskBox({ options, disabled, onSubmit }: Props) {
   };
 
   return (
-    <div style={{ marginBottom: 16, paddingLeft: 4 }}>
+    /* 「轮到我回答」是一个需要人介入的状态，整块用左侧品牌条 + 淡底框出来：
+       混在消息流里时用户很容易滑过去继续往下看，错过这个提问。 */
+    <div className="relative mb-4 overflow-hidden rounded-[10px] border border-brand/20 bg-brand-gradient-soft px-3.5 py-3">
+      <span className="absolute left-0 top-0 h-full w-[2.5px] bg-brand-gradient" />
+
       {!!options?.length && (
-        <Space wrap style={{ marginBottom: 8 }}>
+        <div className="mb-2 flex flex-wrap gap-1.5">
           {options.map((o) => (
-            <Button
+            <button
               key={o}
-              size="small"
+              type="button"
               disabled={disabled}
               onClick={() => submit(o)}
+              className="rounded-[7px] border border-line bg-panel px-2.5 py-1 text-[12.5px] font-medium text-ink shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:border-brand/45 hover:bg-brand/[0.06] hover:text-brand active:scale-[0.98] disabled:opacity-50"
             >
               {o}
-            </Button>
+            </button>
           ))}
-        </Space>
+        </div>
       )}
 
-      {/* 不用 Space.Compact：贴合无缝会显得挤，改为独立控件 + 间距 */}
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          width: "100%",
-          maxWidth: 520,
-          marginTop: 4,
-        }}
-      >
-        <Input
+      <div className="flex w-full max-w-[520px] gap-2">
+        <input
           value={val}
           disabled={disabled}
           placeholder="回答上面的问题，Enter 发送"
           onChange={(e) => setVal(e.target.value)}
-          onPressEnter={() => submit(val)}
-          style={{ flex: 1 }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit(val);
+          }}
+          className="min-w-0 flex-1 rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)] disabled:opacity-50"
         />
-        <Button
-          type="primary"
-          disabled={disabled}
+        <button
+          type="button"
+          disabled={disabled || !val.trim()}
           onClick={() => submit(val)}
-          style={{ height: 32, minWidth: 80 }}
+          className="shrink-0 rounded-[7px] bg-brand-gradient px-3.5 py-[5px] text-[12.5px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
         >
           回答
-        </Button>
+        </button>
       </div>
 
-      <Typography.Text
-        type="secondary"
-        style={{ fontSize: 11, display: "block", marginTop: 4 }}
-      >
+      <p className="mt-1.5 text-[11px] text-ink-muted">
         在这里回答会接上刚才的上下文；用下方输入框则开启新话题
-      </Typography.Text>
+      </p>
     </div>
   );
 }

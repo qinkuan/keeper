@@ -1,10 +1,24 @@
-import { memo, useState } from "react";
-import { Collapse, Empty, Tag, Typography } from "antd";
+import { lazy, memo, Suspense, useState } from "react";
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Loader2,
+  RefreshCw,
+  User,
+} from "lucide-react";
+import { toast } from "./ui/Toast";
+import { CollapseItem } from "./ui/Collapse";
 import MarkdownView from "./MarkdownView";
-import { CaretDownOutlined, CaretRightOutlined } from "@ant-design/icons";
-import { RobotOutlined, UserOutlined } from "@ant-design/icons";
+import { cn } from "../lib/utils";
+
+/**
+ * 产物卡片按需加载：它内部用 Monaco 做代码/diff 展示（3.9MB）。
+ * 静态引入的话，只要有一条消息带产物，整页历史都要等 monaco 下载完。
+ */
+const ArtifactCard = lazy(() => import("./ArtifactCard"));
 import type { ChatMessage } from "../api/types";
-import ArtifactCard from "./ArtifactCard";
 import { StepUsageTag, UsageTag } from "./UsageTag";
 
 /** 截断成一行预览（去掉换行，避免占好几行） */
@@ -33,25 +47,44 @@ function FoldBlock({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div style={{ marginTop: 2 }}>
+    <div className="mt-0.5">
       <span
         onClick={() => setOpen(!open)}
-        style={{
-          cursor: "pointer",
-          userSelect: "none",
-          color: "var(--kp-text-muted)",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-        }}
+        className="inline-flex cursor-pointer select-none items-center gap-1 text-[12px] text-ink-faint transition-colors hover:text-ink-muted"
         title={open ? "点击收起" : "点击展开"}
       >
-        {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
-        <Typography.Text type="secondary">{label}：</Typography.Text>
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        <span>{label}：</span>
         {!open && head}
       </span>
       {open && <div>{children}</div>}
     </div>
+  );
+}
+
+/** 消息动作条里的小图标按钮：默认很淡，hover 才变深 */
+function MsgAction({
+  title,
+  onClick,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-black/[0.05] hover:text-ink dark:hover:bg-white/10"
+    >
+      {children}
+    </button>
   );
 }
 
@@ -79,75 +112,91 @@ function formatTime(iso: string): string {
 function ChatBubble({
   msg,
   agentId,
+  agentName,
   isLocal = true,
   onUsageDetail,
   onUsageDump,
+  onRegenerate,
 }: {
   msg: ChatMessage;
   agentId: string;
+  /** 消息头显示的 agent 名。多 agent 场景下不显示名字，读者分不清是谁答的 */
+  agentName?: string;
   /** 是否本机部署（决定产物卡片能否「打开文件夹」）；未传时按本机处理 */
   isLocal?: boolean;
   /** 点用量里的「查看详情」：打开本轮逐步的时间线可视化（传 messageId 而非闭包） */
   onUsageDetail?: (messageId: string) => void;
   /** 点用量里的「查看 dump」：打开该轮完整 prompt（仅落盘开启时可见） */
   onUsageDump?: (messageId: string) => void;
+  /** 重新生成这条回答（传 messageId 而不是闭包，避免 memo 失效） */
+  onRegenerate?: (messageId: string) => void;
 }) {
   const isUser = msg.role === "user";
   const timeText = msg.created_at ? formatTime(msg.created_at) : "";
+  /** 「自主规划过程」的展开态：由这里持有，才好在流式结束时按需变化 */
+  const [stepsOpen, setStepsOpen] = useState(false);
 
   return (
     <div
-      className="kp-bubble-in"
-      style={{
-        display: "flex",
-        justifyContent: isUser ? "flex-end" : "flex-start",
-        alignItems: "flex-end",
-        gap: 8,
-        marginBottom: 18,
-      }}
+      className={cn(
+        // group/bubble：让动作条在 hover 整条消息时浮现（而不是 hover 图标本身）
+        "kp-bubble-in group/bubble mb-5 flex items-start gap-2.5",
+        isUser ? "flex-row-reverse" : "flex-row"
+      )}
     >
-      {/* 助手头像（左） */}
+      {/* 助手头像（左）：圆形品牌渐变 + 同色投影 + 顶部内高光。
+          内高光那一条是"看起来像玻璃/珐琅"的最小成本做法，纯色圆点会显得很平。 */}
       {!isUser && (
-        <div
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: "50%",
-            background: "var(--kp-surface)",
-            color: "var(--kp-text)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 14,
-            flex: "0 0 auto",
-          }}
-        >
-          <RobotOutlined />
+        <div className="mt-[3px] flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white shadow-[0_2px_6px_-1px_rgba(91,155,245,0.5),inset_0_1px_0_rgba(255,255,255,0.3)]">
+          <Bot className="h-[14px] w-[14px]" strokeWidth={2.2} />
+        </div>
+      )}
+
+      {/*
+        列宽：助手消息占满整行（对话式产品的通行做法——正文才是主角，不套气泡，
+        靠头像和留白区分角色）；用户消息仍是气泡，限宽 72% 并靠右。
+      */}
+      <div
+        className={cn(
+          "flex min-w-0 flex-col",
+          isUser ? "max-w-[72%] items-end" : "flex-1 items-start"
+        )}
+      >
+      {/*
+        消息头（仅助手）：头像右侧先来一行「名称 · 状态」。截图里这行是
+        「WorkBuddy X Alpha·Lite」+「已完成 23s >」，作用是**让每条回答都有
+        出处和耗时**——多 agent 场景下不写名字，读者分不清是谁答的。
+      */}
+      {!isUser && (
+        <div className="mb-1.5 flex items-center gap-2 text-[12px]">
+          <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-ink-strong">
+            {agentName || "Agent"}
+          </span>
+          {msg.streaming ? (
+            <span className="flex items-center gap-1.5 text-ink-muted">
+              <span className="kp-pulse-dot h-1.5 w-1.5 rounded-full bg-brand" />
+              进行中
+            </span>
+          ) : (
+            timeText && (
+              <span className="text-ink-faint">已完成 · {timeText}</span>
+            )
+          )}
         </div>
       )}
 
       <div
-        style={{
-          maxWidth: "68%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: isUser ? "flex-end" : "flex-start",
-        }}
-      >
-      <div
-        style={{
-          // 用户气泡：极淡的 Apple 蓝（var(--kp-primary) 的浅底），助手保持 Apple 浅灰
-          background: isUser ? "var(--kp-primary-soft)" : "var(--kp-surface)",
-          color: "var(--kp-text)",
-          border: isUser ? "1px solid #cfe0f7" : "none",
-          borderRadius: 18,
-          padding: "12px 16px",
-          boxShadow: "0 1px 2px rgba(0, 0, 0, 0.03)",
-        }}
+        className={cn(
+          "w-full text-[13.5px] leading-[1.72] text-ink",
+          // 用户气泡：品牌色的极淡渐变底 + 无边框。比纯色底多一层"从左上到右下"
+          // 的明度变化，斜着的方向和产品统一的气晕光一致，界面就不散。
+          isUser &&
+            "rounded-[14px] rounded-br-[5px] bg-brand-gradient-soft px-3.5 py-2.5 shadow-[inset_0_0_0_1px_rgba(91,155,245,0.48)]"
+        )}
       >
         {msg.streaming && !msg.text ? (
           // 流式还没产出正文：给进度反馈（有步骤就说执行到第几步），避免看起来卡住
-          <span style={{ color: "var(--kp-text-muted)" }}>
+          <span className="text-[13px] text-ink-muted">
             {msg.steps?.length
               ? `已执行 ${msg.steps.length} 步，正在整理回答…`
               : "正在思考…"}
@@ -175,73 +224,47 @@ function ChatBubble({
 
         {/* 被用户叫停：说明内容是「半截」的，避免看起来像回答不完整 */}
         {msg.canceled && !msg.streaming && (
-          <div
-            style={{
-              marginTop: 6,
-              fontSize: 12,
-              color: "var(--kp-text-muted)",
-            }}
-          >
-            已停止生成
-          </div>
+          <div className="mt-1.5 text-[12px] text-ink-faint">已停止生成</div>
         )}
 
         {msg.role === "assistant" && msg.llm && (
-          <Tag color="purple" style={{ marginTop: 6 }}>
+          <span className="mt-1.5 inline-flex items-center rounded-md bg-brand/10 px-1.5 py-0.5 text-[11px] leading-4 text-brand">
             AI 生成
-          </Tag>
+          </span>
         )}
 
         {msg.role === "assistant" && !!msg.steps?.length && (
-          <Collapse
-            ghost
-            size="small"
+          <CollapseItem
             // 始终收起：过程细节由用户主动点开再看，正文才是主角。
             // 流式期间的进度靠标题里的「N 步」实时递增 + 正文光标反馈，不再自动展开。
-            defaultActiveKey={[]}
-            style={{
-              marginTop: 8,
-              background: "#fff",
-              borderRadius: 12,
-              border: "1px solid var(--kp-border-soft)",
-            }}
-            items={[
-              {
-                key: "steps",
-                label: (
-                  <span style={{ fontSize: 13 }}>
-                    <Tag color="geekblue" style={{ marginRight: 6 }}>
-                      Agent
-                    </Tag>
-                    自主规划过程（{msg.steps.length} 步）
-                    {/* 收起状态下也要能看出过程还在推进 */}
-                    {msg.streaming && (
-                      <span style={{ color: "var(--kp-text-muted)" }}>
-                        {" "}
-                        · 进行中
-                      </span>
-                    )}
-                  </span>
-                ),
-                children: (
-                  <div style={{ fontSize: 12.5, lineHeight: 1.7 }}>
-                    {msg.steps.map((s, i) => {
+            open={stepsOpen}
+            onToggle={() => setStepsOpen((v) => !v)}
+            className="mt-3 border-line-soft bg-surface"
+            label={
+              <span className="flex items-center gap-1.5 text-[13px]">
+                <span className="rounded-md bg-brand/12 px-1.5 py-0.5 text-[11px] leading-4 text-brand">
+                  Agent
+                </span>
+                自主规划过程（{msg.steps.length} 步）
+                {/* 收起状态下也要能看出过程还在推进 */}
+                {msg.streaming && <span className="text-ink-muted">· 进行中</span>}
+              </span>
+            }
+          >
+              <div className="text-[12.5px] leading-[1.7]">
+                {msg.steps.map((s, i) => {
                       // 流式进行中：最后一步的结果默认展开，方便看到最新进展
                       const streamingLast =
                         !!msg.streaming && i === msg.steps.length - 1;
                       return (
                       <div
                         key={i}
-                        style={{
-                          borderLeft: "2px solid var(--kp-border)",
-                          paddingLeft: 8,
-                          marginBottom: 8,
-                        }}
+                        className="mb-2 border-l-2 border-line pl-2"
                         data-streaming-last={streamingLast ? "1" : undefined}
                       >
                         {s.thought && (
                           <div>
-                            <Typography.Text type="secondary">思考：</Typography.Text>
+                            <span className="text-ink-muted">思考：</span>
                             {s.thought}
                           </div>
                         )}
@@ -252,32 +275,19 @@ function ChatBubble({
                             label="调用"
                             head={
                               <>
-                                <Tag color="blue" style={{ margin: "0 4px" }}>
+                                <span className="mx-1 inline-flex rounded-md bg-blue-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-blue-600 dark:text-blue-300">
                                   {s.tool}
-                                </Tag>
+                                </span>
                                 {s.args && Object.keys(s.args).length > 0 && (
-                                  <Typography.Text type="secondary">
+                                  <span className="text-ink-muted">
                                     {clip(JSON.stringify(s.args), 80)}
-                                  </Typography.Text>
+                                  </span>
                                 )}
                               </>
                             }
                           >
                             {s.args && Object.keys(s.args).length > 0 && (
-                              <pre
-                                style={{
-                                  whiteSpace: "pre-wrap",
-                                  wordBreak: "break-word",
-                                  maxHeight: 240,
-                                  overflow: "auto",
-                                  background: "#fff",
-                                  border: "1px solid var(--kp-border-soft)",
-                                  borderRadius: 8,
-                                  padding: "4px 8px",
-                                  margin: "2px 0 0",
-                                  fontSize: 12,
-                                }}
-                              >
+                              <pre className="mt-0.5 max-h-[240px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line-soft bg-surface p-1.5 font-mono text-[12px]">
                                 {JSON.stringify(s.args, null, 2)}
                               </pre>
                             )}
@@ -293,45 +303,30 @@ function ChatBubble({
                                 : "结果"
                             }
                             head={
-                              <Typography.Text type="secondary">
+                              <span className="text-ink-muted">
                                 {clip(s.observation, 100)}
                                 {s.observation.length > 100
                                   ? ` …（共 ${s.observation.length} 字符）`
                                   : ""}
-                              </Typography.Text>
+                              </span>
                             }
                             defaultOpen={streamingLast}
                           >
-                            <div
-                              style={{
-                                whiteSpace: "pre-wrap",
-                                wordBreak: "break-word",
-                                maxHeight: 320,
-                                overflow: "auto",
-                                background: "#fff",
-                                border: "1px solid var(--kp-border-soft)",
-                                borderRadius: 8,
-                                padding: "4px 8px",
-                                marginTop: 2,
-                              }}
-                            >
+                            <div className="mt-0.5 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line-soft bg-surface p-1.5 font-mono text-[12px]">
                               {s.observation}
                             </div>
                           </FoldBlock>
                         )}
                         {s.usage && (
-                          <div style={{ marginTop: 2 }}>
+                          <div className="mt-0.5">
                             <StepUsageTag usage={s.usage} />
                           </div>
                         )}
                       </div>
                       );
                     })}
-                  </div>
-                ),
-              },
-            ]}
-          />
+              </div>
+          </CollapseItem>
         )}
 
         {/* 本轮用量：**只在助手消息下渲染一次**。
@@ -339,7 +334,7 @@ function ChatBubble({
             user 消息上也会带回一份**完全相同**的用量——再渲染一遍就是重复，
             而且容易让人以为这是「提问本身的开销」。助手消息里有就够了。 */}
         {msg.role === "assistant" && msg.usage && (
-          <div style={{ marginTop: 6, textAlign: "left" }}>
+          <div className="mt-2 text-left">
             <UsageTag
               usage={msg.usage}
               wallMs={msg.duration_ms}
@@ -352,23 +347,31 @@ function ChatBubble({
         )}
 
         {msg.role === "assistant" && !!msg.artifacts?.length && (
-          <div style={{ marginTop: 8 }}>
-            {msg.artifacts.map((a) => (
-              <ArtifactCard
-                key={a.id}
-                agentId={agentId}
-                messageId={msg.id}
-                artifact={a}
-                isLocal={isLocal}
-              />
-            ))}
+          <div className="mt-3 space-y-2">
+            <Suspense
+              fallback={
+                <div className="rounded-lg border border-line-soft bg-surface px-3 py-2 text-[12px] text-ink-muted">
+                  加载产物预览…
+                </div>
+              }
+            >
+              {msg.artifacts.map((a) => (
+                <ArtifactCard
+                  key={a.id}
+                  agentId={agentId}
+                  messageId={msg.id}
+                  artifact={a}
+                  isLocal={isLocal}
+                />
+              ))}
+            </Suspense>
           </div>
         )}
 
         {msg.error && (
-          <Typography.Text type="danger" style={{ display: "block", marginTop: 8 }}>
+          <div className="mt-3 rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 text-[13px] text-red-600 dark:text-red-300">
             {msg.error}
-          </Typography.Text>
+          </div>
         )}
 
         {/* 只在「非流式且确实什么都没有」时才提示暂无回答：
@@ -378,48 +381,44 @@ function ChatBubble({
           !msg.text &&
           !msg.error &&
           !msg.steps?.length && (
-            <div style={{ marginTop: 8 }}>
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="暂无回答"
-                style={{ margin: 0 }}
-              />
+            <div className="mt-3">
+              <div className="py-4 text-center text-[13px] text-ink-faint">
+                暂无回答
+              </div>
             </div>
           )}
       </div>
 
-        {/* 时间戳 */}
-        {timeText && (
-          <span
-            style={{
-              marginTop: 4,
-              padding: "0 4px",
-              fontSize: 11,
-              color: "var(--kp-text-muted)",
-            }}
-          >
-            {timeText}
-          </span>
+        {/*
+          消息动作条（仅助手）：截图里正文下方有一排**很淡的图标**——复制、
+          反馈、朗读、重生成、更多。这里的策略是：默认 `opacity-0`，hover 整块
+          消息时才浮现。对话产品的动作条常驻会不断打断阅读。
+        */}
+        {!isUser && !msg.streaming && msg.text && (
+          <div className="mt-1.5 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/bubble:opacity-100">
+            <MsgAction
+              title="复制回答"
+              onClick={() => {
+                navigator.clipboard?.writeText(msg.text ?? "");
+                toast.success("已复制");
+              }}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </MsgAction>
+            <MsgAction
+              title="重新生成"
+              onClick={() => onRegenerate?.(msg.id)}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </MsgAction>
+          </div>
         )}
       </div>
 
       {/* 用户头像（右） */}
       {isUser && (
-        <div
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: "50%",
-            background: "#dceafb",
-            color: "var(--kp-primary)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 14,
-            flex: "0 0 auto",
-          }}
-        >
-          <UserOutlined />
+        <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/12 text-brand">
+          <User className="h-3.5 w-3.5" />
         </div>
       )}
     </div>

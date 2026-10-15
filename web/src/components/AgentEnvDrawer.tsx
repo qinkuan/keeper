@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Drawer, Input, Select, Space, Spin, Tag, Typography, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
 import { apiAgentEnv, apiUpdateAgentEnv } from "../api/client";
-import { type AgentEnvResp, type DetectedRuntime, type EnvDependency, type MarketAgent } from "../api/types";
+import type {
+  AgentEnvResp,
+  DetectedRuntime,
+  EnvDependency,
+  MarketAgent,
+} from "../api/types";
+import { Drawer } from "./ui/Drawer";
+import { Hint } from "./ui/Page";
+import { TextInput, SelectInput } from "./ui/Form";
+import { toast } from "./ui/Toast";
+import { cn } from "../lib/utils";
 
 const CUSTOM = "__custom__";
 
@@ -21,7 +31,7 @@ function cmpVersion(a: number[], b: number[]): number {
 export function meetsVersion(
   actual: string,
   min?: string | null,
-  max?: string | null,
+  max?: string | null
 ): boolean {
   const av = actual.split(".").map((n) => parseInt(n, 10) || 0);
   if (min) {
@@ -49,35 +59,36 @@ function RuntimeSelect({
 }) {
   const isCustom = value !== "" && !detected.some((d) => d.path === value);
   const options = [
+    {
+      value: "",
+      label: kind === "python" ? "选择 Python 解释器" : "选择 Node 解释器",
+    },
     ...detected.map((d) => ({
       label: `${d.version_string}  (${d.path})`,
       value: d.path,
     })),
     { label: "自定义路径…", value: CUSTOM },
   ];
+  // 已选值不在候选里（比如配置文件里手写的路径）：补一项，否则下拉会显示空白
   if (value !== "" && !options.some((o) => o.value === value)) {
-    options.unshift({ label: value, value });
+    options.splice(1, 0, { label: value, value });
   }
+
   return (
-    <Space direction="vertical" style={{ width: "100%" }}>
-      <Select
-        style={{ width: "100%" }}
+    <div className="space-y-2">
+      <SelectInput
         value={isCustom ? CUSTOM : value}
-        onChange={(v: string) => onChange(v === CUSTOM ? value : v)}
+        onChange={(v) => onChange(v === CUSTOM ? value : v)}
         options={options}
-        placeholder={kind === "python" ? "选择 Python 解释器" : "选择 Node 解释器"}
-        allowClear
-        onClear={() => onChange("")}
       />
       {isCustom && (
-        <Input
+        <TextInput
           placeholder="填写解释器绝对路径，如 /usr/local/bin/python3"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
-          allowClear
+          onChange={onChange}
         />
       )}
-    </Space>
+    </div>
   );
 }
 
@@ -89,27 +100,73 @@ function DependencyCheck({
   dep: EnvDependency;
   detected: DetectedRuntime[];
 }) {
-  const matched = detected.filter((d) => meetsVersion(d.version, dep.min_version, dep.max_version));
+  const matched = detected.filter((d) =>
+    meetsVersion(d.version, dep.min_version, dep.max_version)
+  );
   const ok = matched.length > 0;
   const best = matched[0]; // detected 已降序，第一个即最高可用版本
+
   return (
-    <Alert
-      style={{ marginBottom: 8 }}
-      type={ok ? "success" : "error"}
-      showIcon
-      message={
-        <span>
-          <Tag color={ok ? "green" : "red"}>{ok ? "满足" : "不满足"}</Tag>
+    <div
+      className={cn(
+        "mb-2 rounded-lg border px-3.5 py-2.5",
+        ok
+          ? "border-emerald-500/25 bg-emerald-500/[0.07]"
+          : "border-red-500/25 bg-red-500/[0.06]"
+      )}
+    >
+      <div className="flex items-center gap-2 text-[13px] text-ink">
+        <span
+          className={cn(
+            "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] leading-4",
+            ok
+              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+              : "bg-red-500/15 text-red-600 dark:text-red-300"
+          )}
+        >
+          {ok ? "满足" : "不满足"}
+        </span>
+        <span className="font-medium">
           {dep.kind} ≥ {dep.min_version}
           {dep.max_version ? `, ≤ ${dep.max_version}` : ""}
         </span>
-      }
-      description={
-        ok
+      </div>
+      <div className="mt-1 text-[12px] leading-5 text-ink-muted">
+        {ok
           ? `本机可用：${best.version_string}（${best.path}）`
-          : "未检测到满足该版本约束的解释器，请安装对应版本或手动指定路径。"
-      }
-    />
+          : "未检测到满足该版本约束的解释器，请安装对应版本或手动指定路径。"}
+      </div>
+    </div>
+  );
+}
+
+/** 解释器标签：检测到几个就列几个，一个都没有时明确说「未检测到」 */
+function DetectedList({
+  label,
+  items,
+}: {
+  label: string;
+  items: DetectedRuntime[];
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[12px] text-ink-muted">{label}</span>
+      {items.length === 0 ? (
+        <span className="text-[12px] text-amber-600 dark:text-amber-300">
+          未检测到
+        </span>
+      ) : (
+        items.map((d) => (
+          <span
+            key={d.path}
+            title={d.path}
+            className="rounded-md bg-black/[0.06] px-1.5 py-0.5 font-mono text-[11px] leading-4 text-ink-muted dark:bg-white/[0.08]"
+          >
+            {d.version_string}
+          </span>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -153,10 +210,10 @@ export default function AgentEnvDrawer({
   const saveM = useMutation({
     mutationFn: () => apiUpdateAgentEnv(agentId, { python, node }),
     onSuccess: (d) => {
-      message.success("已保存该 Agent 的解释器选择");
+      toast.success("已保存该 Agent 的解释器选择");
       qc.setQueryData(["agent-env", agentId], d);
     },
-    onError: (e: Error) => message.error("保存失败：" + e.message),
+    onError: (e: Error) => toast.error("保存失败：" + e.message),
   });
 
   const data: AgentEnvResp | undefined = q.data;
@@ -170,106 +227,111 @@ export default function AgentEnvDrawer({
       width={560}
       open={open}
       onClose={onClose}
-      footer={
-        loaded ? (
-          <Space style={{ float: "right" }}>
-            <Button onClick={onClose}>关闭</Button>
-            <Button type="primary" loading={saveM.isPending} onClick={() => saveM.mutate()}>
-              保存
-            </Button>
-          </Space>
-        ) : (
-          <Space style={{ float: "right" }}>
-            <Button type="primary" onClick={onClose}>
-              关闭
-            </Button>
-          </Space>
-        )
-      }
     >
-      {q.isLoading && <Spin />}
-      {q.isError && (
-        <Alert
-          type="error"
-          showIcon
-          message="读取环境信息失败"
-          description={(q.error as Error)?.message}
-        />
+      {q.isLoading && (
+        <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          加载中…
+        </div>
       )}
+      {q.isError && (
+        <Hint tone="danger" title="读取环境信息失败">
+          {(q.error as Error)?.message}
+        </Hint>
+      )}
+
       {data && (
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Alert
-            type="info"
-            showIcon
-            message="环境需求与本地合规"
-            description="该 Agent 的依赖（MCP / 插件）需要 Python 与 Node 解释器来执行。下方列出它声明需要的环境，以及本机检测到的可用解释器；绿色表示满足，红色表示不满足。"
-          />
+        <div className="space-y-5">
+          <Hint title="环境需求与本地合规">
+            该 Agent 的依赖（MCP / 插件）需要 Python 与 Node 解释器来执行。下方列出它声明需要的环境，以及本机检测到的可用解释器；绿色表示满足，红色表示不满足。
+          </Hint>
 
           <div>
-            <Typography.Text strong>该 Agent 声明需要的环境</Typography.Text>
-            <div style={{ marginTop: 8 }}>
-              {deps.length === 0 ? (
-                <Typography.Text type="secondary">未声明环境依赖。</Typography.Text>
-              ) : (
-                deps.map((dep, i) => (
-                  <DependencyCheck
-                    key={i}
-                    dep={dep}
-                    detected={dep.kind === "python" ? pyDetected : nodeDetected}
-                  />
-                ))
-              )}
-            </div>
+            <h3 className="mb-2 text-[13px] font-semibold text-ink-strong">
+              该 Agent 声明需要的环境
+            </h3>
+            {deps.length === 0 ? (
+              <p className="text-[12px] text-ink-muted">未声明环境依赖。</p>
+            ) : (
+              deps.map((dep, i) => (
+                <DependencyCheck
+                  key={i}
+                  dep={dep}
+                  detected={dep.kind === "python" ? pyDetected : nodeDetected}
+                />
+              ))
+            )}
           </div>
 
           <div>
-            <Typography.Text strong>本机检测到的解释器</Typography.Text>
-            <div style={{ marginTop: 8 }}>
-              <Typography.Text type="secondary">Python：</Typography.Text>
-              {pyDetected.length === 0 ? (
-                <Typography.Text type="warning"> 未检测到</Typography.Text>
-              ) : (
-                <span>
-                  {pyDetected.map((d) => (
-                    <Tag key={d.path}>{d.version_string}</Tag>
-                  ))}
-                </span>
-              )}
-              <br />
-              <Typography.Text type="secondary">Node：</Typography.Text>
-              {nodeDetected.length === 0 ? (
-                <Typography.Text type="warning"> 未检测到</Typography.Text>
-              ) : (
-                <span>
-                  {nodeDetected.map((d) => (
-                    <Tag key={d.path}>{d.version_string}</Tag>
-                  ))}
-                </span>
-              )}
+            <h3 className="mb-2 text-[13px] font-semibold text-ink-strong">
+              本机检测到的解释器
+            </h3>
+            <div className="space-y-1.5">
+              <DetectedList label="Python：" items={pyDetected} />
+              <DetectedList label="Node：" items={nodeDetected} />
             </div>
           </div>
 
           {loaded && (
             <div>
-              <Typography.Text strong>指定解释器（覆盖默认）</Typography.Text>
-              <div style={{ marginTop: 8 }}>
-                <Typography.Text>Python</Typography.Text>
-                <div style={{ marginBottom: 8 }}>
-                  <RuntimeSelect kind="python" detected={pyDetected} value={python} onChange={setPython} />
-                </div>
-                <Typography.Text>Node</Typography.Text>
+              <h3 className="mb-2 text-[13px] font-semibold text-ink-strong">
+                指定解释器（覆盖默认）
+              </h3>
+              <div className="space-y-3">
                 <div>
-                  <RuntimeSelect kind="node" detected={nodeDetected} value={node} onChange={setNode} />
+                  <div className="mb-1 text-[12px] text-ink-muted">Python</div>
+                  <RuntimeSelect
+                    kind="python"
+                    detected={pyDetected}
+                    value={python}
+                    onChange={setPython}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 text-[12px] text-ink-muted">Node</div>
+                  <RuntimeSelect
+                    kind="node"
+                    detected={nodeDetected}
+                    value={node}
+                    onChange={setNode}
+                  />
                 </div>
               </div>
-              <Typography.Text type="secondary">
-                指定的路径会按 agent 记录到
-                <Typography.Text code>agent_overrides</Typography.Text>
+              <p className="mt-2 text-[12px] leading-5 text-ink-muted">
+                指定的路径会按 agent 记录到{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                  agent_overrides
+                </code>
                 ，装载时优先采用。不安装任何环境。
-              </Typography.Text>
+              </p>
             </div>
           )}
-        </Space>
+
+          {/* 操作区：只在已装载时给「保存」，未装载时环境不可指定 */}
+          <div className="flex items-center justify-end gap-2 border-t border-line-soft pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-line bg-panel px-4 py-[7px] text-[13px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:bg-surface hover:text-ink-strong active:scale-[0.98]"
+            >
+              关闭
+            </button>
+            {loaded && (
+              <button
+                type="button"
+                disabled={saveM.isPending}
+                onClick={() => saveM.mutate()}
+                className="flex items-center gap-1.5 rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {saveM.isPending && (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                )}
+                保存
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </Drawer>
   );

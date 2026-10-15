@@ -1,6 +1,7 @@
-"""会话级短期记忆文件存储：JSONL + FTS5 增量索引。
+"""短期记忆文件存储：**按天**分目录，JSONL + FTS5 增量索引。
 
-目录结构见 doc/memory.md 6.1。本模块只负责「拿到记录后写文件 + 增量更新索引」，
+目录结构见 doc/memory.md 6.1（那里写的是按会话，已按「陪伴型角色」的需求改为按天，
+见 :class:`SessionMemory` 的说明）。本模块只负责「拿到记录后写文件 + 增量更新索引」，
 **不查数据库**——DB 读取由调用方（chat/service.py）负责，传入已取好的记录。
 
 写入是同步的文件 IO（JSONL 按 message_id 幂等覆盖 + FTS5 upsert，均很快）；异步化由调用方
@@ -16,6 +17,8 @@ from typing import List, Optional, Tuple
 
 from .retriever import MemoryIndex
 
+# 默认根目录。核心 agent 会把它指到自己的目录下（~/.keeper/core-agent/memory），
+# 这样角色的记忆和它的定义、灵魂放在一处——"这个角色的一切"在一个文件夹里。
 _DEFAULT_ROOT = Path(
     os.environ.get("KEEPER_MEMORY_DIR", "~/.keeper/memory")
 ).expanduser()
@@ -25,12 +28,70 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class SessionMemory:
-    """单个会话的短期记忆存储（隔离，见 6.1）。"""
+def day_of(moment: Optional[datetime] = None) -> str:
+    """把一个时刻折成记忆作用域的日期键（``YYYY-MM-DD``，本地时区）。
 
-    def __init__(self, session_id: str, root: Optional[Path] = None):
+    用**本地时区**而不是 UTC：记忆分段的语义是"用户认知里的今天"，用户说"上午说的
+    那件事"指的是他所在时区的上午。跨时区部署时用 UTC 会让"今天"整体错位半天。
+
+    ``moment`` 为空取当前时间——新会话尚未落库时用它兜底。
+    """
+    dt = moment or datetime.now()
+    # created_at 是 naive UTC，取本地日期前先转成本地时间，
+    # 否则 UTC 20:00（本地次日 04:00）会被算到前一天。
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%Y-%m-%d")
+
+
+def memory_for(
+    session_id: str,
+    *,
+    day: Optional[str] = None,
+    created_at: Optional[datetime] = None,
+    root: Optional[Path] = None,
+) -> "SessionMemory":
+    """按「天」取记忆存储。
+
+    ``day`` 与 ``created_at`` 给一个即可：前者是已经算好的日期键，后者是会话行的
+    ``created_at``（由 :func:`day_of` 折算）。两个都没有则**用当天**而不是回落到
+    按会话隔离——记忆默认就该跨会话共享，回退只在显式要求隔离时发生。
+    """
+    key = day or (day_of(created_at) if created_at else day_of())
+    return SessionMemory(session_id, root, day=key)
+
+
+class SessionMemory:
+    """短期记忆存储：JSONL + FTS5 增量索引。
+
+    **作用域是「一天」而不是「一个会话」。**
+
+    原来按 session_id 分目录，代价是换个会话就失忆——对工具型 agent 无所谓（每次
+    任务本来就该干净），但对一个**陪伴型**角色是致命的：用户上午问过的事，下午开
+    新会话再问一遍，它完全不记得。这正是「陪伴」与「工具」最直观的差别。
+
+    所以作用域取**会话创建那天**（不是"这一轮是哪天"）：一个会话从生到死记忆都在
+    同一个目录里，跨零点的长会话不会被切成两半；同一天开的多个会话则共享记忆——
+    这更接近人对"今天"的感受。
+
+    传 ``day=None`` 时回落到旧的按会话隔离行为，供迁移期与需要严格隔离的场景使用。
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        root: Optional[Path] = None,
+        *,
+        day: Optional[str] = None,
+    ):
         self.session_id = session_id
-        self.dir = (root or _DEFAULT_ROOT) / "sessions" / session_id
+        self.day = day or None
+        base = root or _DEFAULT_ROOT
+        self.dir = (
+            base / "days" / self.day
+            if self.day
+            else base / "sessions" / session_id
+        )
         self.dir.mkdir(parents=True, exist_ok=True)
         # 块级原文：每个 Turn 一整块快照（见 doc/memory.md 7.5），供 read 惰性展开
         self._turns = self.dir / "turns.jsonl"
@@ -40,6 +101,11 @@ class SessionMemory:
         # 后果是「改了配置却没效果」，而且没有任何报错。
         if self.index.is_stale():
             self.reindex()
+
+    @property
+    def scope(self) -> str:
+        """记忆作用域的可读标识（进日志与报错信息，便于定位到具体目录）。"""
+        return f"day:{self.day}" if self.day else f"session:{self.session_id}"
 
     # --- 块级索引（Turn 块，见 doc/memory.md 7.5）---
     def add_turn(

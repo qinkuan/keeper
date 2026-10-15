@@ -17,24 +17,17 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Alert,
-  Card,
-  Col,
-  Row,
-  Segmented,
-  Select,
-  Space,
-  Spin,
-  Statistic,
-  Table,
-  Tooltip,
-  Typography,
-} from "antd";
-import { LineChartOutlined } from "@ant-design/icons";
+import { Loader2 } from "lucide-react";
+import { cn } from "../lib/utils";
 
 import AgentUsagePanel from "../components/AgentUsagePanel";
 import EvalBaselinePanel from "../components/EvalBaselinePanel";
+import { Hint, Section, Stack } from "../components/ui/Page";
+import { SelectInput } from "../components/ui/Form";
+import { SegmentedControl } from "../components/ui/Segmented";
+import { Table } from "../components/ui/Table";
+import type { Column } from "../components/ui/Table";
+import { Stat } from "../components/ui/Stat";
 import { apiListAgents, apiReactParseStats } from "../api/client";
 
 const RANGES = [
@@ -96,186 +89,185 @@ export default function ObservabilityPage() {
     return "模型基本遵守单动作约定，暂无并行化收益";
   })();
 
+  const byModel = parse?.by_model ?? {};
+  const showByModel = Object.keys(byModel).length > 1;
+
+  const modelCols: Column<any>[] = [
+    { key: "model", title: "模型", render: (r) => r.model },
+    {
+      key: "total",
+      title: "解析步数",
+      width: 100,
+      align: "right",
+      render: (r) => r.total,
+    },
+    {
+      key: "hallucination",
+      title: "自编回执",
+      width: 100,
+      align: "right",
+      render: (r) =>
+        r.hallucination > 0 ? (
+          <span className="text-red-600 dark:text-red-400">
+            {r.hallucination}
+          </span>
+        ) : (
+          <span className="text-ink-faint">0</span>
+        ),
+    },
+    {
+      key: "rate",
+      title: "幻觉率",
+      width: 100,
+      align: "right",
+      // 「未知」= 升级前的存量，没有模型名，不参与计算
+      render: (r) =>
+        r.rate == null ? (
+          <span
+            title="升级前的记录没有模型名，不参与幻觉率计算"
+            className="text-ink-faint"
+          >
+            —
+          </span>
+        ) : (
+          <span
+            className={
+              r.rate >= 0.05 ? "text-red-600 dark:text-red-400" : undefined
+            }
+          >
+            {pct(r.rate)}
+          </span>
+        ),
+    },
+    {
+      // 格式错误单列：它不是模型跑飞，是端点返回了本接口不接受的
+      // 格式，点破基本没用 —— 定位到哪一列就去看那台机器的配置
+      key: "format_error",
+      title: "格式错误",
+      width: 100,
+      align: "right",
+      render: (r) =>
+        (r.format_error ?? 0) > 0 ? (
+          <span className="text-red-600 dark:text-red-400">
+            {r.format_error}
+          </span>
+        ) : (
+          <span className="text-ink-faint">0</span>
+        ),
+    },
+  ];
+
   return (
-    <div style={{ padding: 16, overflow: "auto", height: "100%" }}>
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Select
-          style={{ width: 220 }}
-          value={effectiveAgent}
-          onChange={setAgentId}
-          loading={agentsQ.isLoading}
-          options={agents.map((a) => ({ value: a.id, label: a.name }))}
-          placeholder="选择智能体"
-        />
-        <Segmented
+    <div className="h-full overflow-auto px-7 py-6">
+      {/* 控制条：agent + 时间范围。三块面板共用同一个窗口 */}
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <div className="w-[220px]">
+          <SelectInput
+            value={effectiveAgent ?? ""}
+            onChange={(v) => setAgentId(v || undefined)}
+            disabled={agentsQ.isLoading}
+            options={[
+              ...(agents.length
+                ? agents.map((a) => ({ value: a.id, label: a.name }))
+                : [{ value: "", label: "暂无已装载的 agent" }]),
+            ]}
+          />
+        </div>
+        {/* 时间范围：走共享的 SegmentedControl，不再手写一份分段控件 */}
+        <SegmentedControl
           value={range}
-          onChange={(v) => setRange(String(v))}
-          options={RANGES.map((r) => ({ value: r.value, label: r.label }))}
+          onChange={(v) => setRange(v as typeof range)}
+          options={RANGES}
         />
-      </Space>
+      </div>
 
       {!effectiveAgent ? (
-        <Card size="small">
-          <Typography.Text type="secondary">请先选择一个智能体</Typography.Text>
-        </Card>
+        <Section>
+          <span className="text-[13px] text-ink-muted">请先选择一个智能体</span>
+        </Section>
       ) : (
-        <>
+        <Stack>
           {/* 1. 用量：概览 / 趋势 / 工具 / 重复调用 / 空转 / 错误 / 追问率 / 能力加载 */}
           <AgentUsagePanel agentId={effectiveAgent} range={range} />
 
           {/* 2. 解析结构 */}
-          <Card
-            size="small"
-            title={
-              <Space>
-                <LineChartOutlined />
-                解析结构（模型有多想并行工具、有没有自编回执）
-              </Space>
-            }
-          >
+          <Section title="解析结构（模型有多想并行工具、有没有自编回执）">
             {parseQ.isLoading ? (
-              <Spin size="small" />
+              <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                加载中…
+              </div>
             ) : parse && parse.total > 0 ? (
               <>
-                <Row gutter={16} style={{ marginBottom: 8 }}>
-                  <Col span={4}>
-                    <Statistic title="解析步数" value={parse.total} />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic title="多动作步数" value={parse.multi} />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic
-                      title="多动作占比"
-                      value={pct(parse.multi_rate)}
-                      valueStyle={
-                        parse.multi_rate >= 0.1 ? { color: "#fa541c" } : undefined
-                      }
-                    />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic
-                      title="被丢弃的动作"
-                      value={parse.dropped_total}
-                      valueStyle={
-                        parse.dropped_total > 0 ? { color: "#fa8c16" } : undefined
-                      }
-                    />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic title="丢弃率" value={pct(parse.dropped_ratio)} />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic
-                      title="自编回执"
-                      value={parse.hallucination}
-                      valueStyle={
-                        parse.hallucination > 0 ? { color: "#cf1322" } : undefined
-                      }
-                    />
-                  </Col>
-                  <Col span={4}>
-                    <Statistic
-                      title="格式错误"
-                      value={parse.format_error}
-                      valueStyle={
-                        parse.format_error > 0 ? { color: "#cf1322" } : undefined
-                      }
-                    />
-                  </Col>
-                </Row>
-                {verdict ? (
-                  <Alert
-                    type={
-                      parse.format_error > 0 || parse.hallucination > 0
-                        ? "warning"
-                        : "info"
-                    }
-                    showIcon
-                    message={verdict}
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+                  <Stat label="解析步数" value={parse.total} />
+                  <Stat label="多动作步数" value={parse.multi} />
+                  <Stat
+                    label="多动作占比"
+                    value={pct(parse.multi_rate)}
+                    tone={parse.multi_rate >= 0.1 ? "warn" : undefined}
                   />
-                ) : (
-                  <Typography.Text type="secondary">
-                    样本还太少（需 ≥20 步才给结论），先继续用几天再看。
-                  </Typography.Text>
-                )}
+                  <Stat
+                    label="被丢弃的动作"
+                    value={parse.dropped_total}
+                    tone={parse.dropped_total > 0 ? "warn" : undefined}
+                  />
+                  <Stat label="丢弃率" value={pct(parse.dropped_ratio)} />
+                  <Stat
+                    label="自编回执"
+                    value={parse.hallucination}
+                    tone={parse.hallucination > 0 ? "danger" : undefined}
+                  />
+                  <Stat
+                    label="格式错误"
+                    value={parse.format_error}
+                    tone={parse.format_error > 0 ? "danger" : undefined}
+                  />
+                </div>
+
+                <div className="mt-3">
+                  {verdict ? (
+                    <Hint
+                      tone={
+                        parse.format_error > 0 || parse.hallucination > 0
+                          ? "warn"
+                          : "info"
+                      }
+                    >
+                      {verdict}
+                    </Hint>
+                  ) : (
+                    <p className="text-[13px] text-ink-muted">
+                      样本还太少（需 ≥20 步才给结论），先继续用几天再看。
+                    </p>
+                  )}
+                </div>
+
                 {/* 按模型拆：这张表是用来挑模型的，聚合数字看不出差别 */}
-                {parse.by_model && Object.keys(parse.by_model).length > 1 ? (
-                  <Table
-                    style={{ marginTop: 12 }}
-                    size="small"
-                    pagination={false}
-                    rowKey={(r) => r.model}
-                    dataSource={Object.entries(parse.by_model).map(([model, s]) => ({
-                      model,
-                      ...s,
-                    }))}
-                    columns={[
-                      { title: "模型", dataIndex: "model", key: "model" },
-                      {
-                        title: "解析步数",
-                        dataIndex: "total",
-                        key: "total",
-                        align: "right",
-                      },
-                      {
-                        title: "自编回执",
-                        dataIndex: "hallucination",
-                        key: "hallucination",
-                        align: "right",
-                        render: (v: number) =>
-                          v > 0 ? (
-                            <Typography.Text type="danger">{v}</Typography.Text>
-                          ) : (
-                            <Typography.Text type="secondary">0</Typography.Text>
-                          ),
-                      },
-                      {
-                        title: "幻觉率",
-                        key: "rate",
-                        align: "right",
-                        // 「未知」= 升级前的存量，没有模型名，不参与计算
-                        render: (_, r) =>
-                          r.rate == null ? (
-                            <Tooltip title="升级前的记录没有模型名，不参与幻觉率计算">
-                              <Typography.Text type="secondary">—</Typography.Text>
-                            </Tooltip>
-                          ) : (
-                            <Typography.Text
-                              type={r.rate >= 0.05 ? "danger" : undefined}
-                            >
-                              {pct(r.rate)}
-                            </Typography.Text>
-                          ),
-                      },
-                      {
-                        // 格式错误单列：它不是模型跑飞，是端点返回了本接口不接受的
-                        // 格式，点破基本没用 —— 定位到哪一列就去看那台机器的配置
-                        title: "格式错误",
-                        key: "format_error",
-                        align: "right",
-                        render: (_, r) =>
-                          (r.format_error ?? 0) > 0 ? (
-                            <Typography.Text type="danger">
-                              {r.format_error}
-                            </Typography.Text>
-                          ) : (
-                            <Typography.Text type="secondary">0</Typography.Text>
-                          ),
-                      },
-                    ]}
-                  />
-                ) : null}
+                {showByModel && (
+                  <div className="mt-4">
+                    <Table
+                      rows={Object.entries(byModel).map(([model, s]) => ({
+                        model,
+                        ...s,
+                      }))}
+                      rowKey={(r) => r.model}
+                      minWidth={620}
+                      columns={modelCols}
+                    />
+                  </div>
+                )}
               </>
             ) : (
-              <Typography.Text type="secondary">
+              <p className="text-[13px] text-ink-muted">
                 暂无解析统计（这项统计从启用后开始累积）
-              </Typography.Text>
+              </p>
             )}
-          </Card>
-        {/* 3. 效果评估基线：改动之后跑一轮，看有没有用例掉 */}
+          </Section>
+
+          {/* 3. 效果评估基线：改动之后跑一轮，看有没有用例掉 */}
           <EvalBaselinePanel agentId={effectiveAgent} />
-        </>
+        </Stack>
       )}
     </div>
   );

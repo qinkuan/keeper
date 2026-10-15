@@ -1,26 +1,13 @@
 import { useState } from "react";
-import {
-  Drawer,
-  Descriptions,
-  Tag,
-  Empty,
-  Spin,
-  Typography,
-  Input,
-  Button,
-  Space,
-  Popconfirm,
-  message,
-  Alert,
-  Select,
-  Segmented,
-  Checkbox,
-  Tabs,
-  Switch,
-  List,
-} from "antd";
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import AgentUsagePanel from "./AgentUsagePanel";
+import { Loader2 } from "lucide-react";
+import { cn } from "../lib/utils";
+import { Drawer } from "./ui/Drawer";
+import { Tabs } from "./ui/Tabs";
+import { Hint } from "./ui/Page";
+import { SelectInput, TextInput, Toggle } from "./ui/Form";
+import { toast } from "./ui/Toast";
 import {
   apiConfig,
   apiSkills,
@@ -47,14 +34,70 @@ const CAP_TABS: { key: string; label: string; kind: CapKind }[] = [
   { key: "plugin", label: "插件", kind: "plugin" },
 ];
 
-const STATE_COLOR: Record<string, string> = {
+/** 状态 → 配色。antd 的 Tag 色板是写死的，深色下会糊，所以自己给语义色。 */
+const PILL_TONES = {
+  green: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300",
+  red: "bg-red-500/15 text-red-600 dark:text-red-300",
+  orange: "bg-orange-500/15 text-orange-600 dark:text-orange-300",
+  blue: "bg-blue-500/15 text-blue-600 dark:text-blue-300",
+  purple: "bg-purple-500/15 text-purple-600 dark:text-purple-300",
+  cyan: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-300",
+  warn: "bg-amber-500/15 text-amber-600 dark:text-amber-300",
+  muted: "bg-black/[0.06] text-ink-muted dark:bg-white/[0.08]",
+} as const;
+
+type PillTone = keyof typeof PILL_TONES;
+
+const STATE_TONE: Record<string, PillTone> = {
   已装配: "green",
-  已关闭: "default",
+  已关闭: "muted",
   只读工作区跳过: "orange",
-  未绑定: "default",
+  未绑定: "muted",
   依赖缺失: "red",
-  已停用: "default",
+  已停用: "muted",
 };
+
+function Pill({
+  tone = "muted",
+  title,
+  onClick,
+  children,
+}: {
+  tone?: PillTone;
+  title?: string;
+  onClick?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] leading-4",
+        PILL_TONES[tone],
+        onClick && "cursor-pointer transition-opacity hover:opacity-70"
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** 基本信息的一行：标签固定宽度，值占满剩余 */
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-3 border-b border-line-soft py-2 last:border-0">
+      <span className="w-[130px] shrink-0 text-[12px] text-ink-muted">
+        {label}
+      </span>
+      <span className="min-w-0 flex-1 text-[13px] text-ink">{children}</span>
+    </div>
+  );
+}
+
+function EmptyHint({ text = "无" }: { text?: string }) {
+  return <span className="text-[13px] text-ink-faint">{text}</span>;
+}
 
 /**
  * Agent 配置面板。
@@ -74,6 +117,7 @@ export default function AgentInfoDrawer({
   agentId: string;
 }) {
   const qc = useQueryClient();
+  const [tab, setTab] = useState("overview");
   const [peerName, setPeerName] = useState("");
   const [peerUrl, setPeerUrl] = useState("");
   const [peerSource, setPeerSource] = useState<"local" | "external">("local");
@@ -81,6 +125,8 @@ export default function AgentInfoDrawer({
   const [peerTrustEnv, setPeerTrustEnv] = useState(true);
   // MCP server 展开状态：记录哪些 server 被点击展开以查看其下工具
   const [expandedMcp, setExpandedMcp] = useState<Record<string, boolean>>({});
+  // 移除对端的二次确认：确认态放在按钮上，比弹一层对话框轻
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   const configQ = useQuery({
     queryKey: ["config", agentId],
@@ -126,11 +172,11 @@ export default function AgentInfoDrawer({
     mutationFn: (llmProfileId: string | null) =>
       apiSetAgentModel(agentId, llmProfileId),
     onSuccess: () => {
-      message.success("模型绑定已更新");
+      toast.success("模型绑定已更新");
       qc.invalidateQueries({ queryKey: ["agent-model", agentId] });
       qc.invalidateQueries({ queryKey: ["config", agentId] });
     },
-    onError: (e: Error) => message.error("绑定失败：" + e.message),
+    onError: (e: Error) => toast.error("绑定失败：" + e.message),
   });
 
   const localAgents = (agentsQ.data?.agents ?? []).filter((a) => a.id !== agentId);
@@ -145,10 +191,10 @@ export default function AgentInfoDrawer({
     mutationFn: (v: { kind: CapKind; name: string; enabled: boolean }) =>
       apiToggleCapability(agentId, v),
     onSuccess: (_d, v) => {
-      message.success(`${v.name} 已${v.enabled ? "启用" : "关闭"}（已重建实例）`);
+      toast.success(`${v.name} 已${v.enabled ? "启用" : "关闭"}（已重建实例）`);
       refreshAfterCapChange();
     },
-    onError: (e: Error) => message.error("切换失败：" + e.message),
+    onError: (e: Error) => toast.error("切换失败：" + e.message),
   });
 
   const refreshPeers = () => {
@@ -181,32 +227,33 @@ export default function AgentInfoDrawer({
         trust_env: peerSource === "external" ? peerTrustEnv : false,
       }),
     onSuccess: () => {
-      message.success(`已添加对端：${peerName}`);
+      toast.success(`已添加对端：${peerName}`);
       setPeerName("");
       setPeerUrl("");
       setPickedAgentId(null);
       refreshPeers();
     },
-    onError: (e: Error) => message.error("添加失败：" + e.message),
+    onError: (e: Error) => toast.error("添加失败：" + e.message),
   });
 
   const patchM = useMutation({
     mutationFn: (v: { name: string; trustEnv: boolean }) =>
       apiPatchPeer(agentId, v.name, v.trustEnv),
     onSuccess: (_d, v) => {
-      message.success(v.trustEnv ? "已改为走代理" : "已改为直连");
+      toast.success(v.trustEnv ? "已改为走代理" : "已改为直连");
       refreshPeers();
     },
-    onError: (e: Error) => message.error("修改失败：" + e.message),
+    onError: (e: Error) => toast.error("修改失败：" + e.message),
   });
 
   const delM = useMutation({
     mutationFn: (name: string) => apiDeletePeer(agentId, name),
     onSuccess: () => {
-      message.success("已移除对端");
+      toast.success("已移除对端");
+      setConfirmDel(null);
       refreshPeers();
     },
-    onError: (e: Error) => message.error("移除失败：" + e.message),
+    onError: (e: Error) => toast.error("移除失败：" + e.message),
   });
 
   const cfg = configQ.data;
@@ -219,405 +266,411 @@ export default function AgentInfoDrawer({
   // 能力列表：内置工具 / 插件 共用。
   // 插件项若带 tools（其下已连上的 MCP 工具）可点击展开查看。
   const CapList = ({ items, kind }: { items: CapabilityItem[]; kind: CapKind }) => {
-    if (capsQ.isLoading) return <Spin />;
+    if (capsQ.isLoading)
+      return (
+        <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          加载中…
+        </div>
+      );
     if (capsQ.isError)
       return (
-        <Typography.Text type="danger">
+        <span className="text-[13px] text-red-600 dark:text-red-300">
           读取失败：{(capsQ.error as Error)?.message}
-        </Typography.Text>
+        </span>
       );
-    if (!items.length)
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无" />;
+    if (!items.length) return <EmptyHint />;
     return (
-      <List
-        size="small"
-        dataSource={items}
-        renderItem={(it) => {
+      <div className="divide-y divide-line-soft">
+        {items.map((it) => {
           const tools = it.tools ?? [];
           const hasTools = tools.length > 0;
           const open = !!expandedMcp[it.name];
           return (
-            <List.Item
-              style={{
-                alignItems: "stretch",
-              }}
-              onClick={() =>
-                hasTools && setExpandedMcp((s) => ({ ...s, [it.name]: !open }))
-              }
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <Space size={6}>
-                  <span style={{ fontWeight: 500 }}>{it.name}</span>
-                  <Tag color={STATE_COLOR[it.state] ?? "default"}>{it.state}</Tag>
-                  {it.mutating && <Tag color="red">写操作</Tag>}
+            <div key={it.name} className="py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="text-[13px] font-medium text-ink">
+                    {it.name}
+                  </span>
+                  <Pill tone={STATE_TONE[it.state] ?? "muted"}>{it.state}</Pill>
+                  {it.mutating && <Pill tone="red">写操作</Pill>}
                   {hasTools && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedMcp((s) => ({ ...s, [it.name]: !open }))
+                      }
+                      className="text-[12px] text-ink-faint transition-colors hover:text-brand"
+                    >
                       {open ? "收起" : "展开"} {tools.length} 个工具
-                    </Typography.Text>
+                    </button>
                   )}
-                </Space>
-                <Switch
-                  size="small"
+                </div>
+                <Toggle
                   checked={it.enabled}
-                  loading={toggleCapM.isPending}
                   disabled={toggleCapM.isPending}
-                  onClick={(_checked, e) => e.stopPropagation()}
                   onChange={(checked) =>
                     toggleCapM.mutate({ kind, name: it.name, enabled: checked })
                   }
                 />
               </div>
               {it.description && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <p className="mt-1 text-[12px] leading-5 text-ink-muted">
                   {it.description}
-                </Typography.Text>
+                </p>
               )}
               {open && hasTools && (
-                <List
-                  size="small"
-                  style={{ marginTop: 8, background: "var(--kp-surface)", borderRadius: 6 }}
-                  dataSource={tools}
-                  renderItem={(tl) => (
-                    <List.Item key={tl.name} style={{ padding: "4px 8px" }}>
-                      <List.Item.Meta
-                        title={
-                          <span style={{ fontFamily: "monospace", fontSize: 13 }}>
-                            {tl.name}
-                          </span>
-                        }
-                        description={tl.description || "—"}
-                      />
-                    </List.Item>
-                  )}
-                />
+                <div className="mt-2 space-y-1 rounded-lg border border-line-soft bg-surface px-3 py-2">
+                  {tools.map((tl) => (
+                    <div key={tl.name}>
+                      <div className="font-mono text-[12px] text-ink">
+                        {tl.name}
+                      </div>
+                      <div className="text-[12px] text-ink-faint">
+                        {tl.description || "—"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
-            </List.Item>
+            </div>
           );
-        }}
-      />
+        })}
+      </div>
     );
   };
 
   const caps = capsQ.data;
 
-  const tabItems = [
-    {
-      key: "overview",
-      label: "概览",
-      children: (
+  return (
+    <Drawer
+      open={open}
+      onClose={onClose}
+      title="Agent 配置"
+      subtitle={agentId}
+      width={720}
+    >
+      <Tabs
+        className="mb-4"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { key: "overview", label: "概览" },
+          ...CAP_TABS.map((t) => ({ key: t.key, label: t.label })),
+          { key: "peers", label: "A2A 对端" },
+          { key: "effective", label: "生效工具" },
+        ]}
+      />
+
+      {tab === "overview" && (
         <>
-          {configQ.isLoading && <Spin />}
+          {configQ.isLoading && (
+            <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              加载中…
+            </div>
+          )}
           {configQ.isError && (
-            <Typography.Text type="danger">
+            <span className="text-[13px] text-red-600 dark:text-red-300">
               配置读取失败：{(configQ.error as Error)?.message}
-            </Typography.Text>
+            </span>
           )}
-          {!cfg && !configQ.isLoading && (
-            <Typography.Text type="secondary">暂无配置</Typography.Text>
-          )}
+          {!cfg && !configQ.isLoading && <EmptyHint text="暂无配置" />}
           {cfg && (
             <>
-              <Descriptions column={1} size="small" bordered title="基本信息">
-                <Descriptions.Item label="名称">{cfg.name}</Descriptions.Item>
-                <Descriptions.Item label="工作区">
+              <div className="rounded-card border border-line-soft px-4 py-1">
+                <Row label="名称">{cfg.name}</Row>
+                <Row label="工作区">
                   {/* 只读：工作空间是**会话级**属性，不是 agent 的。agent 装配时
                       用的目录只是它自己的默认工作目录，与会话实际读写哪里无关。
                       给入口反而会让人以为"改了这里会话就跟着变"。要换会话的
                       工作空间，用会话页顶栏那个下拉。 */}
                   {cfg.workspace || "默认"}
-                </Descriptions.Item>
-                <Descriptions.Item label="MCP 连接">
-                  {cfg.mcp_connected ? (
-                    <Tag color="green">已连接</Tag>
-                  ) : (
-                    <Tag color="red">未连接</Tag>
-                  )}
-                </Descriptions.Item>
-                <Descriptions.Item label="已注册 MCP server">
+                </Row>
+                <Row label="MCP 连接">
+                  <Pill tone={cfg.mcp_connected ? "green" : "red"}>
+                    {cfg.mcp_connected ? "已连接" : "未连接"}
+                  </Pill>
+                </Row>
+                <Row label="已注册 MCP server">
                   {cfg.mcp_servers?.length
                     ? cfg.mcp_servers.map((s: string) => (
-                        <Tag key={s} color="blue">
+                        <Pill key={s} tone="blue">
                           {s}
-                        </Tag>
+                        </Pill>
                       ))
                     : "无"}
-                </Descriptions.Item>
-              </Descriptions>
+                </Row>
+              </div>
 
-              <div style={{ marginTop: 20 }}>
-                <Typography.Text strong>大模型：</Typography.Text>{" "}
+              <div className="mt-5 flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-medium text-ink">大模型：</span>
                 {llm?.provider ? (
-                  <Space size={6}>
-                    <Tag>{llm.provider}</Tag>
-                    <Tag>{llm.model_name || "-"}</Tag>
-                    <Tag color={llm.has_api_key ? "green" : "default"}>
+                  <>
+                    <Pill tone="muted">{llm.provider}</Pill>
+                    <Pill tone="muted">{llm.model_name || "-"}</Pill>
+                    <Pill tone={llm.has_api_key ? "green" : "muted"}>
                       {llm.has_api_key ? "已配置 Key" : "未提供 Key"}
-                    </Tag>
-                  </Space>
+                    </Pill>
+                  </>
                 ) : (
-                  <Space size={6}>
-                    <Tag color="warning">未绑定模型</Tag>
-                    <Typography.Text type="secondary">
+                  <>
+                    <Pill tone="warn">未绑定模型</Pill>
+                    <span className="text-[12px] text-ink-muted">
                       该 agent 不会调用模型（纯索引模式）
-                    </Typography.Text>
-                  </Space>
+                    </span>
+                  </>
                 )}
               </div>
 
-              <div style={{ marginTop: 12 }}>
-                <Typography.Text strong>绑定模型预设：</Typography.Text>{" "}
-                <Select
-                  style={{ minWidth: 260 }}
-                  placeholder="未绑定（无法调用模型）"
-                  allowClear
-                  loading={agentModelQ.isLoading}
-                  value={agentModelQ.data?.llm_profile_id ?? undefined}
-                  onChange={(v) => setModelM.mutate(v ?? null)}
-                  options={(modelsQ.data ?? []).map((m) => ({
-                    label: `${m.name}（${m.provider}/${m.model_name}）`,
-                    value: m.id,
-                  }))}
-                />
-                <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              <div className="mt-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[13px] font-medium text-ink">
+                    绑定模型预设：
+                  </span>
+                  {agentModelQ.isLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-ink-muted" />
+                  ) : (
+                    <div className="w-[280px]">
+                      <SelectInput
+                        value={agentModelQ.data?.llm_profile_id ?? ""}
+                        onChange={(v) => setModelM.mutate(v || null)}
+                        options={[
+                          { value: "", label: "未绑定（无法调用模型）" },
+                          ...(modelsQ.data ?? []).map((m) => ({
+                            value: m.id,
+                            label: `${m.name}（${m.provider}/${m.model_name}）`,
+                          })),
+                        ]}
+                      />
+                    </div>
+                  )}
+                </div>
+                <p className="mt-1.5 text-[12px] leading-5 text-ink-muted">
                   模型必须绑定才能使用：未绑定时该 agent 不会调用模型（纯索引模式）
-                  {agentModelQ.data?.hint && !agentModelQ.data.bound ? (
-                    <Typography.Text type="warning" style={{ marginLeft: 8, fontSize: 12 }}>
+                  {agentModelQ.data?.hint && !agentModelQ.data.bound && (
+                    <span className="ml-1.5 text-amber-600 dark:text-amber-300">
                       {agentModelQ.data.hint}
-                    </Typography.Text>
-                  ) : null}
-                </Typography.Text>
+                    </span>
+                  )}
+                </p>
               </div>
 
-              <div style={{ marginTop: 12 }}>
-                <Typography.Text strong>技能：</Typography.Text>{" "}
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-medium text-ink">技能：</span>
                 {skillsQ.data?.skills?.length
                   ? skillsQ.data.skills.map((s: string) => (
-                      <Tag key={s} color="purple">
+                      <Pill key={s} tone="purple">
                         {s}
-                      </Tag>
+                      </Pill>
                     ))
                   : "无"}
               </div>
             </>
           )}
         </>
-      ),
-    },
-    ...CAP_TABS.map((t) => ({
-      key: t.key,
-      label: t.label,
-      children: (
+      )}
+
+      {CAP_TABS.map(
+        (t) =>
+          tab === t.key && (
+            <div key={t.key}>
+              {t.key === "builtin" && (
+                <Hint title="内置工具归 keeper 本地">
+                  代码在 keeper 客户端里，平台不管理也不需要下载；默认启用，可按需关闭（写类工具在只读工作区下会自动跳过）。
+                </Hint>
+              )}
+              {t.key === "plugin" && (
+                <Hint title="插件由平台管理">
+                  一个插件统一承载 MCP server、可执行工具（bin）与技能（skill）；可在本页按需开关，点开插件可查看其下已连上的 MCP 工具。
+                </Hint>
+              )}
+              <div className="mt-3">
+                <CapList
+                  items={(caps?.[t.key] ?? []) as CapabilityItem[]}
+                  kind={t.kind}
+                />
+              </div>
+            </div>
+          )
+      )}
+
+      {tab === "peers" && (
         <>
-          {t.key === "builtin" && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 12 }}
-              message="内置工具归 keeper 本地"
-              description="代码在 keeper 客户端里，平台不管理也不需要下载；默认启用，可按需关闭（写类工具在只读工作区下会自动跳过）。"
-            />
-          )}
-          {t.key === "plugin" && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 12 }}
-              message="插件由平台管理"
-              description="一个插件统一承载 MCP server、可执行工具（bin）与技能（skill）；可在本页按需开关，点开插件可查看其下已连上的 MCP 工具。"
-            />
-          )}
-          <CapList items={(caps?.[t.key] ?? []) as CapabilityItem[]} kind={t.kind} />
-        </>
-      ),
-    })),
-    {
-      key: "peers",
-      label: "A2A 对端",
-      children: (
-        <>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 12 }}
-            message="运行时可增删，立即生效并持久化"
-            description="本进程内 agent 走下拉选择（直连）；外部 agent 手填地址，默认走系统代理。"
-          />
-          <Space direction="vertical" style={{ width: "100%" }} size="small">
-            {peers.length === 0 && (
-              <Typography.Text type="secondary">暂无对端</Typography.Text>
-            )}
+          <Hint title="运行时可增删，立即生效并持久化">
+            本进程内 agent 走下拉选择（直连）；外部 agent 手填地址，默认走系统代理。
+          </Hint>
+
+          <div className="mt-3 space-y-2">
+            {peers.length === 0 && <EmptyHint text="暂无对端" />}
             {peers.map((p) => (
-              <div key={p.name} style={{ display: "flex", alignItems: "center" }}>
-                <Tag color="geekblue" style={{ marginInlineEnd: 8 }}>
-                  {p.name}
-                </Tag>
-                <Tag
-                  color={p.source === "local" ? "cyan" : "orange"}
-                  style={{ marginInlineEnd: 8 }}
-                >
+              <div
+                key={p.name}
+                className="flex items-center gap-2 rounded-lg border border-line-soft px-3 py-2"
+              >
+                <Pill tone="blue">{p.name}</Pill>
+                <Pill tone={p.source === "local" ? "cyan" : "orange"}>
                   {p.source === "local" ? "本进程" : "外部"}
-                </Tag>
+                </Pill>
                 {p.source === "external" && (
-                  <Tag
-                    color={p.trust_env ? "blue" : "default"}
-                    style={{ marginInlineEnd: 8, cursor: "pointer" }}
+                  <Pill
+                    tone={p.trust_env ? "blue" : "muted"}
                     title="点击切换：走系统代理 / 直连"
                     onClick={() =>
                       patchM.mutate({ name: p.name, trustEnv: !p.trust_env })
                     }
                   >
                     {p.trust_env ? "走代理" : "直连"}
-                  </Tag>
+                  </Pill>
                 )}
-                <Typography.Text
-                  type="secondary"
-                  style={{ flex: 1, fontSize: 12 }}
-                >
+                <span className="min-w-0 flex-1 truncate text-[12px] text-ink-muted">
                   {p.a2a_url}
-                </Typography.Text>
-                <Popconfirm
-                  title={`移除对端 ${p.name}？`}
-                  onConfirm={() => delM.mutate(p.name)}
-                  okText="移除"
-                  cancelText="取消"
-                >
-                  <Button size="small" danger loading={busy}>
+                </span>
+                {confirmDel === p.name ? (
+                  <span className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => delM.mutate(p.name)}
+                      disabled={busy}
+                      className="rounded-md bg-red-500 px-2 py-1 text-[12px] text-white transition hover:bg-red-400 disabled:opacity-50"
+                    >
+                      确认移除
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDel(null)}
+                      className="rounded-md px-2 py-1 text-[12px] text-ink-muted transition hover:text-ink"
+                    >
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDel(p.name)}
+                    className="shrink-0 rounded-md px-2 py-1 text-[12px] text-ink-muted transition hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300"
+                  >
                     移除
-                  </Button>
-                </Popconfirm>
+                  </button>
+                )}
               </div>
             ))}
-            <Segmented
-              value={peerSource}
-              onChange={handleSourceChange}
-              style={{ marginTop: 8 }}
-              options={[
-                { label: "本进程", value: "local" },
-                { label: "外部", value: "external" },
-              ]}
-            />
-            {peerSource === "local" ? (
-              <Space.Compact style={{ width: "100%", marginTop: 8 }}>
-                <Input
-                  style={{ width: "30%" }}
-                  placeholder="对端名"
-                  value={peerName}
-                  onChange={(e) => setPeerName(e.target.value)}
-                />
-                <Select
-                  style={{ flex: 1 }}
-                  placeholder={
-                    localAgents.length
-                      ? "选择本进程已装载的 agent"
-                      : "本进程暂无其他 agent"
-                  }
-                  value={pickedAgentId ?? undefined}
-                  onChange={handlePickAgent}
-                  loading={agentsQ.isLoading}
-                  options={localAgents.map((a) => ({
-                    value: a.id,
-                    label: `${a.name}  (${a.id.slice(0, 8)}…)`,
-                  }))}
-                />
-                <Button
-                  type="primary"
-                  disabled={!canAdd}
-                  loading={busy}
-                  onClick={() => addM.mutate()}
+
+            <div className="flex items-center gap-0.5 rounded-lg bg-surface p-0.5">
+              {(["local", "external"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => handleSourceChange(v)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 text-[12px] transition-all",
+                    peerSource === v
+                      ? "bg-panel text-ink-strong shadow-[var(--kp-shadow-sm)]"
+                      : "text-ink-muted hover:text-ink"
+                  )}
                 >
-                  添加
-                </Button>
-              </Space.Compact>
-            ) : (
-              <div style={{ marginTop: 8 }}>
-                <Space.Compact style={{ width: "100%" }}>
-                  <Input
-                    style={{ width: "30%" }}
-                    placeholder="对端名"
-                    value={peerName}
-                    onChange={(e) => setPeerName(e.target.value)}
+                  {v === "local" ? "本进程" : "外部"}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-2">
+              <div className="w-[30%]">
+                <TextInput
+                  value={peerName}
+                  onChange={setPeerName}
+                  placeholder="对端名"
+                />
+              </div>
+              {peerSource === "local" ? (
+                <div className="flex-1">
+                  <SelectInput
+                    value={pickedAgentId ?? ""}
+                    onChange={handlePickAgent}
+                    options={[
+                      {
+                        value: "",
+                        label: localAgents.length
+                          ? "选择本进程已装载的 agent"
+                          : "本进程暂无其他 agent",
+                      },
+                      ...localAgents.map((a) => ({
+                        value: a.id,
+                        label: `${a.name}  (${a.id.slice(0, 8)}…)`,
+                      })),
+                    ]}
                   />
-                  <Input
-                    placeholder="http://host:8080/agents/{id}/a2a"
+                </div>
+              ) : (
+                <div className="flex-1">
+                  <TextInput
                     value={peerUrl}
-                    onChange={(e) => setPeerUrl(e.target.value)}
+                    onChange={setPeerUrl}
+                    placeholder="http://host:8080/agents/{id}/a2a"
                   />
-                  <Button
-                    type="primary"
-                    disabled={!canAdd}
-                    loading={busy}
-                    onClick={() => addM.mutate()}
-                  >
-                    添加
-                  </Button>
-                </Space.Compact>
-                <div style={{ marginTop: 8 }}>
-                  <Checkbox
+                </div>
+              )}
+              <button
+                type="button"
+                disabled={!canAdd || busy}
+                onClick={() => addM.mutate()}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                添加
+              </button>
+            </div>
+
+            {peerSource === "external" && (
+              <div className="flex items-center gap-2">
+                <label className="flex cursor-pointer items-center gap-1.5 text-[13px] text-ink">
+                  <input
+                    type="checkbox"
                     checked={peerTrustEnv}
                     onChange={(e) => setPeerTrustEnv(e.target.checked)}
-                  >
-                    走系统代理
-                  </Checkbox>
-                  <Typography.Text
-                    type="secondary"
-                    style={{ fontSize: 12, marginLeft: 8 }}
-                  >
-                    外部对端通常需要；若对端在内网可直连，取消勾选
-                  </Typography.Text>
-                </div>
+                    className="h-3.5 w-3.5 accent-[var(--kp-primary)]"
+                  />
+                  走系统代理
+                </label>
+                <span className="text-[12px] text-ink-muted">
+                  外部对端通常需要；若对端在内网可直连，取消勾选
+                </span>
               </div>
             )}
-          </Space>
+          </div>
         </>
-      ),
-    },
-    {
-      key: "effective",
-      label: "生效工具",
-      children: (
+      )}
+
+      {tab === "effective" && (
         <>
-          {toolsQ.isLoading && <Spin size="small" />}
+          {toolsQ.isLoading && (
+            <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              加载中…
+            </div>
+          )}
           {toolsQ.isError && (
-            <Typography.Text type="danger">
+            <span className="text-[13px] text-red-600 dark:text-red-300">
               读取失败：{(toolsQ.error as Error)?.message}
-            </Typography.Text>
+            </span>
           )}
-          {!toolsQ.isLoading && effectiveTools.length === 0 && (
-            <Typography.Text type="secondary">无</Typography.Text>
-          )}
-          <div>
+          {!toolsQ.isLoading && effectiveTools.length === 0 && <EmptyHint />}
+          <div className="flex flex-wrap gap-1.5">
             {effectiveTools.map((t, i) => (
-              <Tag key={`${t.name}-${i}`} style={{ marginBottom: 4 }}>
+              <Pill key={`${t.name}-${i}`} tone="muted">
                 {t.name}
-              </Tag>
+              </Pill>
             ))}
           </div>
         </>
-      ),
-    },
-    {
-      key: "usage",
-      label: "用量",
-      children: (
-        <Alert
-          type="info"
-          showIcon
-          message="用量数据已移到侧边栏「可观测」"
-          description="那边同时提供用量趋势、工具统计、重复调用 / 空转、错误聚合、能力加载与解析结构，并且可以按时间范围对照查看。"
-        />
-      ),
-    },
-  ];
+      )}
 
-  return (
-    <Drawer title="Agent 配置" width={720} open={open} onClose={onClose}>
-      <Tabs items={tabItems} />
+      {tab === "usage" && (
+        <Hint title="用量数据已移到侧边栏「可观测」">
+          那边同时提供用量趋势、工具统计、重复调用 / 空转、错误聚合、能力加载与解析结构，并且可以按时间范围对照查看。
+        </Hint>
+      )}
     </Drawer>
   );
 }

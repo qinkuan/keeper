@@ -1,24 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Button,
-  Empty,
-  Input,
-  Modal,
-  Spin,
-  Tag,
-  Typography,
-  message,
-} from "antd";
-import {
-  CaretDownOutlined,
-  CaretRightOutlined,
-  CheckCircleFilled,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  PlusOutlined,
-  RedoOutlined,
-} from "@ant-design/icons";
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleX,
+  CircleCheck,
+  Loader2,
+  Plus,
+  RotateCcw,
+} from "lucide-react";
+import { Modal } from "../components/ui/Modal";
+import { inputCls } from "../components/ui/Form";
+import { Hint } from "../components/ui/Page";
+import { Pill } from "../components/ui/Pill";
+import type { PillTone } from "../components/ui/Pill";
+import { toast } from "../components/ui/Toast";
+import { cn } from "../lib/utils";
+
+/** 任务视图里反复出现的三种规格，收成常量免得散落各处 */
+const BTN =
+  "inline-flex h-7 items-center gap-1.5 rounded-lg border border-line px-2.5 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:cursor-not-allowed disabled:opacity-40";
+const BTN_SM =
+  "inline-flex h-6 items-center gap-1 rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:cursor-not-allowed disabled:opacity-40";
+const BTN_PRIMARY =
+  "inline-flex h-7 items-center gap-1.5 rounded-lg bg-brand-gradient px-3 text-[12.5px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+const CANCEL_BTN =
+  "h-8 rounded-lg border border-line px-4 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong";
+const OK_BTN =
+  "flex h-8 items-center gap-1.5 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50";
+/* 输入规格直接引用 Form.tsx 的共享常量：这里原来自己写了一份（还停留在旧的
+   粗 focus ring），几份副本各自漂移。现在控件规格只有一处。 */
+const INPUT = inputCls;
+const MUTED = "text-[12px] text-ink-muted";
+
+/** 空态占位：任务视图里有多处「还没有…」 */
+function EmptyPlaceholder({ text }: { text: string }) {
+  return (
+    <div className="py-16 text-center text-[13px] text-ink-faint">{text}</div>
+  );
+}
 import ChatBubble from "../components/ChatBubble";
 import {
   apiAnswerTask,
@@ -60,15 +81,17 @@ import type {
   TaskStatus,
 } from "../api/types";
 
-const statusColor: Record<TaskStatus, string> = {
-  draft: "default",
-  planning: "processing",
-  plan_review: "warning",
-  executing: "processing",
-  waiting_input: "warning",
-  waiting_review: "gold",
-  done: "success",
-  failed: "error",
+/** 状态 → 语义色。原先是 antd Tag 的色名（processing/warning/gold…），
+ *  那套色板是写死的 hex，深色主题下会糊，这里换成随主题的 Pill tone。 */
+const statusTone: Record<TaskStatus, PillTone> = {
+  draft: "muted",
+  planning: "blue",
+  plan_review: "amber",
+  executing: "brand",
+  waiting_input: "amber",
+  waiting_review: "orange",
+  done: "green",
+  failed: "red",
 };
 const statusLabel: Record<TaskStatus, string> = {
   draft: "草稿",
@@ -80,11 +103,11 @@ const statusLabel: Record<TaskStatus, string> = {
   done: "已完成",
   failed: "已失败",
 };
-const itemColor: Record<TaskItemStatus, string> = {
-  pending: "default",
-  doing: "processing",
-  done: "success",
-  skipped: "default",
+const itemTone: Record<TaskItemStatus, PillTone> = {
+  pending: "muted",
+  doing: "blue",
+  done: "green",
+  skipped: "muted",
 };
 const itemLabel: Record<TaskItemStatus, string> = {
   pending: "待办",
@@ -271,7 +294,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       const r = await fn();
       afterAction(r);
     } catch (e: any) {
-      message.error(e?.message || "操作失败");
+      toast.error(e?.message || "操作失败");
     } finally {
       setBusy(false);
     }
@@ -376,7 +399,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       }
       if (r) afterAction(r);
     } catch (e: any) {
-      message.error(e?.message || "回答失败");
+      toast.error(e?.message || "回答失败");
     } finally {
       setBusy(false);
     }
@@ -431,9 +454,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
         }
       }
       refreshList();
-      if (pausedRef.current) message.info("已暂停，可继续点击「执行」从断点续跑");
+      if (pausedRef.current) toast.info("已暂停，可继续点击「执行」从断点续跑");
     } catch (e: any) {
-      message.error(e?.message || "执行失败");
+      toast.error(e?.message || "执行失败");
     } finally {
       setExecuting(false);
       setBusy(false);
@@ -466,9 +489,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
     pausedRef.current = true; // 阻止循环再发下一次 execute
     try {
       await apiPauseTask(agentId, selId, true);
-      message.info("正在暂停…当前这一步跑完即停");
+      toast.info("正在暂停…当前这一步跑完即停");
     } catch (e: any) {
-      message.error(e?.message || "暂停失败");
+      toast.error(e?.message || "暂停失败");
     }
   };
 
@@ -485,7 +508,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       const r = await apiPlanGenerate(agentId, task.id);
       afterAction(r);
     } catch (e: any) {
-      message.error(e?.message || "产出计划失败");
+      toast.error(e?.message || "产出计划失败");
     } finally {
       setBusy(false);
     }
@@ -508,9 +531,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       setTask(r.task);
       setEditOpen(false);
       await refreshList();
-      message.success("已保存");
+      toast.success("已保存");
     } catch (e: any) {
-      message.error(e?.message || "保存失败");
+      toast.error(e?.message || "保存失败");
     } finally {
       setBusy(false);
     }
@@ -527,9 +550,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       setTask(r.task);
       setItems(r.items || []);
       await refreshList();
-      message.success(status === "done" ? "已标记完成" : "已跳过");
+      toast.success(status === "done" ? "已标记完成" : "已跳过");
     } catch (e: any) {
-      message.error(e?.message || "更新失败");
+      toast.error(e?.message || "更新失败");
     } finally {
       setBusy(false);
     }
@@ -548,7 +571,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       setNewItem("");
       await refreshList();
     } catch (e: any) {
-      message.error(e?.message || "添加失败");
+      toast.error(e?.message || "添加失败");
     } finally {
       setBusy(false);
     }
@@ -597,9 +620,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
   const renderConversation = () => {
     if (messages.length === 0) {
       return (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <span className="text-[12px] text-ink-muted">
           暂无对话。执行 / 验收 / 打回后，agent 的回答会按会话真实记录显示在这里（与「会话模式」一致）。
-        </Typography.Text>
+        </span>
       );
     }
     return (
@@ -640,10 +663,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       {/* 任务详情（任务由顶部「任务」抽屉选中，占满工作区） */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: 20, boxSizing: "border-box" }}>
         {!task ? (
-          <Empty
-            style={{ marginTop: 80 }}
-            description="从顶部选择或新建一个任务"
-          />
+          <div className="pt-20 text-center text-[13px] text-ink-faint">
+            从顶部选择或新建一个任务
+          </div>
         ) : (
           <>
             {/* 任务内容（计划 / 计划点 / 产物），可收起；标题行合并展示任务元信息 */}
@@ -658,82 +680,86 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                 }}
                 onClick={() => setContentCollapsed((c) => !c)}
               >
-                <Button
-                  type="text"
-                  size="small"
-                  icon={contentCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                />
-                <Typography.Text
-                  strong
-                  style={{ fontSize: 15, color: "var(--kp-text-strong)" }}
-                >
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center text-ink-faint">
+                  {contentCollapsed ? (
+                    <ChevronRight className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </span>
+                <span className="text-[15px] font-semibold text-ink-strong">
                   {task.title || "未命名任务"}
-                </Typography.Text>
-                <Tag color={statusColor[task.status]}>{statusLabel[task.status]}</Tag>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                </span>
+                <Pill tone={statusTone[task.status]}>{statusLabel[task.status]}</Pill>
+                <span className="text-[12px] text-ink-muted">
                   计划版本 v{task.plan_version ?? 1} · 计划打回 {task.plan_reject_count ?? 0} · 验收打回{" "}
                   {task.review_reject_count ?? 0}
-                </Typography.Text>
+                </span>
                 {usage && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <span className="text-[12px] text-ink-muted">
                     {" · "}
                     <UsageTag usage={usage} />
-                  </Typography.Text>
+                  </span>
                 )}
                 {toolStats.length > 0 && (
-                  <div style={{ marginTop: 8, width: "100%" }}>
-                    <Typography.Link
-                      style={{ fontSize: 12 }}
-                      onClick={(e) => {
-                        // 标题行整体可点（折叠任务内容区），这里只开弹窗
-                        e.stopPropagation();
-                        setStatsOpen(true);
-                      }}
-                    >
-                      {`工具统计 · ${toolStats.length} 个工具（点击查看）`}
-                    </Typography.Link>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      // 标题行整体可点（折叠任务内容区），这里只开弹窗
+                      e.stopPropagation();
+                      setStatsOpen(true);
+                    }}
+                    className="text-[12px] text-brand transition-opacity hover:opacity-75"
+                  >
+                    {`工具统计 · ${toolStats.length} 个工具（点击查看）`}
+                  </button>
                 )}
                 <span
-                  style={{ marginLeft: "auto", display: "flex", gap: 8, cursor: "default" }}
+                  className="ml-auto flex shrink-0 cursor-default items-center gap-2"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <Button size="small" onClick={openEdit}>
+                  <button type="button" onClick={openEdit} className={BTN_SM}>
                     编辑
-                  </Button>
-                  <Button
-                    size="small"
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
                     onClick={() => loadDetail(task.id)}
-                    loading={busy}
+                    className={BTN_SM}
                   >
+                    {busy && <Loader2 className="h-3 w-3 animate-spin" />}
                     刷新
-                  </Button>
+                  </button>
                   {(status === "executing" || status === "waiting_input") && (
                     <>
-                      <Button
-                        type="primary"
-                        size="small"
-                        loading={executing}
+                      <button
+                        type="button"
                         disabled={executing || status !== "executing"}
                         onClick={runWholePlan}
+                        className={cn(BTN_SM, "border-brand bg-brand-gradient text-white hover:text-white")}
                       >
+                        {executing && <Loader2 className="h-3 w-3 animate-spin" />}
                         {executing ? "执行中…" : "执行"}
-                      </Button>
-                      <Button
-                        size="small"
-                        danger
+                      </button>
+                      <button
+                        type="button"
                         disabled={!executing}
                         onClick={pauseRun}
+                        className={cn(
+                          BTN_SM,
+                          "hover:border-red-500 hover:text-red-600 dark:hover:text-red-300"
+                        )}
                       >
                         暂停
-                      </Button>
-                      <Button
-                        size="small"
+                      </button>
+                      <button
+                        type="button"
                         disabled={!streamMsg}
                         onClick={stopStream}
+                        className={BTN_SM}
                       >
                         停止生成
-                      </Button>
+                      </button>
                     </>
                   )}
                 </span>
@@ -759,17 +785,17 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
             {/* 操作条 */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
               {(status === "draft" || status === "planning") && (
-                <Button type="primary" loading={busy} onClick={generatePlan}>
+                <button type="button" disabled={busy} onClick={generatePlan} className={cn(BTN_PRIMARY, "h-8 px-4")}>
                   {status === "draft" ? "启动并产出计划" : "产出计划"}
-                </Button>
+                </button>
               )}
 
               {status === "plan_review" && (
                 <>
-                  <Button
-                    type="primary"
-                    icon={<CheckCircleOutlined />}
-                    loading={busy}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={cn(BTN_PRIMARY, "border-brand bg-brand-gradient text-white")}
                     onClick={() =>
                       openFb({
                         title: "通过计划（可附意见，可选）",
@@ -783,10 +809,11 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     }
                   >
                     通过计划
-                  </Button>
-                  <Button
-                    danger
-                    loading={busy}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={cn(BTN, "hover:border-red-500 hover:text-red-600 dark:hover:text-red-300")}
                     onClick={() =>
                       openFb({
                         title: "打回修改（不升版，必填反馈）",
@@ -799,10 +826,11 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     }
                   >
                     打回修改
-                  </Button>
-                  <Button
-                    icon={<RedoOutlined />}
-                    loading={busy}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={BTN}
                     onClick={() =>
                       openFb({
                         title: "重新规划（升版，可附方向，可选）",
@@ -816,14 +844,15 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     }
                   >
                     重新规划
-                  </Button>
+                  </button>
                 </>
               )}
 
               {(status === "executing" || status === "waiting_input") && (
-                <Button
-                  icon={<RedoOutlined />}
-                  loading={busy}
+                <button
+                  type="button"
+                  disabled={busy}
+                  className={BTN}
                   onClick={() =>
                     openFb({
                       title: "重新规划（可附反馈，可选）",
@@ -837,15 +866,15 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                   }
                 >
                   重新规划
-                </Button>
+                </button>
               )}
 
               {status === "waiting_review" && (
                 <>
-                  <Button
-                    type="primary"
-                    icon={<CheckCircleOutlined />}
-                    loading={busy}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={cn(BTN_PRIMARY, "border-brand bg-brand-gradient text-white")}
                     onClick={() =>
                       openFb({
                         title: "验收通过（可附备注，可选）",
@@ -859,11 +888,11 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     }
                   >
                     验收通过
-                  </Button>
-                  <Button
-                    danger
-                    icon={<CloseCircleOutlined />}
-                    loading={busy}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={cn(BTN, "hover:border-red-500 hover:text-red-600 dark:hover:text-red-300")}
                     onClick={() =>
                       openFb({
                         title: "验收打回（必填反馈）",
@@ -878,23 +907,23 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     }
                   >
                     验收打回
-                  </Button>
+                  </button>
                 </>
               )}
 
               {(status === "done" || status === "failed") && (
-                <Typography.Text type={status === "failed" ? "danger" : "success"}>
+                <span className={status === "failed" ? "text-[13px] text-red-600 dark:text-red-300" : "text-[13px] text-emerald-600 dark:text-emerald-300"}>
                   {status === "done" ? "任务已完成" : "任务已失败"}
-                </Typography.Text>
+                </span>
               )}
             </div>
 
             {/* 验收/计划反馈展示 */}
             {task.plan_feedback && (
               <div style={{ marginBottom: 8 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <span className="text-[12px] text-ink-muted">
                   计划反馈：
-                </Typography.Text>
+                </span>
                 <div
                   style={{
                     whiteSpace: "pre-wrap",
@@ -911,9 +940,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
             )}
             {task.review_feedback && (
               <div style={{ marginBottom: 8 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <span className="text-[12px] text-ink-muted">
                   验收反馈：
-                </Typography.Text>
+                </span>
                 <div
                   style={{
                     whiteSpace: "pre-wrap",
@@ -932,7 +961,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
             {/* 计划 */}
             {task.plan_md && (
               <div style={{ marginBottom: 16 }}>
-                <Typography.Text strong>计划（plan_md）</Typography.Text>
+                <span className="text-[13px] font-semibold text-ink-strong">计划（plan_md）</span>
                 <div
                   style={{
                     background: "var(--kp-surface)",
@@ -972,17 +1001,11 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                         }}
                       >
                         {isDone ? (
-                          <CheckCircleFilled
-                            style={{ color: "#3fa46a", marginTop: 4, fontSize: 13 }}
-                          />
+                          <CheckCircle2 className="mt-1 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
                         ) : isSkipped ? (
-                          <CloseCircleOutlined
-                            style={{ color: "var(--kp-text-muted)", marginTop: 4, fontSize: 13 }}
-                          />
+                          <CircleX className="mt-1 h-3.5 w-3.5 shrink-0 text-ink-faint" />
                         ) : (
-                          <CheckCircleOutlined
-                            style={{ color: "var(--kp-border)", marginTop: 4, fontSize: 13 }}
-                          />
+                          <CircleCheck className="mt-1 h-3.5 w-3.5 shrink-0 text-line" />
                         )}
                         <span
                           style={{
@@ -1001,12 +1024,12 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
 
             {/* 计划点列表 */}
             <div style={{ marginBottom: 16 }}>
-              <Typography.Text strong>计划点（{sortedItems.length}）</Typography.Text>
+              <span className="text-[13px] font-semibold text-ink-strong">计划点（{sortedItems.length}）</span>
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
                 {sortedItems.length === 0 && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <span className="text-[12px] text-ink-muted">
                     尚无计划点。通过「产出计划」生成，或在下方手动添加。
-                  </Typography.Text>
+                  </span>
                 )}
                 {sortedItems.map((it) => (
                   <div
@@ -1020,34 +1043,33 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       {it.status === "done" && (
-                        <CheckCircleFilled style={{ color: "#3fa46a", fontSize: 14 }} />
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                       )}
-                      <Typography.Text strong style={{ fontSize: 13 }}>
+                      <span className="text-[13px] font-semibold text-ink-strong">
                         #{it.seq}
-                      </Typography.Text>
-                      <Tag color={itemColor[it.status]}>{itemLabel[it.status]}</Tag>
+                      </span>
+                      <Pill tone={itemTone[it.status]}>{itemLabel[it.status]}</Pill>
                       {it.rounds > 0 && (
-                        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                        <span className="text-[11px] text-ink-muted">
                           {it.rounds} 轮
-                        </Typography.Text>
+                        </span>
                       )}
                       {(it.status === "pending" || it.status === "doing") && (
-                        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                          <Button
-                            size="small"
-                            type="link"
+                        <span className="ml-auto flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
                             onClick={() => patchItemStatus(it, "done")}
+                            className="text-[12px] text-brand transition-opacity hover:opacity-75"
                           >
                             标记完成
-                          </Button>
-                          <Button
-                            size="small"
-                            type="link"
-                            danger
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => patchItemStatus(it, "skipped")}
+                            className="text-[12px] text-ink-muted transition-colors hover:text-red-600 dark:hover:text-red-300"
                           >
                             跳过
-                          </Button>
+                          </button>
                         </span>
                       )}
                     </div>
@@ -1084,16 +1106,25 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                 status === "executing" ||
                 status === "waiting_input" ||
                 status === "waiting_review") && (
-                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                  <Input
+                <div className="mt-2 flex gap-2">
+                  <input
                     placeholder="补充一个计划点（描述要做的事）"
                     value={newItem}
                     onChange={(e) => setNewItem(e.target.value)}
-                    onPressEnter={addItem}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addItem();
+                    }}
+                    className={INPUT}
                   />
-                  <Button icon={<PlusOutlined />} onClick={addItem} loading={busy}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={addItem}
+                    className={cn(BTN, "shrink-0")}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
                     添加
-                  </Button>
+                  </button>
                 </div>
               )}
             </div>
@@ -1101,7 +1132,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
             {/* 任务级产物 / 总结 */}
             {task.result_summary && (
               <div style={{ marginBottom: 16 }}>
-                <Typography.Text strong>总结</Typography.Text>
+                <span className="text-[13px] font-semibold text-ink-strong">总结</span>
                 <div
                   style={{
                     whiteSpace: "pre-wrap",
@@ -1121,9 +1152,9 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                 这些过程产物仍留在对话消息里可查 */}
             {finalArtifacts.length > 0 && (
               <div style={{ marginBottom: 16 }}>
-                <Typography.Text strong>
+                <span className="text-[13px] font-semibold text-ink-strong">
                   最终交付产物（{finalArtifacts.length}）
-                </Typography.Text>
+                </span>
                 <div style={{ marginTop: 8 }}>
                   {finalArtifacts.map(({ artifact, messageId }, i) => (
                     <ArtifactCard
@@ -1142,7 +1173,7 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
 
             {/* 对话延续区：占满剩余高度，独立滚动到底部 */}
             <div style={{ marginTop: 8, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-              <Typography.Text strong style={{ flex: "0 0 auto" }}>执行过程 / 对话</Typography.Text>
+              <span className="shrink-0 text-[13px] font-semibold text-ink-strong">执行过程 / 对话</span>
               <div
                 ref={convRef}
                 style={{
@@ -1157,58 +1188,62 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
               >
                 {renderConversation()}
                 {busy && (
-                  <div style={{ textAlign: "center", padding: 8 }}>
-                    <Spin size="small" />
+                  <div className="flex justify-center p-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-ink-muted" />
                   </div>
                 )}
               </div>
 
               {/* 待回答区 */}
               {pending && (
-                <div style={{ marginTop: 10 }}>
+                <div className="mt-2.5">
                   {pending.question && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                    <span className="mb-1.5 block text-[12px] text-ink-muted">
                       模型提问：{pending.question}
-                    </Typography.Text>
+                    </span>
                   )}
                   {!!pending.options?.length && (
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                    <div className="mb-2 flex flex-wrap gap-1.5">
                       {pending.options.map((o) => (
-                        <Button
+                        <button
                           key={o}
-                          size="small"
+                          type="button"
                           disabled={busy}
                           onClick={() => void answerStream(o)}
+                          className={cn(BTN_SM, "h-7 px-2.5")}
                         >
                           {o}
-                        </Button>
+                        </button>
                       ))}
                     </div>
                   )}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <Input
+                  <div className="flex gap-2">
+                    <input
                       placeholder="回答上面的问题，Enter 发送"
                       value={fbText}
                       disabled={busy}
                       onChange={(e) => setFbText(e.target.value)}
-                      onPressEnter={() => {
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
                         const t = fbText.trim();
                         if (!t) return;
                         setFbText("");
                         void answerStream(t);
                       }}
+                      className={INPUT}
                     />
-                    <Button
-                      type="primary"
+                    <button
+                      type="button"
                       disabled={busy || !fbText.trim()}
                       onClick={() => {
                         const t = fbText.trim();
                         setFbText("");
                         void answerStream(t);
                       }}
+                      className={cn(BTN_PRIMARY, "shrink-0")}
                     >
                       回答
-                    </Button>
+                    </button>
                   </div>
                 </div>
               )}
@@ -1221,35 +1256,56 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       <Modal
         title={fb?.title}
         open={!!fb}
-        confirmLoading={busy}
-        onOk={async () => {
-          const t = fbText.trim();
-          if (fb?.required && !t) {
-            message.warning("请填写反馈");
-            return;
-          }
-          setBusy(true);
-          try {
-            await fb?.submit(t);
-            setFb(null);
-            setFbText("");
-          } catch (e: any) {
-            message.error(e?.message || "操作失败");
-          } finally {
-            setBusy(false);
-          }
-        }}
-        onCancel={() => {
+        onClose={() => {
           setFb(null);
           setFbText("");
         }}
-        okButtonProps={{ disabled: !!fb?.required && !fbText.trim() }}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setFb(null);
+                setFbText("");
+              }}
+              className={CANCEL_BTN}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={busy || (!!fb?.required && !fbText.trim())}
+              onClick={async () => {
+                const t = fbText.trim();
+                if (fb?.required && !t) {
+                  toast.error("请填写反馈");
+                  return;
+                }
+                setBusy(true);
+                try {
+                  await fb?.submit(t);
+                  setFb(null);
+                  setFbText("");
+                } catch (e: any) {
+                  toast.error(e?.message || "操作失败");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className={OK_BTN}
+            >
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              确定
+            </button>
+          </>
+        }
       >
-        <Input.TextArea
+        <textarea
           rows={4}
           value={fbText}
           onChange={(e) => setFbText(e.target.value)}
           placeholder={fb?.placeholder}
+          className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
         />
       </Modal>
 
@@ -1257,24 +1313,45 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       <Modal
         title="编辑任务"
         open={editOpen}
-        confirmLoading={busy}
-        onOk={saveEdit}
-        onCancel={() => setEditOpen(false)}
+        onClose={() => setEditOpen(false)}
+        width={560}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setEditOpen(false)}
+              className={CANCEL_BTN}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={saveEdit}
+              className={OK_BTN}
+            >
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              保存
+            </button>
+          </>
+        }
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="space-y-3">
           <div>
-            <Typography.Text>标题</Typography.Text>
-            <Input
+            <div className="mb-1 text-[13px] text-ink">标题</div>
+            <input
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
+              className={INPUT}
             />
           </div>
           <div>
-            <Typography.Text>描述</Typography.Text>
-            <Input.TextArea
+            <div className="mb-1 text-[13px] text-ink">描述</div>
+            <textarea
               rows={4}
               value={editDesc}
               onChange={(e) => setEditDesc(e.target.value)}
+              className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
             />
           </div>
         </div>
@@ -1286,35 +1363,47 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
         title={
           stalled ? `第 ${stalled.seq} 步连续 ${stalled.rounds} 轮未登记完成` : ""
         }
-        onCancel={() => setStalled(null)}
-        footer={[
-          <Button key="skip" onClick={() => void resolveStall("skip")}>
-            跳过这一步
-          </Button>,
-          <Button key="done" onClick={() => void resolveStall("done")}>
-            标记为已完成
-          </Button>,
-          <Button
-            key="retry"
-            type="primary"
-            onClick={() => void resolveStall("retry")}
-          >
-            再试一轮
-          </Button>,
-        ]}
+        onClose={() => setStalled(null)}
+        width={560}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => void resolveStall("skip")}
+              className={CANCEL_BTN}
+            >
+              跳过这一步
+            </button>
+            <button
+              type="button"
+              onClick={() => void resolveStall("done")}
+              className={CANCEL_BTN}
+            >
+              标记为已完成
+            </button>
+            <button
+              type="button"
+              onClick={() => void resolveStall("retry")}
+              className={OK_BTN}
+            >
+              再试一轮
+            </button>
+          </>
+        }
       >
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          连续多轮执行后，agent 始终没有调用 <code>task.mark_item_done</code>{" "}
+        <p className="text-[12px] leading-6 text-ink-muted">
+          连续多轮执行后，agent 始终没有调用{" "}
+          <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+            task.mark_item_done
+          </code>{" "}
           登记这一步完成，框架因此把它当作「还没做完」继续重跑—— 既是重复劳动，
           也白烧 token。请选一个出口：
-        </Typography.Paragraph>
-        <Typography.Paragraph style={{ fontSize: 13, marginBottom: 4 }}>
-          {stalled?.content_md}
-        </Typography.Paragraph>
+        </p>
+        <p className="mt-2 text-[13px] text-ink">{stalled?.content_md}</p>
         {stalled?.conclusion ? (
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          <p className="mt-1.5 text-[12px] text-ink-muted">
             最近一次结论：{stalled.conclusion}
-          </Typography.Paragraph>
+          </p>
         ) : null}
       </Modal>
 
@@ -1323,9 +1412,8 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
       <Modal
         title={`工具统计 · ${toolStats.length} 个工具`}
         open={statsOpen}
-        onCancel={() => setStatsOpen(false)}
-        footer={null}
-        width={720}
+        onClose={() => setStatsOpen(false)}
+        width={760}
       >
         <ToolStatsTable stats={toolStats} />
       </Modal>

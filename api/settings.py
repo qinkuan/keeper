@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..a2a import settings as a2a_settings
 from ..config import (
     A2ASection,
+    AgentSection,
     ContextSection,
     PromptDumpSection,
     load_config,
@@ -203,12 +204,27 @@ class ContextIn(BaseModel):
         return v if v in ("auto", "off", "keyword", "llm") else "auto"
 
 
+class CoreAgentIn(BaseModel):
+    """核心 agent：新建会话默认落到谁，以及它的人设覆盖。
+
+    三个字段都可空，**空 = 沿用回落规则**（见 ``config.core_agent_selector``）：
+    不指定 id/name 时用"第一个已装载的 agent"，persona 空时用画像里的 persona。
+    所以这段整个不配也是合法状态，不是"未完成配置"。
+    """
+
+    name: Optional[str] = None
+    id: Optional[str] = None
+    persona: Optional[str] = None
+    persona_file: Optional[str] = None
+
+
 class SettingsIn(BaseModel):
-    """设置页整体提交：两段都在（缺哪段就只改哪段）。"""
+    """设置页整体提交：各段都在（缺哪段就只改哪段）。"""
 
     prompt_dump: PromptDumpIn
     a2a: A2AIn
     context: ContextIn = Field(default_factory=ContextIn)
+    core_agent: CoreAgentIn = Field(default_factory=CoreAgentIn)
 
 
 def _load_cfg() -> Any:
@@ -237,9 +253,41 @@ def _dump() -> Dict[str, Any]:
         "prompt_dump": asdict(PromptDumpSection()),
         "a2a": asdict(A2ASection()),
         "context": asdict(ContextSection()),
+        "core_agent": asdict(AgentSection()),
         "a2a_breakers": [],
         "error": err,
     }
+
+
+def _core_agent_dump(cfg: Any) -> Dict[str, Any]:
+    """核心 agent 的两层信息：**配置值** + **实际生效值**。
+
+    只有配置值不够用：用户没配时配置是空的，前端无法显示"当前在跟谁对话"。
+    所以额外给一份 ``resolved``（走完整回落链后的结果）与 ``agents``（可选清单），
+    设置页的下拉才能既展示当前状态、又允许改。
+    """
+    core = getattr(cfg, "core_agent", None)
+    out: Dict[str, Any] = {
+        "name": getattr(core, "name", None),
+        "id": getattr(core, "id", None),
+        "persona": getattr(core, "persona", None),
+        "persona_file": getattr(core, "persona_file", None),
+        "resolved": None,
+        "agents": [],
+    }
+    try:
+        from ..agent.keeper import list_keepers, resolve_core_agent
+
+        out["agents"] = [
+            {"id": a.agent_id, "name": a.name}
+            for a in sorted(list_keepers(), key=lambda x: (x.agent_id or ""))
+        ]
+        cur = resolve_core_agent()
+        if cur is not None:
+            out["resolved"] = {"id": cur.agent_id, "name": cur.name}
+    except Exception as e:  # noqa: BLE001 读不到已装载清单不该让设置页打不开
+        logger.debug("读取核心 agent 运行时信息失败: %s", e)
+    return out
 
 
 def _dump_cfg(cfg: Any) -> Dict[str, Any]:
@@ -293,6 +341,10 @@ def _dump_cfg(cfg: Any) -> Dict[str, Any]:
                 "tool_parallel": ctx.tool_parallel,
                 "tool_parallel_max": ctx.tool_parallel_max,
             },
+            # 核心 agent：原样回读配置里的值（含 None），前端据此显示"当前选了谁"。
+            # 另外补一个 resolved 字段说明**实际生效**的是谁——用户没配时会回落到
+            # "第一个已装载的 agent"，只看配置值是空的，看不出运行时到底是谁。
+            "core_agent": _core_agent_dump(cfg),
             "a2a_breakers": a2a_settings.breaker.snapshot(),
         }
     except Exception as e:  # noqa: BLE001
@@ -333,6 +385,7 @@ async def update_settings(body: SettingsIn) -> Dict[str, Any]:
         prompt_dump=body.prompt_dump.model_dump(),
         a2a=body.a2a.model_dump(),
         context=body.context.model_dump(),
+        core_agent=body.core_agent.model_dump(),
     )
     # 保存即生效：清配置缓存（prompt dump / A2A / 上下文），并把新阈值同步到熔断器
     invalidate_caches()
