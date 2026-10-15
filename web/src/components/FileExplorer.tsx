@@ -44,7 +44,7 @@ function NameInput({
 }) {
   return (
     /* 输入组：聚焦给「边框变品牌 + 一圈淡外发光」，与 Form.tsx 的 inputCls 同一规格 */
-    <div className="mt-2 flex items-center gap-2 rounded-[7px] border border-line bg-panel px-2.5 py-1.5 shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-all duration-150 focus-within:border-brand focus-within:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]">
+    <div className="mt-2 flex items-center gap-2 rounded-[7px] border border-line bg-panel px-2.5 py-1.5 shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-all duration-150 focus-within:border-brand focus-within:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]">
       <span className="shrink-0 text-ink-faint">{icon}</span>
       <input
         autoFocus

@@ -27,7 +27,11 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from ..agent.keeper import get_keeper, list_keepers, resolve_core_agent
+from ..agent.keeper import (
+    list_keepers,
+    resolve_core_agent,
+    resolve_for_chat,
+)
 from ..store import SessionMessage, get_session_factory
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, resolve_artifact_uri
@@ -42,7 +46,12 @@ from .hub import (
     unsubscribe as hub_unsubscribe,
 )
 from .runs import register_run, unregister_run
-from .service import ChatService, default_initiator_id, resolve_workspace
+from .service import (
+    SESSION_STATUS_DELETED,
+    ChatService,
+    default_initiator_id,
+    resolve_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +61,15 @@ router = APIRouter(prefix="/agents")
 def _agent(agent_id: str):
     """按 agent_id 取实例；不存在 / 未就绪 → 404。
 
+    用 :func:`resolve_for_chat` 而不是 :func:`get_keeper`：后者只查数据库装载的
+    agent，而**核心 agent 不在那里**——它从本地目录构建，有个配置里给定的 id。
+    少了这一步，所有带 agent_id 的会话接口（列表、消息、工作区…）碰到核心 agent
+    都会 404，症状是"进了对话页但什么都加载不出来"。
+
     顺带把 agent 标记进当前上下文——之后所有日志都会带上它的 id / 名称，
     单进程多 agent 时才分得清哪行日志属于谁。
     """
-    agent = get_keeper(agent_id)
+    agent = resolve_for_chat(agent_id)
     if agent is None:
         raise HTTPException(
             status_code=404, detail=f"agent 不存在或未就绪: {agent_id}"
@@ -481,15 +495,91 @@ async def resume_chat_stream(agent_id: str, run_id: str = "", session_id: str = 
     )
 
 
+
+class RenameSessionIn(BaseModel):
+    """会话改名。title 为空串 = 恢复占位标题。"""
+
+    title: str = ""
+
+
+class NewSessionIn(BaseModel):
+    """新建一个空会话。"""
+
+    user_space_id: str = ""
+
+
+@router.post("/{agent_id}/sessions")
+async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
+    """新建一个**空**会话，返回它的 id。
+
+    为什么需要它：此前会话是"发第一条消息时才建"的。点「开始对话」如果什么都不
+    建，用户会进到一个空页面——而这个会话在列表里也根本不存在，刷新一下就没了。
+    所以入口点击时就该把会话定下来。
+
+    会话空着是合法状态：不发消息也占一条记录，正好让新会话立刻出现在列表里。
+    """
+    from ..chat import service as chat_service
+
+    _agent(agent_id)
+    svc = ChatService(agent_id=agent_id)
+    # 工作区：没指定就用默认用户空间。这里必须显式定下来，因为绑定只发生在
+    # **建会话那一刻**——等第一次 ask 再定就晚了（那时会话已存在，不再改绑定）。
+    svc.user_space_id = body.user_space_id or await chat_service._default_space_id()
+    sid = await svc.ensure_session_id()
+    return {"session_id": sid}
+
+
+
+@router.patch("/{agent_id}/sessions/{session_id}")
+async def rename_session(
+    agent_id: str, session_id: str, body: RenameSessionIn
+) -> Dict[str, Any]:
+    """重命名一个会话。标题只有两个来源：首条消息自动派生，或用户手动改。"""
+    _agent(agent_id)
+    try:
+        return await ChatService(agent_id=agent_id).rename_session(
+            session_id, body.title
+        )
+    except ValueError as e:
+        # 会话不存在 / 不属于该 agent：调用方的错，4xx 而不是 500
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/{agent_id}/sessions/{session_id}")
+async def delete_session(agent_id: str, session_id: str) -> Dict[str, Any]:
+    """**软删除**一个会话：标记 ``status="deleted"`` 并记删除时间，消息等数据保留。
+
+    对外表现与物理删除一致（列表里没了、按 id 拉历史返回 404），但库里那一行和它
+    下面的消息 / 步骤 / 用量记录都还在——删一条聊天记录不该顺手抹掉可观测事实，
+    将来按 ``deleted_at`` 算保留期或做恢复都有据可依。真正的物理清理由保留策略
+    负责，不在用户点删除的那一刻发生。
+
+    **记忆不受影响**：记忆按天共享，删一个会话抹掉一整天是错的。"""
+    _agent(agent_id)
+    try:
+        info = await ChatService(agent_id=agent_id).delete_session(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    # 前端只认 deleted（会话 id），其余字段是给人看的状态说明
+    return {"deleted": session_id, "soft_delete": True, **info}
+
+
 @router.get("/{agent_id}/sessions")
 async def sessions(
-    agent_id: str, initiator_id: Optional[int] = None, limit: int = 50
+    agent_id: str,
+    initiator_id: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> Dict[str, Any]:
-    """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。"""
+    """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。
+
+    ``offset`` + ``limit`` 是分页：侧栏一次只取几条（每页 5 条）往下翻，
+    而不是一次性把全部会话捞回来——会话多了以后那能把侧栏卡住。
+    """
     _agent(agent_id)
     items = await ChatService(
         agent_id=agent_id, initiator_id=initiator_id
-    ).list_sessions(limit=limit)
+    ).list_sessions(limit=limit, offset=offset)
     return {"sessions": items}
 
 
@@ -790,12 +880,28 @@ async def toggle_capability(agent_id: str, data: CapabilityToggleIn) -> Dict[str
         )
 
     # 重建：旧实例先释放（关 MCP 等），再按新配置装配
-    from ..agent.keeper import build_agent, register_keeper, unregister_keeper
+    #
+    # 核心 agent 走**另一条**路径：它不在 agent 表里，build_agent 查不到画像会直接
+    # 抛 AgentNotFoundError（这里就变成 500，开关看似没生效）。而且它挂在核心槽位上，
+    # 不是 _keepers 里的普通实例——unregister_keeper 对它无效。所以必须分叉。
+    from ..agent.keeper import (
+        build_agent,
+        register_keeper,
+        reload_core_agent,
+        unregister_keeper,
+    )
+    from ..config import core_agent_id
 
-    await agent.shutdown()
-    unregister_keeper(agent_id)
-    rebuilt = await build_agent(agent_id=agent_id)
-    register_keeper(agent_id, rebuilt)
+    if agent_id == core_agent_id():
+        # reload_core_agent 自带「先建新的、成功后才停旧的」，这里不要再 shutdown
+        rebuilt = await reload_core_agent()
+        if rebuilt is None:
+            raise HTTPException(status_code=500, detail="核心 agent 重新装配失败")
+    else:
+        await agent.shutdown()
+        unregister_keeper(agent_id)
+        rebuilt = await build_agent(agent_id=agent_id)
+        register_keeper(agent_id, rebuilt)
     after = sorted(getattr(t, "name", "?") for t in (await rebuilt._collect_tools()).all())
     added = [t for t in after if t not in before]
     removed = [t for t in before if t not in after]
@@ -1423,7 +1529,8 @@ async def update_session_workspace(
     """
     async with get_session_factory()() as db:
         sess = await db.get(ChatSession, session_id)
-        if sess is None:
+        if sess is None or sess.status == SESSION_STATUS_DELETED:
+            # 已软删除的会话按不存在处理（与列表口径一致，见 service.delete_session）
             raise HTTPException(status_code=404, detail="会话不存在")
         susp = (
             await db.execute(

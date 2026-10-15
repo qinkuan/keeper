@@ -19,9 +19,16 @@
  *    loadURL 会先白屏再刷新，所以轮询健康接口，通了才开窗。
  * 3. **退出收干净**：走 before-quit 主动终止，否则关窗后 Python 变孤儿进程，
  *    下次启动又会撞数据库。
+ * 4. **每次启动现生成入站 token**：内核里有能让 agent 执行本机命令的接口，而这个
+ *    进程绑在回环端口上——同一 WiFi 下的设备够不着，但**用户打开的任意网页**够得着
+ *    （CORS 只拦读响应、不拦发请求，GET 连预检都不触发）。token 让那些网页猜不到
+ *    入场券。生成在这里而不是让用户配，是因为：随机的才安全，写进 config.yaml 的
+ *    迟早会被提交进仓库或者在截图里泄露。
  */
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -95,7 +102,7 @@ function waitHealthy(port, timeoutMs) {
   });
 }
 
-async function startSidecar({ onLog } = {}) {
+async function startSidecar({ onLog, cdpPort } = {}) {
   if (state) return state;
   if (pending) return pending;
 
@@ -108,12 +115,39 @@ async function startSidecar({ onLog } = {}) {
       throw new Error(`找不到配置文件：${config}`);
     }
 
+    // 入站 token：32 字节 CSPRNG，base64url（无 +/= ，塞进 header 不用转义）。
+    // 每次启动都换，纵使有一次泄露也只影响那一次会话。
+    const token = crypto.randomBytes(32).toString('base64url');
+
     const child = spawn(
       python,
       ['-m', 'keeper.main', '--config', config, String(port)],
       {
         cwd: PROJECT_ROOT,
-        env: { ...process.env, PORT: String(port) },
+        env: {
+          ...process.env,
+          PORT: String(port),
+          // 内核据此启用入站认证（见 keeper/api/auth.py）
+          KEEPER_TOKEN: token,
+          /*
+           * 内置浏览器的 CDP 端口。内核靠它用 Playwright **连上桌面壳已经在跑的
+           * 那个浏览器**（desktop/main.js 里 appendSwitch 的同一个端口），而不是自己
+           * 再 launch 一个——同一个 user-data-dir 不能被两个 Chromium 进程同时打开，
+           * 那样会把 cookie 库写坏。
+           * 命令行形态（./start_keeper.sh）没有这个变量，抓取接口会明确回"不可用"。
+           */
+          KEEPER_CDP_PORT: cdpPort ? String(cdpPort) : '',
+          /*
+           * 内核日志落盘。stdio 是 pipe，全靠 onLog 转给窗口上的日志面板——而面板
+           * 只在窗口活着时才有。浏览器僵死恰恰是最需要日志的时候，那次排查就是因为
+           * 日志只在面板里、什么都留不下，最后只能靠"进程还在不在"反推。
+           *
+           * main.py 里有这个开关（RotatingFileHandler，10MB × 5 份），命令行形态
+           * 一直可用；桌面壳之前没设，等于白放着。
+           */
+          LOG_FILE: process.env.KEEPER_LOG_FILE
+            || path.join(os.homedir(), '.keeper', 'logs', 'kernel.log'),
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
@@ -135,7 +169,7 @@ async function startSidecar({ onLog } = {}) {
 
     await waitHealthy(port, 120000);
 
-    state = { child, port, url: `http://127.0.0.1:${port}` };
+    state = { child, port, token, url: `http://127.0.0.1:${port}` };
     return state;
   })();
 

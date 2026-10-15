@@ -14,24 +14,15 @@
  */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Hint, Section, Stack } from "./ui/Page";
-import {
-  Field,
-  NumField,
-  SelectField,
-  TextInput,
-  TextField,
-  ToggleField,
-} from "./ui/Form";
+import { NumField, SelectField, TextField, ToggleField } from "./ui/Form";
 import { Modal } from "./ui/Modal";
-import { Pill } from "./ui/Pill";
 import { toast } from "./ui/Toast";
-import { cn } from "../lib/utils";
+import { CoreAgentEditor } from "./CoreAgentEditor";
 
 import {
   apiGetSettings,
-  apiListAgents,
   apiReloadSettings,
   apiResetBreaker,
   apiUpdateSettings,
@@ -68,18 +59,10 @@ interface SettingsForm {
   a2a: A2ASettings;
   prompt_dump: PromptDumpSettings;
   context: ContextSettings;
-  core_agent: CoreAgentSettings;
 }
 
 type SectionKey = keyof SettingsForm;
 
-/** 核心 agent 的空默认：全空 = 走回落规则（第一个已装载的 agent） */
-const DEFAULT_CORE: CoreAgentSettings = {
-  name: null,
-  id: null,
-  persona: null,
-  persona_file: null,
-};
 
 const DEFAULT_A2A: A2ASettings = {
   request_timeout: 15,
@@ -131,26 +114,19 @@ const DEFAULT_DUMP: PromptDumpSettings = {
 export function SettingsDialog({
   section,
   onClose,
-  onGoToAgents,
 }: {
   /** 打开哪一段；为 null 时不渲染 */
   section: SettingsSection | null;
   onClose: () => void;
-  /** 「去智能体页编辑完整配置」：关掉弹窗并跳到智能体页 */
-  onGoToAgents: () => void;
 }) {
   const qc = useQueryClient();
   const settingsQ = useQuery({ queryKey: ["settings"], queryFn: apiGetSettings });
-  /* agent 清单：下拉要显示来源/就绪状态，档案块要显示说明。
-     走 ["agents"] 缓存（侧栏的「开始对话」按钮已经在取同一份），不额外打请求。 */
-  const agentsQ = useQuery({ queryKey: ["agents"], queryFn: apiListAgents });
-  const agents = agentsQ.data?.agents ?? [];
 
   const [cfg, setCfg] = useState<SettingsForm>({
     a2a: DEFAULT_A2A,
     prompt_dump: DEFAULT_DUMP,
     context: DEFAULT_CONTEXT,
-    core_agent: DEFAULT_CORE,
+
   });
 
   useEffect(() => {
@@ -159,7 +135,7 @@ export function SettingsDialog({
         a2a: settingsQ.data.a2a ?? DEFAULT_A2A,
         prompt_dump: settingsQ.data.prompt_dump ?? DEFAULT_DUMP,
         context: settingsQ.data.context ?? DEFAULT_CONTEXT,
-        core_agent: settingsQ.data.core_agent ?? DEFAULT_CORE,
+
       });
     }
   }, [settingsQ.data]);
@@ -176,7 +152,7 @@ export function SettingsDialog({
         prompt_dump: { ...DEFAULT_DUMP, ...cfg.prompt_dump },
         context: { ...DEFAULT_CONTEXT, ...cfg.context },
         // 核心 agent 不做默认值合并：它的"空"是有意义的值（= 走回落规则）
-        core_agent: cfg.core_agent ?? DEFAULT_CORE,
+
       } as SettingsInput),
     onSuccess: (d) => {
       toast.success("已保存（立即生效，无需重启）");
@@ -184,7 +160,7 @@ export function SettingsDialog({
         a2a: d.a2a,
         prompt_dump: d.prompt_dump,
         context: d.context,
-        core_agent: d.core_agent ?? DEFAULT_CORE,
+
       });
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -199,7 +175,7 @@ export function SettingsDialog({
         a2a: d.a2a,
         prompt_dump: d.prompt_dump,
         context: d.context,
-        core_agent: d.core_agent ?? DEFAULT_CORE,
+
       });
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -222,7 +198,6 @@ export function SettingsDialog({
   const c = cfg.context;
   const a = cfg.a2a;
   const d = cfg.prompt_dump;
-  const core = cfg.core_agent ?? DEFAULT_CORE;
 
   const title =
     SETTINGS_SECTIONS.find((s) => s.key === section)?.label ?? "设置";
@@ -273,151 +248,7 @@ export function SettingsDialog({
             </div>
           )}
 
-          {section === "core" && (
-            <Stack>
-              <p className="text-[12px] leading-6 text-ink-muted">
-                新建会话默认落到这个 agent 上，它就是你的主脑——会话不再需要先选一个智能体。
-                其它智能体与对端不改变会话归属，而是作为**会话里可加入的能力**参与协作。
-                这里留空也能用（自动用第一个已装载的 agent），所以「没配」是正常状态。
-              </p>
-
-              <Section
-                title="主脑"
-                extra={
-                  core.resolved ? (
-                    <span className="text-[12px] text-ink-muted">
-                      运行中：{core.resolved.name}
-                    </span>
-                  ) : agentsQ.data?.agents?.length ? (
-                    <span className="text-[12px] text-ink-muted">
-                      运行中：
-                      {agentsQ.data.agents.find(
-                        (x) => x.id === (core.id ?? agentsQ.data.agents[0].id)
-                      )?.name ?? "—"}
-                    </span>
-                  ) : (
-                    <span className="text-[12px] text-amber-600">
-                      没有已装载的 agent
-                    </span>
-                  )
-                }
-              >
-                <Stack>
-                  {!!agents.length ? (
-                    <SelectField
-                      label="哪个 agent 当主脑"
-                      extra="留空 = 自动取第一个已装载的 agent"
-                      value={core.id ?? ""}
-                      onChange={(v) => patch("core_agent", "id", v)}
-                      options={[
-                        { value: "", label: "（自动：第一个已装载的 agent）" },
-                        ...agents.map((x) => ({
-                          value: x.id,
-                          label: `${x.name}  ${
-                            x.origin === "local" ? "本机" : "平台"
-                          }${x.ready ? "" : " · 未就绪"}`,
-                        })),
-                      ]}
-                    />
-                  ) : (
-                    <p className="text-[12.5px] text-ink-muted">
-                      还没有已装载的 agent。先到「智能体」页装载一个，它就会成为主脑。
-                    </p>
-                  )}
-
-                  {/* 主脑档案：把「你正在把谁设成主脑」这件事摊开给用户看。
-                      这一段是**只读**的——名称、说明、工作区、插件都属于 agent
-                      画像，改它们要去智能体页（那边有完整的创建/管理流程）。
-                      这里只做指路，避免用户在这里找了一圈却改不动。 */}
-                  {(() => {
-                    const effId =
-                      core.id || agents.find((x) => x.id === core.resolved?.id)?.id
-                      || agents[0]?.id;
-                    const eff = agents.find((x) => x.id === effId);
-                    if (!eff) return null;
-                    return (
-                      <div className="rounded-[7px] border border-line-soft bg-surface/50 px-3 py-2.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[13px] font-semibold text-ink-strong">
-                            {eff.name}
-                          </span>
-                          <Pill tone={eff.origin === "local" ? "green" : "blue"}>
-                            {eff.origin === "local" ? "本机创建" : "来自平台"}
-                          </Pill>
-                          <span
-                            className={cn(
-                              "flex items-center gap-1.5 text-[11.5px]",
-                              eff.ready
-                                ? "text-ink-muted"
-                                : "text-amber-600"
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "h-1.5 w-1.5 rounded-full",
-                                eff.ready ? "bg-emerald-500" : "bg-amber-500"
-                              )}
-                            />
-                            {eff.ready ? "就绪" : "未就绪"}
-                          </span>
-                        </div>
-                        {eff.description && (
-                          <p className="mt-1.5 text-[12px] leading-5 text-ink-muted">
-                            {eff.description}
-                          </p>
-                        )}
-                        <button
-                          type="button"
-                          onClick={onGoToAgents}
-                          className="mt-2.5 flex items-center gap-1.5 text-[12px] font-medium text-brand transition-colors hover:brightness-110"
-                        >
-                          去智能体页编辑完整配置
-                          <ChevronRight className="h-3 w-3" />
-                        </button>
-                      </div>
-                    );
-                  })()}
-                </Stack>
-              </Section>
-
-              <Section
-                title="画像覆盖"
-                extra={<span className="text-[11.5px] text-ink-faint">可选</span>}
-              >
-                <Stack>
-                  <Field
-                    label="画像文件"
-                    extra="长篇画像放独立文件（便于版本管理）。填了就以文件为准，支持~ 开头"
-                  >
-                    <TextInput
-                      value={core.persona_file ?? ""}
-                      onChange={(v) => patch("core_agent", "persona_file", v)}
-                      placeholder="留空 = 用 agent 画像里的 persona"
-                    />
-                  </Field>
-                  <Field
-                    label="画像文本"
-                    extra="每次对话都会带上。上一项填了文件时以文件为准"
-                  >
-                    <textarea
-                      rows={4}
-                      value={core.persona ?? ""}
-                      onChange={(e) =>
-                        patch("core_agent", "persona", e.target.value)
-                      }
-                      placeholder="角色、语气、该关注什么…"
-                      className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
-                    />
-                  </Field>
-                  <p className="text-[11.5px] leading-5 text-ink-muted">
-                    这里填的内容会**覆盖**主脑画像里的 persona，但不改数据库里的 agent
-                    记录——它是一份「本机偏好」，换机器各用各的。想彻底改画像请去智能体页。
-                    改完保存即生效（下一个会话起用新装配）。
-                  </p>
-                </Stack>
-              </Section>
-            </Stack>
-          )}
+          {section === "core" && <CoreAgentEditor />}
 
           {section === "context" && (
             <Stack>

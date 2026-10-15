@@ -14,15 +14,20 @@ import { toast } from "../components/ui/Toast";
 import { Pill } from "../components/ui/Pill";
 
 /**
- * 智能体市场 —— **平台上有什么、我还没拿过来的**。
+ * 智能体 →「智能体市场」tab：**平台上有什么、我还没拿过来的**。
  *
- * 和「智能体」页的分工：那边是库存（本地创建的 + 已装载的），这边是目录。
- * 按 origin 天然分界，所以同一个 agent 不会在两页各出现一次。
+ * 和同页「我的智能体」tab 的分工：那边是库存（本地创建的 + 已装载的），这边是目录。
+ * 按 origin 天然分界，所以同一个 agent 不会在两处各出现一次。
  *
- * 这里**不显示启用/停用**——那是库存页的事。这边只有两个状态：已装载 /
- * 可装载。装载 = 从远程把配置拿到本地，之后去库存页管它。
+ * 这里**不显示启用/停用**——那是库存 tab 的事。这边只有两个状态：已装载 /
+ * 可装载。装载 = 从远程把配置拿到本地，之后去库存 tab 管它。
  */
-export default function AgentMarketPage() {
+export default function AgentMarketPage({
+  embedded,
+}: {
+  /** 嵌在「智能体」页的 tab 里时为 true：不重复渲染页头，只留操作按钮 */
+  embedded?: boolean;
+}) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["platform-market"], queryFn: platformListMarket });
   // 本地装载状态。用 platform（含已卸载的）而不是 all——后者是「库存」，
@@ -120,10 +125,8 @@ export default function AgentMarketPage() {
 
   return (
     <>
-      <PageHeader
-        title="智能体市场"
-        desc="装载 = 把配置从平台拿到本地"
-        actions={
+      {embedded ? (
+        <div className="mb-3 flex justify-end">
           <button
             type="button"
             onClick={() => q.refetch()}
@@ -132,13 +135,28 @@ export default function AgentMarketPage() {
             <RefreshCw className="h-3.5 w-3.5" />
             刷新
           </button>
-        }
-      />
+        </div>
+      ) : (
+        <PageHeader
+          title="智能体市场"
+          desc="装载 = 把配置从平台拿到本地"
+          actions={
+            <button
+              type="button"
+              onClick={() => q.refetch()}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              刷新
+            </button>
+          }
+        />
+      )}
 
       <div className="mb-3">
         <Hint>
-          装载完它会出现在<strong className="text-ink-strong">智能体</strong>
-          页——那边的启用开关、插件绑定都在那边管。本页不显示启用状态：
+          装载完它会出现在<strong className="text-ink-strong">我的智能体</strong>
+          tab——那边的启用开关、插件绑定都在那边管。这里不显示启用状态：
           装载与否是两件事。
         </Hint>
       </div>

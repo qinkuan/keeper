@@ -462,6 +462,19 @@ async def _migrate_task_review_fields(conn) -> None:
         )
 
 
+async def _migrate_chat_session_deleted_at(conn) -> None:
+    """chat_sessions 补 deleted_at 列：软删除要记删除时间（存量库升级）。
+
+    存量行一律留空——它们的 status 都是 active，没有删除时间可言。
+    有了这列才能按「删了多久」算保留期；复用 updated_at 是不行的，
+    它会被后续任何一次写顶掉。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "deleted_at" not in existing:
+        await conn.exec_driver_sql("ALTER TABLE chat_sessions ADD COLUMN deleted_at DATETIME")
+
+
 async def _migrate_chat_session_kind(conn) -> None:
     """chat_sessions 补 kind 列：区分普通会话与任务绑定会话（存量库升级）。
 
@@ -714,6 +727,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_task_paused(conn)
         await _migrate_task_review_fields(conn)
         await _migrate_chat_session_kind(conn)
+        await _migrate_chat_session_deleted_at(conn)
         await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)
         await _migrate_strip_tmp_artifacts(conn)

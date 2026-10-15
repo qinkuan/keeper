@@ -14,9 +14,10 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from pathlib import Path
 
@@ -27,6 +28,57 @@ from ..tools.builtin.sandbox import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 新建会话的默认标题。列表里它和「用户自己起的名字」长得一样，所以给个占位
+# 而不是留空——留空的话是一片「无标题」，分不清哪些起过名、哪些还是空壳。
+#
+# 目前没有「用首条消息自动生成标题」的逻辑，所以这个占位会一直留着。要加那个
+# 的话，应在首条消息落库后覆写它，别在这里做——那会让「标题从哪来」有两个出处。
+DEFAULT_SESSION_TITLE = "新对话"
+
+# 会话状态。status 不是只有"删/没删"：active 是正常会话，deleted 是**软删除**
+# （行还在，只是从列表里消失，见 delete_session）。用 status 而不是「行不存在」表达
+# 删除，是为了留住消息 / ReAct 步 / 用量这些挂在 session_id 下面的事实。
+SESSION_STATUS_ACTIVE = "active"
+SESSION_STATUS_DELETED = "deleted"
+
+# 自动标题的长度上限。侧栏只有 168px，12.5px 的中文一行放不下 20 个字，
+# 取 18 是折中：短到一眼扫完，长到能认出这段对话在聊什么。
+_TITLE_MAX = 18
+
+# 标题的切分优先级：越靠前的符号越适合断开
+_TITLE_SEPS = ("，", "。", "、", "；", "：", " ", ",", ".", ";", ":", "?")
+
+
+def derive_session_title(text: str) -> Optional[str]:
+    """从首条用户消息派生会话标题；给不出就返回 None（保留占位）。
+
+    **刻意不用 LLM 生成**，三个理由：
+      1. 那会给首轮回答多加一次模型调用——用户在等的正是这轮回答；
+      2. 有成本，而标题这种信息用不上推理能力；
+      3. 核心 agent 可能压根没绑模型（纯索引模式），那时标题永远生成不出来，
+         而列表里一片「新对话」恰恰是最需要它的场景。
+    截取瞬时、免费、与模型无关，这三点更值钱。
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    # 只取第一段：用户常在第一行之后堆一大段补充说明，那不是标题
+    line = next((x.strip() for x in s.splitlines() if x.strip()), "")
+    if not line:
+        return None
+    if len(line) <= _TITLE_MAX:
+        return line
+    cut = line[:_TITLE_MAX]
+    # 尽量切在标点或空格处，别把词/句从中间劈开
+    best = -1
+    for sep in _TITLE_SEPS:
+        i = cut.rfind(sep)
+        if i > best:
+            best = i
+    if best >= _TITLE_MAX // 2:
+        return cut[:best].rstrip()
+    return cut + "…"
 
 # 摘要输入中每个 step 的 observation 截断上限（字符）；最终回答保留完整（省 token）
 _TURN_SUMMARY_OBS_LIMIT = 600
@@ -73,10 +125,12 @@ from .context import (
 )
 from .runs import active_run_id
 from ..store import (
+    USER_SPACE_DEFAULT_NAME,
+    AgentMessage,
     ChatSession,
     ReactStep,
     SessionMessage,
-    USER_SPACE_DEFAULT_NAME,
+    Thread,
     UserSpace,
     get_session_factory,
 )
@@ -134,6 +188,10 @@ async def resolve_memory_day(session_id: Optional[str]) -> str:
 
     会话行取不到（刚创建还没落库、或已被删）→ 退回当天。
     """
+    # 函数内导入：memory.tools 会反过来引 ..chat.context，放到模块层就是循环导入。
+    # 本文件里其它对 memory 的引用（SessionMemory）也是这个写法。
+    from ..memory import day_of
+
     if not session_id:
         return day_of()
     try:
@@ -795,6 +853,11 @@ class ChatService:
                             f"session_id 属于 agent {row.agent_id}，"
                             f"与当前 agent {self.agent_id} 不符"
                         )
+                    # 已软删除的会话不再接收新消息：它的内容不会再出现在任何列表里，
+                    # 写进去等于凭空多出一段没人看得见的对话。明确报错，让调用方
+                    # （前端 / 跨端入口）知道该另起一条，而不是静默吞掉这轮输入。
+                    if row.status == SESSION_STATUS_DELETED:
+                        raise ValueError(f"会话已删除: {self.session_id}")
                     # 存量 session 未绑定 context 时补上（协议 context 解耦）
                     if self.context_id and row.context_id is None:
                         row.context_id = self.context_id
@@ -808,6 +871,7 @@ class ChatService:
                     agent_id=self.agent_id,
                     context_id=self.context_id,
                     user_space_id=self.user_space_id,
+                    title=DEFAULT_SESSION_TITLE,
                 )
                 db.add(row)
                 await db.commit()
@@ -818,7 +882,11 @@ class ChatService:
             if self.context_id:
                 r = await db.execute(
                     select(ChatSession).where(
-                        ChatSession.context_id == self.context_id
+                        ChatSession.context_id == self.context_id,
+                        # 已删除的那条不算数：否则对端续话会落进一条用户已经删掉的
+                        # 会话里（列表里再也看不到，等于凭空丢消息），而正确做法是
+                        # 另起一条新会话接着聊。
+                        ChatSession.status != SESSION_STATUS_DELETED,
                     )
                 )
                 existing = r.scalars().first()
@@ -830,6 +898,7 @@ class ChatService:
                     agent_id=self.agent_id,
                     context_id=self.context_id,
                     user_space_id=self.user_space_id,
+                    title=DEFAULT_SESSION_TITLE,
                 )
                 db.add(row)
                 await db.commit()
@@ -841,6 +910,7 @@ class ChatService:
                 agent_id=self.agent_id,
                 context_id=self.context_id,
                 user_space_id=self.user_space_id,
+                title=DEFAULT_SESSION_TITLE,
             )
             db.add(row)
             await db.commit()
@@ -919,18 +989,122 @@ class ChatService:
             )
             db.add(msg)
             await db.commit()
+            # 首条用户消息落库后给会话补个标题（只补占位的那些）。
+            # 放在这里是因为它是**所有**消息的唯一入口：网页对话、后台续跑、
+            # A2A 入站都走它，所以不会漏掉某条路径。
+            if role == "user":
+                await self._auto_title(db, session_id, content)
             return msg.id
 
-    async def list_sessions(self, limit: int = 50) -> list[Dict[str, Any]]:
+    async def _auto_title(self, db, session_id: str, first_text: str) -> None:
+        # 首条用户消息落库后，把仍是占位的会话标题补上。
+        #
+        # 只在「没起过名」时才动手：用户改过的标题绝不能被覆盖。判断依据是
+        # 「标题为空或还是占位符」，而不是「这是第一条消息」——后者在跨端重放
+        # （同一批消息被投递两次）时会把用户改好的标题又盖回去。
+        try:
+            row = await db.get(ChatSession, session_id)
+            if row is None:
+                return
+            if row.title and row.title != DEFAULT_SESSION_TITLE:
+                return
+            title = derive_session_title(first_text)
+            if not title or title == row.title:
+                return
+            row.title = title
+            await db.commit()
+        except Exception as e:  # noqa: BLE001 标题只是装饰，失败不该影响消息落库
+            logger.debug("生成会话标题失败: %s", e)
+
+    async def rename_session(
+        self, session_id: str, title: Optional[str]
+    ) -> Dict[str, Any]:
+        """给会话改名。``title`` 为空串/None = 恢复占位标题（等于取消命名）。
+
+        **只动 title 一个字段**：消息、工作区、发起人、记忆作用域都与标题无关，
+        混在一起改会出现「改个名字把会话改坏了」这类事故。
+        """
+        name = (title or "").strip() or DEFAULT_SESSION_TITLE
+        factory = get_session_factory()
+        async with factory() as db:
+            row = await db.get(ChatSession, session_id)
+            if row is None or row.status == SESSION_STATUS_DELETED:
+                raise ValueError("会话不存在")
+            # 防串台：按 agent 过滤的会话不该能被别的 agent 改名
+            if self.agent_id is not None and row.agent_id != self.agent_id:
+                raise ValueError("会话不属于该 agent")
+            row.title = name
+            await db.commit()
+            return {"id": row.id, "title": row.title}
+
+    async def delete_session(self, session_id: str) -> Dict[str, Any]:
+        """**软删除**一个会话：只置 ``status='deleted'`` + 记 ``deleted_at``，不删任何行。
+
+        为什么不物理删
+        --------------
+        会话不是孤立的，它下面挂着一串东西：
+
+        - ``session_messages`` / ``react_steps``：对话与执行过程；
+        - ``threads`` / ``agent_messages``：跨端链路；
+        - ``llm_calls``：按 ``session_id`` 归属的**用量事实**。物理删会话不会顺手删
+          它，于是统计里出现「有 token 消耗却查不到是哪次会话」，对不上账；
+        - agent 私有目录 ``<agent_space>/<session_id>/``、当天记忆目录。
+
+        这些都不该跟着「删一条聊天记录」一起消失——用户删的往往只是「不想在列表里
+        看见它」，不是「把这段事实从系统里抹掉」。所以只标记，让数据留着：既能按
+        ``deleted_at`` 算保留期，将来要做回收站/恢复也有据可依。
+
+        幂等：已删除的再删一次仍成功，不会 404。
+        """
+        factory = get_session_factory()
+        already = False
+        async with factory() as db:
+            row = await db.get(ChatSession, session_id)
+            if row is None:
+                raise ValueError("会话不存在")
+            # 防串台：按 agent 过滤的会话不该能被别的 agent 删
+            if self.agent_id is not None and row.agent_id != self.agent_id:
+                raise ValueError("会话不属于该 agent")
+            if row.status == SESSION_STATUS_DELETED:
+                already = True
+            else:
+                row.status = SESSION_STATUS_DELETED
+                # 单独记删除时间而不复用 updated_at：后者会被后续任何一次写顶掉，
+                # 而「删了多久」正是保留策略要用的量。
+                row.deleted_at = datetime.now(timezone.utc)
+                await db.commit()
+        if not already:
+            # 会话被藏起来后就没人能回答它的追问了，把挂起步骤收尾——否则库里留着
+            # 一个永远等不到回答的 suspended 步骤，看着像「还在等我」。
+            await self._abandon_suspended(session_id)
+        return {"id": session_id, "already_deleted": already}
+
+    async def list_sessions(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[Dict[str, Any]]:
         """会话列表，按最近更新排序。
 
         **必须按 agent_id 过滤**：一个进程装多个 agent 时，同一个人
         （initiator_id 相同）在不同 agent 下的会话要分开，否则切换 agent
         会看到别的 agent 的历史。给了 initiator_id 再叠加发起人过滤。
+
+        ``offset`` 用于分页（侧栏一次只取几条）。**排序必须稳定**——只按
+        ``updated_at`` 排序时，同一时间戳的会话次序不定，翻页可能出现重复或
+        漏掉；所以把 ``id`` 也排进 key 里做tie-break。
+
+        **已软删除的会话不出现在这里**（软删除 = 从列表里消失，数据仍在库里，见
+        ``delete_session``）。过滤放在 SQL 里而不是取回后再剔：分页是 limit/offset，
+        先分页再剔会让每页条数不足、翻页出现空洞。
         """
         factory = get_session_factory()
         async with factory() as db:
-            stmt = select(ChatSession).order_by(ChatSession.updated_at.desc()).limit(limit)
+            stmt = (
+                select(ChatSession)
+                .where(ChatSession.status != SESSION_STATUS_DELETED)
+                .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
             if self.agent_id is not None:
                 stmt = stmt.where(ChatSession.agent_id == self.agent_id)
             if self.initiator_id is not None:
@@ -953,17 +1127,21 @@ class ChatService:
         ]
 
     async def verify_session(self) -> None:
-        """校验 self.session_id 存在且归属当前 agent_id；不存在 / 串台则抛 ValueError。
+        """校验 self.session_id 存在、未删除、且归属当前 agent_id；否则抛 ValueError。
 
         接口层据此转 404：浏览器用过期或伪造的 session_id 拉历史时，
         不会越权读到别的 agent 的会话。
+
+        **已软删除的会话按「不存在」处理**：删除的语义就是「我不再用它了」，而
+        数据还在库里——若这里放行，用户删掉的会话仍能被 id 直接读到，删除就成了
+        只是从列表里消失的假动作。
         """
         if not self.session_id:
             raise ValueError("缺少 session_id")
         factory = get_session_factory()
         async with factory() as db:
             row = await db.get(ChatSession, self.session_id)
-        if row is None:
+        if row is None or row.status == SESSION_STATUS_DELETED:
             raise ValueError(f"会话不存在: {self.session_id}")
         if self.agent_id is not None and row.agent_id != self.agent_id:
             raise ValueError(

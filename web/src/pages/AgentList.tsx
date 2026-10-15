@@ -26,10 +26,10 @@ const ROW_BTN =
   "inline-flex h-6 items-center gap-1 rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50";
 
 /**
- * 智能体 —— **我已有的**（本地创建的 + 从平台装载的）。
+ * 智能体 →「我的智能体」tab：**我已有的**（本地创建的 + 从平台装载的）。
  *
- * 平台上「有什么、还没拿过来的」在**智能体市场**那一页；这里只管库存。
- * 两页按 origin 天然分界，所以同一个 agent 不会显示两遍。
+ * 平台上「有什么、还没拿过来的」在同页的「智能体市场」tab；这里只管库存。
+ * 两边按 origin 天然分界，所以同一个 agent 不会显示两遍。
  *
  * 每行一个**启用开关**（Switch），它是决定 agent 跑不跑、进不进概览的唯一开关，
  * 缺省是开的。停用不会删任何东西，也不会被下一次平台同步撤销——写的是
@@ -37,7 +37,17 @@ const ROW_BTN =
  *
  * 只有本地创建的（origin=local）能删：平台 agent 的配置归平台，删了还得重装。
  */
-export default function AgentList({ onCreate }: { onCreate?: () => void }) {
+export default function AgentList({
+  onCreate,
+  embedded,
+}: {
+  onCreate?: () => void;
+  /**
+   * 嵌在「智能体」页的 tab 里时为 true：外层已经渲染了页头与 tab 栏，这里
+   * 不再重复一个大标题，只把操作按钮留在内容上方右对齐。
+   */
+  embedded?: boolean;
+}) {
   const qc = useQueryClient();
   const [pluginEdit, setPluginEdit] = useState<LocalAgent | null>(null);
   const [pluginSel, setPluginSel] = useState<string[]>([]);
@@ -224,37 +234,44 @@ export default function AgentList({ onCreate }: { onCreate?: () => void }) {
   const agents = listQ.data?.agents ?? [];
   const libPlugins = (libQ.data?.plugins ?? []).filter((p) => !p.error);
 
+  // 页头操作区：独立成页时挂在 PageHeader 右侧，嵌在 tab 里时单独占一行右对齐
+  const headerActions = (
+    <>
+      <button
+        type="button"
+        onClick={() => listQ.refetch()}
+        className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+      >
+        <RefreshCw className="h-3.5 w-3.5" />
+        刷新
+      </button>
+      <button
+        type="button"
+        onClick={onCreate}
+        className="rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+      >
+        创建 Agent
+      </button>
+    </>
+  );
+
   return (
     <>
-      <PageHeader
-        title="智能体"
-        desc="这里是我已有的 agent：本地创建的 + 从平台装载的"
-        actions={
-          <>
-            <button
-              type="button"
-              onClick={() => listQ.refetch()}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              刷新
-            </button>
-            <button
-              type="button"
-              onClick={onCreate}
-              className="rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
-            >
-              创建 Agent
-            </button>
-          </>
-        }
-      />
+      {embedded ? (
+        <div className="mb-3 flex justify-end gap-2">{headerActions}</div>
+      ) : (
+        <PageHeader
+          title="智能体"
+          desc="这里是我已有的 agent：本地创建的 + 从平台装载的"
+          actions={headerActions}
+        />
+      )}
 
       <div className="mb-3">
         <Hint>
           启用开关决定它跑不跑、进不进概览，缺省是开的；停用不会删东西，也不会被下一次平台同步撤销。
           平台上还没拿过来的 agent 在
-          <strong className="text-ink-strong">智能体市场</strong>那一页。
+          <strong className="text-ink-strong">智能体市场</strong>那个 tab 里。
         </Hint>
       </div>
 

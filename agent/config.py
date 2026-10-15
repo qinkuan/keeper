@@ -334,7 +334,7 @@ def _enabled(
     return default if v is None else v
 
 
-async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
+async def _resolve_default_workspace(agent_id: str) -> tuple[Path, bool]:
     """装配期确定「工作空间根 + 它是否只读」——**永远是 default 用户空间**。
 
     工作空间是**会话级**的属性，不是 agent 的：agent 装配时只需要知道自己默认在
@@ -351,6 +351,9 @@ async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
     keeper.chat.service.resolve_workspace 读的就是它。两处各判各的曾让
     「工作区明明可写，装配期却按 agent 画像上那个从未被改过的默认值把写类工具全
     丢了」——工具在界面上凭空消失，还没有任何报错。
+
+    只收 ``agent_id``（用于日志），**不碰画像行**：核心 agent 没有 ``agent`` 表
+    里的那一行，但它同样需要一份装配期兜底工作区。
     """
     async with get_session_factory()() as db:
         space = (
@@ -366,18 +369,47 @@ async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
     root = Path(space.path).expanduser()
     logger.info(
         "装配 agent %s：工作空间=%s（user_space「%s」read_only=%s）",
-        row.id, root, space.name, bool(space.read_only),
+        agent_id, root, space.name, bool(space.read_only),
     )
     return root, bool(space.read_only)
 
 
-async def _load_builtin_tools(
-    definition: Agent,
+async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
+    """按画像行解析装配期工作空间（``_resolve_default_workspace`` 的行包装）。
+
+    存在的意义只是让「需要 agent 画像」的调用点（``_load_plugins``）读起来自洽；
+    解析逻辑本身只认 agent_id。
+    """
+    return await _resolve_default_workspace(row.id)
+
+
+async def load_builtin_tools(
+    agent_id: str,
     *,
     root: Optional[Path] = None,
     read_only: Optional[bool] = None,
 ) -> List[Any]:
-    """装配 keeper 自带的**内置**工具（fs.*）。
+    """装配某 agent 的**内置工具**（fs.* 与 ``task.mark_item_done``）。
+
+    ``root`` / ``read_only`` 缺省时按 default 用户空间解析。它们只是**兜底值**：
+    内置工具运行时一律经 ``tools.builtin.fs._effective`` 取当前会话的工作空间，
+    所以每轮对话注入的会话空间才是真正生效的那个（见 ``chat.context.set_workspace``）。
+
+    只收 ``agent_id``，**不碰画像行**：核心 agent 不在 ``agent`` 表里，却同样需要
+    这套出厂能力（它的 docstring 写的就是「只带内置工具」）。
+    """
+    if root is None or read_only is None:
+        root, read_only = await _resolve_default_workspace(agent_id)
+    return await _load_builtin_tools(agent_id, root=root, read_only=read_only)
+
+
+async def _load_builtin_tools(
+    agent_id: str,
+    *,
+    root: Path,
+    read_only: bool,
+) -> List[Any]:
+    """按已解析好的工作区上下文，把内置工具实例化出来。
 
     内置工具的代码就在 keeper 里（见 ``tools.builtin.registry``），
     **不查 binding、不问平台**，只看本地开关（无记录 = 默认启用）——
@@ -394,9 +426,7 @@ async def _load_builtin_tools(
     > 平台下发的工具能力已统一由插件提供（MCP 组件 / ``bin`` 组件），
     > 见 ``_load_plugins``。
     """
-    root, read_only = await _resolve_workspace(definition) if root is None or read_only is None else (root, read_only)
-
-    overrides = await _capability_overrides(definition.id)
+    overrides = await _capability_overrides(agent_id)
     tools: List[Any] = []
 
     from ..tools.builtin.registry import BUILTIN_TOOLS, KIND as BUILTIN_KIND
@@ -1057,31 +1087,10 @@ def _build_config(
     ``workspace_read_only`` 必须由调用方用 :func:`_resolve_workspace` 从
     ``user_space`` 记录解析后传入（只读的真源在那里，agent 表上已不存这一列）。
     缺省 True 是「没有工作区上下文时按最保守处理」，不是给调用方偷懒的默认值。
-
-    **核心 agent 的人设覆盖**：若本行就是核心 agent，且设置里配了
-    ``core_agent.persona(_file)``，则用它盖掉画像里的 persona。放在这一层
-    而不是另建记录，是为了不动数据库——用户改的是一份"偏好"，不是 agent 画像。
     """
-    persona = row.persona or ""
-    try:
-        from ..config import core_agent_persona, core_agent_selector, load_config
-
-        cfg = load_config()
-        _name, _id = core_agent_selector(cfg)
-        # 只认显式指定过的核心 agent：没配时 _name/_id 都为 None，
-        # 此时绝不做任何覆盖（否则"第一个已装载的 agent"会莫名被人设盖掉）
-        is_core = (_id and _id == row.id) or (_name and _name == row.name)
-        if is_core:
-            override = core_agent_persona(cfg)
-            if override:
-                logger.info("核心 agent[%s]：使用配置里的 persona 覆盖", row.id)
-                persona = override
-    except Exception as e:  # noqa: BLE001 读配置失败不该让 agent 装配不了
-        logger.debug("解析核心 agent 人设失败，沿用画像里的 persona: %s", e)
-
     return AgentConfig(
         name=row.name,
-        persona=persona,
+        persona=row.persona or "",
         description=row.description or "",
         workspace=WorkspaceConfig(
             # agent 不再绑定工作区：path 留空、kind=none，运行期 resolve_workspace
@@ -1159,7 +1168,7 @@ async def load_agent_config(
     await _ensure_plugin_links(row)
     # 能力现在只有两个来源：keeper 自带的内置工具 + 平台下发的插件
     plugins = await _load_plugins(row, root=ws_root, read_only=ws_read_only)
-    tools = await _load_builtin_tools(row, root=ws_root, read_only=ws_read_only)
+    tools = await _load_builtin_tools(row.id, root=ws_root, read_only=ws_read_only)
     tools.extend(plugins.tools)          # 插件的可执行文件（bin/）组件
     llm_dict = await _resolve_llm(row)
     return _build_config(

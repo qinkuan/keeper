@@ -430,7 +430,17 @@ def resolve_for_chat(agent_id: Optional[str] = None) -> Optional["KeeperAgent"]:
     那里按 URL 里的 agent_id 找实例，找不到就该404，不能悄悄换人。
     """
     if agent_id:
-        return _KEEPERS.get(agent_id)
+        hit = _KEEPERS.get(agent_id)
+        if hit is not None:
+            return hit
+        # 也可能是核心 agent 的 id：它**不在 _KEEPERS 里**（那本放的是数据库
+        # agent），所以这里要单独认一次。少了这一步，点「开始对话」建出来的
+        # 会话（agent_id 是核心 agent 的 id）会解析不到任何实例——表现为
+        # "进了对话页但发消息没反应"，而日志里只有一句 agent 为 None。
+        core = get_core_keeper()
+        if core is not None and core.agent_id == agent_id:
+            return core
+        return None
     return resolve_core_agent()
 
 
@@ -438,6 +448,30 @@ def set_core_keeper(agent: Optional["KeeperAgent"]) -> None:
     """登记 / 清空核心 agent 实例（装配与热重载用）。"""
     global _CORE_AGENT
     _CORE_AGENT = agent
+
+
+async def reload_core_agent() -> Optional["KeeperAgent"]:
+    """重新装配核心 agent（改完 agent.yaml / soul.md 后调用）。
+
+    **先建新的、成功后才停旧的**：装配失败时旧实例原样保留，主脑不会整体消失。
+    反过来做（先停后建）的话，一次 soul.md 写错就会让核心 agent 彻底不可用，
+    而用户看到的只是"对话框没反应了"。
+
+    ``build_core_agent`` 内部会 ``set_core_keeper(new)``，所以这里只需要在成功后
+    把旧实例关掉——它占着的 MCP 连接、HTTP 客户端不主动放就会漏。
+    """
+    old = get_core_keeper()
+    new = await build_core_agent()
+    if new is None:
+        # 没建成（目录没定义 / 读不出内容）：槽位没被动过，旧的还在
+        logger.warning("核心 agent 重建失败，保留现有实例")
+        return old
+    if old is not None and old is not new:
+        try:
+            await old.shutdown()
+        except Exception as e:  # noqa: BLE001 关闭失败不影响新实例已生效
+            logger.warning("旧的核心 agent 关闭异常（新的已生效）: %s", e)
+    return new
 
 
 def list_keepers() -> list["KeeperAgent"]:
@@ -450,14 +484,15 @@ def resolve_core_agent() -> Optional["KeeperAgent"]:
 
     解析顺序（逐级回落，保证"配了就能用、不配也能用"）：
 
-    1. **本地目录装配的核心 agent**（``~/.keeper/core-agent/``）——首选。
+    1. **本地目录装配的核心 agent**（``~/.keeper/core-agent/``）——首选，也是正常情况。
        它是应用内生的，不依赖数据库、不依赖平台，也不可能被卸载掉。
-    2. ``core_agent.id`` / ``core_agent.name`` —— 上一版设计留下的入口：指向数据库里
-       某条 agent 记录。老配置下继续能用，但那条记录只是普通 agent。
-    3. 顶层 ``agent.id`` / ``agent.name`` —— 元配置里的"这个进程跑谁"。
-    4. **第一个已装载的 agent** —— 兜底，走按 id 排序保证结果稳定
-       （dict 顺序取决于装载完成先后，多进程/重启后可能变，所以不能直接用
-       ``list(_KEEPERS)[0]``，否则"哪个是主脑"会随机跳动）。
+    2. **第一个已装载的 agent** —— 只有目录定义缺失/装配失败时才用到这里，
+       走按 id 排序保证结果稳定（dict 顺序取决于装载完成先后，多进程/重启后
+       可能变，所以不能直接用 ``list(_KEEPERS)[0]``，否则"哪个是主脑"会随机跳动）。
+
+    没有"配置里指定某个 agent 当主脑"这一层：核心 agent 就是那个目录构建出来的
+    唯一一个实例，不存在"选谁"的问题。加一层选择只会让用户以为核心 agent 可以
+    在数据库里的 agent 之间挑，而那其实是普通 agent 的编排问题。
 
     返回 None = 既没有目录定义、也没装载任何 agent。调用方据此给出可读的提示，
     而不是 500。
@@ -466,35 +501,16 @@ def resolve_core_agent() -> Optional["KeeperAgent"]:
     if _CORE_AGENT is not None:
         return _CORE_AGENT
 
-    from ..config import core_agent_selector, load_config
-
-    try:
-        want_name, want_id = core_agent_selector(load_config())
-    except Exception as e:  # noqa: BLE001 配置读不出来不该让选主脑这件事整体失败
-        logger.warning("读取核心 agent 配置失败，回落到第一个已装载的 agent: %s", e)
-        want_name, want_id = None, None
-
-    if want_id:
-        hit = _KEEPERS.get(want_id)
-        if hit is not None:
-            return hit
-        # 配了但没装载：这是**用户可操作的状态**（去装载它），要显式告警而不是
-        # 静默换人——否则用户以为自己在跟主脑说话，其实换了一个。
-        logger.warning(
-            "核心 agent 已配置但未装载: id=%s，暂时回落到第一个已装载的 agent",
-            want_id,
-        )
-    if want_name:
-        for a in _KEEPERS.values():
-            if a.name == want_name:
-                return a
-        logger.warning(
-            "核心 agent 已配置但未装载: name=%s，暂时回落到第一个已装载的 agent",
-            want_name,
-        )
+    # 2) 兜底：第一个已装载的 agent
     if not _KEEPERS:
+        logger.warning("没有核心 agent 目录定义，也没有已装载的 agent")
         return None
-    return _KEEPERS[sorted(_KEEPERS)[0]]
+    fallback = _KEEPERS[sorted(_KEEPERS)[0]]
+    logger.warning(
+        "核心 agent 不可用（目录缺失或装配失败），暂时用已装载的 %s 顶上",
+        fallback.name,
+    )
+    return fallback
 
 
 def resolve_core_agent_id() -> Optional[str]:
@@ -647,7 +663,7 @@ async def build_core_agent() -> Optional[KeeperAgent]:
     """
     from ..config import load_config
     from . import core as core_def
-    from .config import AgentConfig, WorkspaceConfig
+    from .config import AgentConfig, WorkspaceConfig, load_builtin_tools
 
     cfg = load_config()
 
@@ -659,16 +675,22 @@ async def build_core_agent() -> Optional[KeeperAgent]:
     if d is None:  # exists() 为真但读取失败：按"没配"处理，不让启动挂掉
         return None
 
-    # 模型：**不从这份定义读**。核心 agent 的模型跟随会话，默认值取部署配置
-    # （config.yaml 的 llm 段）——那里本来就是"本地默认大模型配置"，注释也写着
-    # 「平台不维护 model，用哪个模型是客户端自己的事」。角色定义里焊死模型等于把
-    # 它降级成普通 agent 那种"被配置出来的工件"。
-    # 取不到就留空 dict = 纯索引模式（不调模型），这是**未配置**状态，会明确告警。
-    llm: Dict[str, Any] = dict(getattr(cfg, "llm", None) or {})
+    from ..config import core_agent_id
+
+    core_id = core_agent_id(cfg)
+
+    # 模型走**标准的 agent 绑定**（agent_llm_binding），和普通 agent 同一套：
+    # 核心 agent 现在也有 agent_id 了，所以能在这张表里占一行。这样"换模型"这件
+    # 事对所有 agent 都是同一个动作、同一份存储，不会出现两种模型来源。
+    #
+    # 刻意**不**回落到 config.yaml 的全局 llm 段：那种看不见的兜底正是 _resolve_llm
+    # 注释里记的历史教训——"改了配置却不生效、又查不出原因"。没绑就是没绑，
+    # 由界面明确提示用户去选一个。
+    llm: Dict[str, Any] = await _resolve_llm_by_binding(core_id)
     if not llm:
         logger.warning(
-            "核心 agent 没有可用的模型配置（config.yaml 的 llm 段为空），"
-            "将以纯索引模式运行：不调用模型，只做本地检索"
+            "核心 agent 未绑定模型预设，将以纯索引模式运行（不调用模型，只做本地检索）。"
+            "在对话输入框下方选择模型即可绑定。"
         )
 
     # 工作区：**不钉路径**。会话各自绑定 user_space（见 chat/service.py 的
@@ -682,16 +704,26 @@ async def build_core_agent() -> Optional[KeeperAgent]:
         agent_name=d.name,
     )
 
-    # 画像：soul.md 优先；再叠加配置里的 persona/persona_file 覆盖层
+    # 画像 = soul.md 全文，**唯一来源**。刻意不再叠加 settings.yaml 里的
+    # persona / persona_file 覆盖层：两个入口用户就得猜哪个生效，而"改了却不生效"
+    # 是最难排查的一类问题。人格只有一个地方说了算，就是 soul.md。
     persona = d.persona
-    try:
-        from ..config import core_agent_persona
 
-        override = core_agent_persona(cfg)
-        if override:
-            persona = override
-    except Exception as e:  # noqa: BLE001 读覆盖配置失败不该让角色装不起来
-        logger.warning("读取核心 agent 画像覆盖失败，沿用 soul.md: %s", e)
+    # 内置工具：核心 agent 的**出厂能力**（fs.* 与 task.mark_item_done），也是它
+    # 区别于「只会检索」的唯一来源。
+    #
+    # 这里以前是漏的：核心 agent 不走 ``load_agent_config``（它从本地目录构建、
+    # 不查 agent 表），而内置工具正是在那条路径上装配的——于是 ``config.tools``
+    # 恒为空，界面上「生效工具」只剩记忆检索的 recall / read，读写文件的能力
+    # 整块消失，且没有任何报错。docstring 早就写着「只带内置工具」，实现没跟上。
+    #
+    # 兜底工作区（root / read_only）缺省按 default 用户空间解析，与普通 agent
+    # 同一套；真正的生效值仍由每轮对话注入的会话工作空间决定。
+    try:
+        builtin_tools = await load_builtin_tools(core_id)
+    except Exception as e:  # noqa: BLE001 缺 default 空间等不该让主脑起不来
+        logger.warning("核心 agent 装配内置工具失败，仅影响本地文件能力: %s", e)
+        builtin_tools = []
 
     agent_config = AgentConfig(
         name=d.name,
@@ -699,13 +731,17 @@ async def build_core_agent() -> Optional[KeeperAgent]:
         description=d.description,
         workspace=workspace,
         llm=llm,
+        tools=builtin_tools,
         # 刻意留空：核心 agent 不连接 MCP server、不预挂对端。
         # 要用这些能力时，通过会话把执行者/插件加进来。
         mcp_servers={},
         peers={},
     )
 
-    agent = KeeperAgent(config=agent_config, agent_id=None)
+    # agent_id 取配置里的核心 agent id（默认 "core"）：会话用它做归属。
+    # 注意它**不是**数据库 agent 表里的主键——核心 agent 不在那张表里，这里只是
+    # 一个让"这个会话归谁"有答案的稳定标识。
+    agent = KeeperAgent(config=agent_config, agent_id=core_id)
     await agent.build()
     # 对端仍然从 agent_peers 表加载：核心 agent 不做"会话级 peer"，
     # 但它可以沿用上一版配置里已挂在某条 agent 记录上的对端。
@@ -717,9 +753,47 @@ async def build_core_agent() -> Optional[KeeperAgent]:
 
     set_core_keeper(agent)
     logger.info(
-        "核心 agent 已装配：name=%s 模型=%s 目录=%s",
+        "核心 agent 已装配：name=%s 模型=%s 目录=%s 内置工具=%d（%s）",
         d.name,
-        "（未配置，纯索引模式）" if not llm else "来自 config.yaml 的 llm 段",
+        "（未绑定模型，纯索引模式）" if not llm else "来自 agent_llm_binding",
         core_def.core_agent_dir(cfg),
+        len(builtin_tools),
+        ", ".join(getattr(t, "name", "?") for t in builtin_tools) or "无",
     )
     return agent
+
+
+async def _resolve_llm_by_binding(agent_id: str) -> Dict[str, Any]:
+    """按 agent_id 解析**绑定的模型**（``agent_llm_binding`` → ``llm_profiles``）。
+
+    核心 agent 没有数据库行，所以用不了普通 agent 那条 ``_resolve_llm(row)``。
+    但绑定本身就是按 agent_id 存的，所以这里直接按 id 查——**语义与它完全一致**：
+    只认绑定，没绑就返回空 dict（纯索引模式，不调模型），不做任何兜底。
+    """
+    try:
+        # 相对导入：这里在 keeper.agent 包内，写成 ``from store.db import`` 会
+        # 找不到模块——而这个 except 会把它吞掉、安静地返回 {}，症状是"绑定了
+        # 模型却仍然不调模型"，极难定位。所以这类导入失败要看得见。
+        from ..store import AgentLLMBinding, LLMProfile, get_session_factory
+    except Exception as e:  # noqa: BLE001
+        logger.warning("导入模型绑定相关模块失败: %s", e)
+        return {}
+
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            binding = await db.get(AgentLLMBinding, agent_id)
+            if binding is None or not binding.llm_profile_id:
+                return {}
+            profile = await db.get(LLMProfile, binding.llm_profile_id)
+            if profile is None:
+                logger.warning(
+                    "agent %s 绑定的模型预设 %s 已不存在，按未绑定处理",
+                    agent_id,
+                    binding.llm_profile_id,
+                )
+                return {}
+            return profile.to_llm_dict()
+    except Exception as e:  # noqa: BLE001 查不到不该让装配整体失败
+        logger.warning("解析 agent %s 的模型绑定失败: %s", agent_id, e)
+        return {}

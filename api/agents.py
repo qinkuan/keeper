@@ -280,10 +280,23 @@ async def _rebuild_if_enabled(agent_id: str) -> tuple:
         build_agent,
         get_keeper,
         register_keeper,
+        reload_core_agent,
         unregister_keeper,
     )
+    from keeper.config import core_agent_id
     from keeper.store import Agent as AgentRow
     from keeper.store import AgentCapabilityOverride, get_session_factory
+
+    # 核心 agent **不在数据库里**，它从本地目录构建。少了这个分支，改核心 agent
+    # 的模型会走到下面的"agent 不存在"——保存成功却没生效，而且没有任何提示。
+    if agent_id and agent_id == core_agent_id():
+        try:
+            agent = await reload_core_agent()
+        except Exception as e:  # noqa: BLE001 装配失败是常态（模型没配、soul 写错）
+            return False, str(e)
+        if agent is None:
+            return False, "核心 agent 目录里没有可用的定义（缺 agent.yaml）"
+        return True, None
 
     async with get_session_factory()() as db:
         row = (
@@ -530,6 +543,171 @@ def _env_gate(plugins: List[Any]) -> None:
         raise HTTPException(
             status_code=409, detail=f"本机环境不满足所选插件：{bad}"
         )
+
+
+class CoreAgentIn(BaseModel):
+    """核心 agent 的定义（对应 ``agent.yaml`` 的非注释行）。
+
+    只两个字段，因为定义文件只有这两个键。刻意**不放画像**：画像在 ``soul.md``
+    里，与灵魂是同一份东西——拆成"画像文本 + 画像文件"两个入口只会让用户
+    猜哪个生效（这正是上一版的设计问题）。
+    """
+
+    name: str = Field(default="", description="显示名")
+    description: str = Field(default="", description="一句话说明它是谁")
+
+
+class CoreAgentSoulIn(BaseModel):
+    """灵魂正文（``soul.md`` 全文）。"""
+
+    soul: str = Field(default="", description="人格 / 语气 / 边界")
+
+
+@router.get("/core")
+async def get_core_agent() -> Dict[str, Any]:
+    """读核心 agent 的定义与灵魂（``agent.yaml`` + ``soul.md``）。
+
+    核心 agent **从本地目录构建**，不在数据库里，所以这里没有"选哪个当主脑"
+    这件事——它就是目录里那一个。目录不存在时会先铺一份出厂模板再返回，
+    这样首次打开设置页就能看到可编辑的内容，而不是一片空白。
+    """
+    from keeper.agent import core as core_def
+    from keeper.config import load_config
+
+    cfg = load_config()
+    try:
+        core_def.ensure_core_dir(cfg)
+        d = core_def.load_core_def(cfg)
+    except Exception as e:  # noqa: BLE001 读失败要给可读信息，而不是 500
+        raise HTTPException(status_code=500, detail=f"读取核心 agent 定义失败：{e}")
+
+    resolved = None
+    try:
+        from keeper.agent.keeper import get_core_keeper
+
+        agent = get_core_keeper()
+        if agent is not None:
+            resolved = {"name": agent.name, "model": bool(getattr(agent, "llm", None))}
+    except Exception:  # noqa: BLE001 运行态查不到不影响读文件
+        resolved = None
+
+    return {
+        "dir": str(core_def.core_agent_dir(cfg)),
+        "name": d.name if d else "",
+        "description": d.description if d else "",
+        "soul": d.soul if d else "",
+        "resolved": resolved,
+        "exists": core_def.exists(cfg),
+    }
+
+
+@router.put("/core")
+async def update_core_agent(body: CoreAgentIn) -> Dict[str, Any]:
+    """写核心 agent 的定义（``agent.yaml``）。
+
+    **只改这两个字段，不动别的**：文件里若有本接口不认识的键（例如用户手写的
+    扩展字段），必须原样保留——这里做的是"改两个值"，不是"用这个对象重写整个
+    文件"。所以走的是**按行替换**，不是序列化覆盖。
+    """
+    from keeper.agent import core as core_def
+    from keeper.config import load_config
+
+    cfg = load_config()
+    try:
+        core_def.ensure_core_dir(cfg)
+        p = core_def.def_path(cfg)
+        text = p.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        want = {"name": body.name.strip(), "description": body.description.strip()}
+        # 名字为空时给个兜底：空名字会让列表、消息头、日志全都显示空白
+        want["name"] = want["name"] or "Keeper"
+
+        seen = set()
+        out: List[str] = []
+        for line in lines:
+            key = line.split(":", 1)[0].strip() if ":" in line else ""
+            if key in want and not line[:1].isspace() and not line.lstrip().startswith("#"):
+                out.append(f"{key}: {_yaml_scalar(want[key])}")
+                seen.add(key)
+            else:
+                out.append(line)
+        # 文件里没有的键补在末尾（并留一个空行分隔）
+        for key, val in want.items():
+            if key not in seen:
+                if out and out[-1].strip():
+                    out.append("")
+                out.append(f"{key}: {_yaml_scalar(val)}")
+        p.write_text("\n".join(out) + "\n", encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"写入核心 agent 定义失败：{e}")
+
+    # **写完立即重新装配**：否则"已保存"了、对话里还是旧名字，这个落差很难解释。
+    # 装配失败不影响保存结果——文件已经落盘，下次启动会生效。
+    reload = await reload_core_agent_api()
+    data = await get_core_agent()
+    data["reload"] = reload
+    return data
+
+
+@router.post("/core/reload")
+async def reload_core_agent_api() -> Dict[str, Any]:
+    """重新装配核心 agent（改完 agent.yaml / soul.md 后生效）。
+
+    为什么要这个接口：新装配只在**下次启动**才发生，用户改完灵魂保存，界面上
+    "已保存"了，对话里却还是旧的——这个落差很难解释。所以保存后由前端调一次这里。
+
+    失败时**保留旧实例**（见 ``reload_core_agent``），所以返回 200 + running=False
+    + 可读原因，而不是 500：前端能显示"改了但没生效，原因是…"。
+    """
+    from keeper.agent.keeper import reload_core_agent
+
+    try:
+        agent = await reload_core_agent()
+    except Exception as e:  # noqa: BLE001 装配失败是常态（soul 写错、模型没配）
+        logger.warning("核心 agent 重新装配失败: %s", e)
+        return {"ok": False, "running": False, "name": None, "reason": str(e)}
+    if agent is None:
+        return {
+            "ok": False,
+            "running": False,
+            "name": None,
+            "reason": "没有可用的核心 agent 定义（目录里缺 agent.yaml）",
+        }
+    return {"ok": True, "running": True, "name": agent.name}
+
+
+@router.put("/core/soul")
+async def update_core_agent_soul(body: CoreAgentSoulIn) -> Dict[str, Any]:
+    """写核心 agent 的灵魂（``soul.md`` 全文覆盖）。
+
+    整体覆盖而不是增量合并：soul.md 是**手写的散文**，做结构化合并只会把用户
+    的排版搞乱。要局部改就在编辑器里改全文再存。
+    """
+    from keeper.agent import core as core_def
+    from keeper.config import load_config
+
+    cfg = load_config()
+    try:
+        core_def.ensure_core_dir(cfg)
+        core_def.soul_path(cfg).write_text(body.soul, encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"写入灵魂文件失败：{e}")
+
+    # 同上：写完立即重新装配，让改动当场生效
+    reload = await reload_core_agent_api()
+    data = await get_core_agent()
+    data["reload"] = reload
+    return data
+
+
+def _yaml_scalar(v: str) -> str:
+    """把字符串写成安全的 YAML 标量。
+
+    带引号是必须的：名字里出现 ``:``、``#`` 或首尾空格时，裸写会被 YAML 解析成
+    另一个值（``name: A: B`` 直接是语法错误）。所以统一加双引号并转义。
+    """
+    escaped = v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    return f'"{escaped}"'
 
 
 @router.get("")

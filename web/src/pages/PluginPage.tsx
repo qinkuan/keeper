@@ -98,7 +98,12 @@ function EnvCell({ items }: { items: LibraryPlugin["envDependencies"] }) {
  * 所以这一页的职责只有两个：让人看见库里有什么（名字、版本、能力类型、
  * 环境要求），以及告诉人**东西该往哪放**（库根路径）。
  */
-export default function PluginPage() {
+export default function PluginPage({
+  embedded,
+}: {
+  /** 嵌在「智能体」页的 tab 里时为 true：不重复渲染页头，只留操作按钮 */
+  embedded?: boolean;
+}) {
   const q = useQuery({ queryKey: ["plugins"], queryFn: apiListPlugins });
 
   const cols: Column<LibraryPlugin>[] = [
@@ -167,25 +172,41 @@ export default function PluginPage() {
 
   return (
     <>
-      <PageHeader
-        title="插件库"
-        desc="库里有什么、东西该往哪放。这一页只读——加插件就是往下面的目录里放文件。"
-        actions={
-          <>
-            <span className="text-[13px] text-ink-muted">
-              共 {data?.plugins.length ?? 0} 个
-            </span>
-            <button
-              type="button"
-              onClick={() => q.refetch()}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              刷新
-            </button>
-          </>
-        }
-      />
+      {embedded ? (
+        <div className="mb-3 flex items-center justify-end gap-3">
+          <span className="text-[13px] text-ink-muted">
+            共 {data?.plugins.length ?? 0} 个
+          </span>
+          <button
+            type="button"
+            onClick={() => q.refetch()}
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            刷新
+          </button>
+        </div>
+      ) : (
+        <PageHeader
+          title="插件库"
+          desc="库里有什么、东西该往哪放。这一页只读——加插件就是往下面的目录里放文件。"
+          actions={
+            <>
+              <span className="text-[13px] text-ink-muted">
+                共 {data?.plugins.length ?? 0} 个
+              </span>
+              <button
+                type="button"
+                onClick={() => q.refetch()}
+                className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                刷新
+              </button>
+            </>
+          }
+        />
+      )}
 
       <Stack>
         <Section title="库根路径">

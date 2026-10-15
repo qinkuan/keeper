@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Keeper Agent Bridge",
+  "version": "0.1.0",
+  "description": "keeper 桌面端自带扩展：在页面上提供 keeper 浮球，并把页面数据接给本地内核。",
+  "minimum_chrome_version": "116",
+
+  "permissions": ["storage", "tabs", "scripting", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ]
+}

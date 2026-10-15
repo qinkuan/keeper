@@ -1,9 +1,16 @@
 server:
-  host: 0.0.0.0
+  # 必须绑回环。0.0.0.0 会让同网段设备直接访问到内核，而内核里有能让 agent
+  # 执行本机命令的接口。确实需要局域网访问时，先想清楚 token 泄露的后果。
+  host: 127.0.0.1
   port: 8080
   auth:
     enabled: false
     default_initiator_id: 10001
+    # 命令行形态（./start_keeper.sh）访问令牌。留空 = 不启用认证，启动时会有警告。
+    # 生成一个：python -c "import secrets;print(secrets.token_urlsafe(32))"
+    # 桌面形态（desktop/start_desktop.sh）不需要填：sidecar 每次启动现生成随机
+    # token 传给内核，用户不用管、也不会误提交进仓库。
+    token: "e-ZqRKxQOKb7WuKz5dkC97typHSXArMXS7d5H9XLNy4"
 agent:
   name: assistant
 platform:
@@ -14,6 +21,13 @@ workspace:
   root: ~/.keeper/workspace/user
   read_only: false
 agent_overrides: {}
+# 核心 agent（主脑）：从本地目录构建，不在数据库里。
+#   id  —— 它的 agent_id。会话拿这个做归属（点「开始对话」建的会话归它）。
+#         必须唯一；改了它，历史会话就认不出现在的主脑了。
+#   dir —— 目录位置，里面是 agent.yaml（名字）与 soul.md（人格）。
+core_agent:
+  id: core
+  dir: ~/.keeper/core-agent
 # 用户设置（A2A 超时/熔断、prompt 落盘、上下文治理）不写在这里：
 # 见 ~/.keeper/settings.yaml——那里的值覆盖本文件同名段，改完立即生效。
 # 本文件是元配置，只在部署时手改。

@@ -49,7 +49,7 @@ export default function AskBox({ options, disabled, onSubmit }: Props) {
           onKeyDown={(e) => {
             if (e.key === "Enter") submit(val);
           }}
-          className="min-w-0 flex-1 rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)] disabled:opacity-50"
+          className="min-w-0 flex-1 rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] disabled:opacity-50"
         />
         <button
           type="button"

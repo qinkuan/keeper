@@ -78,7 +78,7 @@ function PasswordInput({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         autoComplete="new-password"
-        className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 pr-16 font-mono text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)] placeholder:font-sans placeholder:text-ink-faint"
+        className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 pr-16 font-mono text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] placeholder:font-sans placeholder:text-ink-faint"
       />
       <button
         type="button"
@@ -377,7 +377,7 @@ export default function ModelManage() {
               value={form.model_name ?? ""}
               onChange={(e) => patch("model_name", e.target.value)}
               placeholder="也可从建议里选"
-              className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
+              className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]"
             />
           </Field>
 

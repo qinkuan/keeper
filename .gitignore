@@ -35,3 +35,6 @@ dist/
 .DS_Store
 
 *.db
+data/keeper.db-shm
+data/keeper.db-wal
+data

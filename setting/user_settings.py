@@ -34,10 +34,7 @@ SETTINGS_FILENAME = "settings.yaml"
 # 允许出现在 settings.yaml 里的段：只有「设置页会改」的东西才准进，
 # 免得这个文件慢慢变成第二个 config.yaml。
 #
-# core_agent 是「会话默认落到哪个 agent + 它的人设」——这是用户级偏好（跟人走、
-# 设置页里改、改完立即生效），不是部署参数，所以放这里而不是 config.yaml。
-# 注意它与 config.yaml 的 ``agent`` 段**语义不同**：后者是"这个进程跑谁"。
-KNOWN_SECTIONS = ("observability", "a2a", "context", "core_agent")
+KNOWN_SECTIONS = ("observability", "a2a", "context")
 
 
 def settings_path() -> Path:
@@ -179,7 +176,6 @@ def save_sections(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
-    core_agent: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """按段保存：只改传入的那几段，其余原样保留。返回保存后的完整内容。"""
     data = load_raw()
@@ -193,8 +189,6 @@ def save_sections(
         data["a2a"] = a2a
     if context is not None:
         data["context"] = context
-    if core_agent is not None:
-        data["core_agent"] = core_agent
     # 只保留已知段，避免写进杂项后没人认识
     data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
     save_raw(data)
@@ -253,7 +247,7 @@ def default_settings() -> Dict[str, Any]:
     """
     from dataclasses import asdict
 
-    from ..config import A2ASection, AgentSection, ContextSection, PromptDumpSection
+    from ..config import A2ASection, ContextSection, PromptDumpSection
 
     return {
         "context": asdict(ContextSection()),
@@ -261,7 +255,6 @@ def default_settings() -> Dict[str, Any]:
         "observability": {"prompt_dump": asdict(PromptDumpSection())},
         # 核心 agent：默认全空 → 运行期回落到"第一个已装载的 agent"，
         # 所以这个文件生成了、用户没改，行为与完全不配一致。
-        "core_agent": asdict(AgentSection()),
     }
 
 

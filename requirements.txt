@@ -45,3 +45,8 @@ dulwich>=1.2
 # ---- 记忆层（memory/）：中文分词，FTS5 检索的预处理 ----
 # FTS5 自带分词器不会做中文分词，需在 Python 侧用 jieba 预分词后再喂 FTS5。
 jieba>=0.42
+
+# ---- 内置浏览器抓取（keeper/browser/）----
+# 只装 Python 包，**不跑 playwright install**：抓取走 CDP 连桌面壳（Electron）
+# 自带的 Chromium，而 Chromium 的 user-data-dir 不能被两个进程同时打开。
+playwright>=1.44

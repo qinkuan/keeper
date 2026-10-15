@@ -871,12 +871,14 @@ export interface CoreAgentSettings {
   agents?: { id: string | null; name: string }[];
 }
 
-/** 本地设置（写回 config.yaml）：按管理的内容分段 */
+/** 本地设置（写回 config.yaml）：按管理的内容分段。
+
+    注意**没有**核心 agent 段：核心 agent 由本地目录构建（agent.yaml / soul.md），
+    有自己独立的读写接口（see apiGetCoreAgent），不属于"本机设置"。 */
 export interface SettingsResp {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
-  core_agent: CoreAgentSettings;
   /** 各对端当前的熔断状态（只读） */
   a2a_breakers: BreakerState[];
   /** 手动重置熔断后返回：重置了几个对端 */
@@ -890,7 +892,6 @@ export interface SettingsInput {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
-  core_agent: CoreAgentSettings;
 }
 
 /** 趋势图上的一个点（一个时间桶） */
@@ -1109,6 +1110,36 @@ export interface SessionWorkspace {
 /** GET /sessions 返回 */
 export interface SessionsResp {
   sessions: SessionItem[];
+}
+
+/**
+ * 回收站里的一条会话（软删除，按删除时间倒序）。
+ *
+ * 与 {@link SessionItem} 分开而不是给它加字段：会话列表里永远不会出现已删除的条目，
+ * 两者的字段含义也不同——这里多了删除时间、消息条数与所属 agent 的名字。
+ */
+export interface TrashSessionItem {
+  id: string;
+  title?: string | null;
+  /** 所属 agent；查不到名字时后端回填成 id（核心 agent 不在 agent 表里） */
+  agent_id?: string | null;
+  agent_name?: string | null;
+  kind?: string | null;
+  /** 消息条数：标题常是「新对话」这种占位，靠它判断是不是要找的那条 */
+  message_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  /** 删除时间；极老的存量行可能为空 */
+  deleted_at?: string | null;
+}
+
+/** GET /manage/sessions/trash 返回 */
+export interface TrashResp {
+  sessions: TrashSessionItem[];
+  /** 回收站总数（用于「显示更多」） */
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 /** 会话里的一条消息（对应后端 session_messages 表） */
@@ -1407,4 +1438,65 @@ export interface TaskReviewResp extends TaskDetailResp {
   step_id?: string;
   options?: string[];
   question?: string | null;
+}
+
+// ---- 内置浏览器抓取（/browser）----
+// 仅桌面形态可用：内核经 CDP 连桌面壳（Electron）里那个内置浏览器，
+// 见 keeper/browser/cdp.py 与 desktop/browser.js。
+
+/** 内置浏览器是否可用。available=false 时 reason 是可执行的原因（不是错误堆栈） */
+export interface BrowserStatus {
+  available: boolean;
+  endpoint: string;
+  reason: string;
+}
+
+/** 内置浏览器当前打开的页面（keeper 主界面已被排除） */
+export interface BrowserPage {
+  url: string;
+  title: string;
+}
+export interface BrowserTargetsResp {
+  pages: BrowserPage[];
+}
+
+/** 抓取到的页面文字：直接可喂 LLM */
+export interface BrowserTextResp {
+  url: string;
+  title: string;
+  text: string;
+  /** 是否因超过 max_chars 被截断 */
+  truncated: boolean;
+  full_chars: number;
+}
+
+/** 抓取到的页面截图：base64（不带 data: 前缀，前端自己拼） */
+export interface BrowserScreenshotResp {
+  url: string;
+  title: string;
+  mime: string;
+  image_base64: string;
+  bytes: number;
+}
+ /**
+ * 扩展接入所需的全部信息（GET /agent-bridge/info）。
+ *
+ * `connect_code` 是给用户一次复制粘贴用的：里面打包了 `kernel_url` / `ws_url` /
+ * `token` / `extension_id`。分开填四个字段容易漏、也容易把 token 截断，
+ * 而 token 错一个字符的表现是"点了没反应"，很难自查。
+ */
+export interface AgentBridgeInfo {
+  kernel_url: string;
+  ws_url: string;
+  token: string;
+  /** 内核是否启用了入站认证。未启用时 token 为空，且内核本身就是裸奔的 */
+  auth_enabled: boolean;
+  /** 未打包扩展按路径算出的 id；用户装出来的必须与它一致 */
+  extension_id: string;
+  /** 加载「已解压的扩展程序」时要选的**确切目录** */
+  extension_path: string;
+  /** 当前在线的扩展连接数（SW 被杀后重连会短暂为 0） */
+  connected: number;
+  connected_ids: string[];
+  connect_code: string;
 }

@@ -14,23 +14,29 @@ import { cn } from "../../lib/utils";
 /**
  * 状态色板。
  *
- * 「蓝」这一档刻意**不用** Tailwind 的 blue（带紫调），改用品牌色本身：
- * 主色已经是 Chrome 蓝，旁边再放一个相近但不同的蓝，界面就会出现"两种蓝
- * 说不清谁是谁"的问题。品牌蓝就是这一档的蓝。
- * 其余状态色保留 Tailwind 的原生色——它们是语义色（成功/危险/警告），
- * 与品牌色不构成竞争关系。
+ * 「蓝」这一档用品牌色本身：主色旁边再放一个相近但不同的蓝，界面就会出现
+ * "两种蓝说不清谁是谁"的问题。
+ *
+ * 成功/警告/危险三档换成**柔和版**（#4A9C78 / #C49254 / #B85C5C），不用
+ * Tailwind 原生的 emerald/amber/red——那些是为"高饱和提醒"设计的，在冷灰蓝
+ * 底上会跳出来，而这三个色在这里只是"少量点缀、不抢戏"。
+ * 文字色分浅深两档：浅底用深一档（11px 小字要压得住），深底用亮一档。
+ *
+ * indigo/purple/cyan 是**分类色**不是语义色，保持原样。
  */
 const TONES = {
   muted: "bg-black/[0.05] text-ink-muted dark:bg-white/[0.08]",
-  green: "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
-  red: "bg-red-500/12 text-red-600 dark:text-red-300",
-  orange: "bg-orange-500/12 text-orange-700 dark:text-orange-300",
-  amber: "bg-amber-500/14 text-amber-700 dark:text-amber-300",
-  blue: "bg-brand/10 text-brand",
+  green: "bg-[#34a873]/12 text-[#2b8f60] dark:text-[#4cbd88]",
+  red: "bg-[#d15b5b]/12 text-[#b04a4a] dark:text-[#dd7a7a]",
+  orange: "bg-[#d49441]/12 text-[#a87433] dark:text-[#dda85c]",
+  amber: "bg-[#d49441]/14 text-[#a87433] dark:text-[#dda85c]",
+  /* 淡蓝底上的文字用 deep（浅底 #2962D8，5.6:1）而不是主色（3.2:1）：
+     这些标签是 11px 小字，用主色会糊。深色下换 strong（Primary-light）。 */
+  blue: "bg-brand/10 text-brand-deep dark:text-brand-strong",
   indigo: "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300",
   purple: "bg-purple-500/12 text-purple-700 dark:text-purple-300",
   cyan: "bg-cyan-500/12 text-cyan-700 dark:text-cyan-300",
-  brand: "bg-brand/10 text-brand",
+  brand: "bg-brand/10 text-brand-deep dark:text-brand-strong",
 } as const;
 
 export type PillTone = keyof typeof TONES;

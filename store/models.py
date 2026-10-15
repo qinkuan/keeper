@@ -79,6 +79,10 @@ class ChatSession(Base):
     # 不随会话变——多 agent 协作时各 agent 用各自的模型跑，模型是 agent 的属性，
     # 不是这次对话的参数。
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    # 软删除时间。status="deleted" 时有值，active 时为 None。
+    # 单独记一列而不复用 updated_at：updated_at 会被后续任何一次写顶掉，
+    # 而「什么时候删的」决定要留多久——保留策略得按它算。
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 会话种类：chat=普通会话，task=任务绑定会话（D1：一个任务一个 session）。
     # 用于在同一个会话列表里区分两种来源，而不必分两套 UI。
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")

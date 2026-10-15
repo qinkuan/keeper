@@ -24,21 +24,25 @@ import { cn } from "../../lib/utils";
  * 规格只有这一处，改观感时它们一起跟着变。
  */
 export const inputCls =
-  "h-[30px] w-full rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint hover:border-line focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)] disabled:cursor-not-allowed disabled:bg-surface disabled:opacity-60";
+  "h-[30px] w-full rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint hover:border-line focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] disabled:cursor-not-allowed disabled:bg-surface disabled:opacity-60";
 
 /** 多行输入：高度交给调用点（style / rows），其余规格与单行一致 */
 export const textareaCls =
-  "w-full resize-y rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)] disabled:cursor-not-allowed disabled:bg-surface disabled:opacity-60";
+  "w-full resize-y rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] disabled:cursor-not-allowed disabled:bg-surface disabled:opacity-60";
 
 /** 标签 + 控件 + 说明。说明写在控件下方（antd 叫 extra，这里同理）。 */
 export function Field({
   label,
   extra,
+  error,
   children,
   className,
 }: {
   label: ReactNode;
   extra?: ReactNode;
+  /** 校验错误。给了就顶掉 extra 那行说明——两者同时出现会挤在一起，
+      而且"说明"在出错时已经不是用户要看的东西了。 */
+  error?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
@@ -46,8 +50,14 @@ export function Field({
     <div className={cn("space-y-1", className)}>
       <div className="text-[12.5px] font-medium text-ink">{label}</div>
       {children}
-      {extra && (
-        <p className="text-[11.5px] leading-[1.5] text-ink-faint">{extra}</p>
+      {error ? (
+        <p className="text-[11.5px] leading-[1.5] text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      ) : (
+        extra && (
+          <p className="text-[11.5px] leading-[1.5] text-ink-faint">{extra}</p>
+        )
       )}
     </div>
   );
@@ -157,7 +167,7 @@ export function Toggle({
       className={cn(
         "relative h-[18px] w-8 shrink-0 rounded-full transition-all duration-200 ease-apple disabled:opacity-50",
         checked
-          ? "bg-brand-gradient shadow-[0_1px_3px_rgba(91,155,245,0.48)]"
+          ? "bg-brand-gradient shadow-[0_1px_3px_rgba(66,133,244,0.48)]"
           : "bg-line shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]"
       )}
     >

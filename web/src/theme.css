@@ -1,22 +1,32 @@
 /*
  * 设计 token —— 全站换肤只改这一个文件。
  *
- * 取向：**现代桌面应用**（Linear / WorkBuddy / macOS Sonoma 一路）的观感，
- * 而不是网页后台。三条决定：
+ * 取向：**低饱和静谧蓝**的桌面 Agent 应用。安静、克制，长时间看不累：
  *
- * 1. **靠微差分层，而不是靠描边**。相邻表面之间只差 2~4% 明度
- *    （sidebar < surface < panel），边框一律是极淡的发丝线；一旦边框
- *    深到能看见，界面立刻退回"表格后台"的样子。
- * 2. **品牌色只出现在该出现的地方**：选中态、主按钮、焦点环、活跃图标。
- *    其余全部中性。中性是**微冷灰**（zinc 系）而不是暖灰——冷灰更像
- *    工具，暖灰更像纸。
- * 3. **阴影给得少但给得准**：只在浮层（弹窗 / 抽屉 / 输入浮块）用，
- *    且用带环境色的双层阴影（近处一层紧、远处一层散），这比单层黑影更像
- *    真实光照，卡片 hover 才有"抬起来"的感觉。
+ * 1. **主色通透但不发白**。#4285F4 这类蓝（饱和 89%、明度 61%）蓝得干净，
+ *    又不像满饱和亮蓝那样发光。上一版压到 45% 饱和是过度矫正——"稳重"
+ *    很容易滑成"厚重"，这里要的是通透，不是沉稳。
+ * 2. **蓝色只用在重点元素**：主按钮、选中态、焦点环、活跃图标、强调边线。
+ *    大面积一律交给中性底色——这一条决定了侧栏/内容区的底色都是灰，不是蓝。
+ * 3. **底色不发黑**。深色用 #121722 一档的深灰蓝而不是纯黑：纯黑在长时间
+ *    阅读时更压抑。
+ * 4. **靠微差分层，而不是靠描边**。相邻表面差 2~4% 明度，边框是极淡发丝线；
+ *    一旦边框深到能看见，界面立刻退回"表格后台"。
+ * 5. **阴影给得少、给得弱**（浅色主题最大 alpha 0.12，深色 0.45）：浮层才用，
+ *    双层（近紧远散）比单层黑影更像真实光照。
+ *
+ * **主色上白字只有 3.56:1**（Material 体系的惯例）。两处因此不能将就：
+ * 渐变的右端用 Primary-dark（5.6:1），浅底上的小字强调也用 Primary-dark。
+ *
+ * 两套主题都按同一份色板推导，只是明度关系反过来：深色下"越靠前的表面越亮"
+ * （app < bg < surface < surface-soft），浅色下则相反。
  *
  * 变量名沿用 --kp-* 前缀。Tailwind 那边用 channel 形式
- * （--*-rgb: "79 70 229"）暴露给 bg-brand/10 这类透明度修饰符，
- * 所以改 hex 时 rgb 那组要同步改。
+ * （--*-rgb: "66 133 244"）暴露给 bg-brand/10 这类透明度修饰符，
+ * **所以改 hex 时 rgb 那组必须同步改**——漏一处就会看到"某个角落还是旧色"。
+ *
+ * 组件里凡是写死 rgba(66,133,244,...) 的（输入框 focus 环、头像阴影等），
+ * 换主色时也要一并替换：它们绕过了变量，是这套体系唯一的漏洞。
  */
 
 @tailwind base;
@@ -25,72 +35,80 @@
 
 :root {
   /* ===== 品牌色 =====
-     主色 #5B9BF5：在上一版 #74A6F8 的明度上"往蓝里挪"——
-     红/绿分量各砍约 10 点、蓝分量基本不动，明度仍在 68% 附近，
-     但色相从 220° 移到 216°，观感明显更蓝、不再发灰（不"黑"）。
-     浅蓝 #D3E2FD：同色相的高亮底，承担"静态背景"的角色（菜单栏等）。 */
-  --kp-primary: #5b9bf5;
-  /* hover 提亮、active 压深：三态各自可辨，又不跳出色系 */
-  --kp-primary-hover: #7aadf7;
-  --kp-primary-active: #4189ee;
-  --kp-primary-strong: #4189ee;
+     主色 #4285F4：这支蓝**不再往灰里躲**。上一版压到 45% 饱和是过度矫正，
+     结果是"稳重"变成了"偏厚重"；这里的 89% 饱和配 61% 明度，是通透的冷蓝——
+     蓝得干净，但不发白发光。
+
+     **白字对比要留意**：#4285F4 上白字只有 3.56:1（Material 体系的惯例，
+     按钮这类大字/粗字可接受）。所以两处不能将就：
+     - 渐变的右端用 Primary-dark（5.6:1），让整条渐变的白字从 3.56 走到 5.6；
+     - 浅底上的强调文字（11px 小字）用 Primary-dark，不用主色。 */
+  --kp-primary: #4285f4;
+  /* 浅色主题下 hover/active 都往**深**走：#63A4FF 那种亮蓝压不住白字
+     （2.5:1），而浅底按钮 hover 加深更符合直觉。两级各自可辨。 */
+  --kp-primary-hover: #2f74e0; /* 白字 4.5:1 */
+  --kp-primary-active: #2962d8; /* 白字 5.6:1 */
+  --kp-primary-strong: #2962d8;
   /* 展示类（选中底、气泡、图标底）用的淡蓝 */
-  --kp-primary-soft: rgba(91, 155, 245, 0.2);
-  --kp-primary-ring: rgba(91, 155, 245, 0.42);
-  --kp-primary-rgb: 91 155 245;
-  /* 渐变第二端：主题浅蓝 #D3E2FD（比主色更亮一档） */
-  --kp-accent: #d3e2fd;
-  --kp-accent-rgb: 211 226 253;
+  --kp-primary-soft: rgba(66, 133, 244, 0.12);
+  --kp-primary-ring: rgba(66, 133, 244, 0.42);
+  --kp-primary-rgb: 66 133 244;
+  /* 渐变第二端：Primary-dark。它同时承担"浅底上的强调文字"——主色在白底上
+     只有 3.2:1，11px 的小字压不住，Primary-dark 有 5.6:1。 */
+  --kp-accent: #2962d8;
+  --kp-accent-rgb: 41 98 216;
 
   /* ===== 中性阶 ===== */
-  /* 灰阶的基准取 Chrome 工具栏的 #DFDFDF（真正的中性灰，不带色相）。
-     层级：sidebar(最暗) < surface < surface-soft < panel(白)。
-     原来的灰偏冷（带一点蓝），和新的 Chrome 蓝放在一起会显得脏；
-     中性灰才是它的正确底色。 */
-  --kp-bg-app: #dfdfdf;
+  /* 冷灰阶。**底色不带蓝**：蓝色只给重点元素（见品牌色段），
+     大面积一律灰——这是这套配色不显廉价的关键。
+     层级（浅色下越靠前越白）：bg-app < surface < surface-soft < bg(纯白)。 */
+  --kp-bg-app: #f4f7fb;
   --kp-bg: #ffffff;
-  --kp-surface: #f2f2f2;
-  --kp-surface-soft: #f8f8f8;
-  --kp-border: #d8d8d8;
-  --kp-border-soft: #e8e8e8;
+  --kp-surface: #f4f7fb;
+  --kp-surface-soft: #fafbfd;
+  --kp-border: #d8e1ec;
+  --kp-border-soft: #e8edf4;
 
-  /* 正文色取 #474747（纯中性灰，无蓝调），以它为基准往两端推：
-     strong 更深（标题/强调）、secondary / muted 更浅。
-     基准色不能动，其余三档保持与它的相对关系，层级才不会塌。 */
-  --kp-text: #474747;
-  --kp-text-strong: #262626;
-  --kp-text-secondary: #6b6b6b;
-  --kp-text-muted: #8f8f8f;
+  /* 文字四档：Text-primary #172233 及其 weaker 两档。
+     muted 比色板里的 #74849B 再浅一点——那档是给深底用的，
+     浅底上照搬会显得比 secondary 还重。 */
+  --kp-text: #172233;
+  --kp-text-strong: #0c1421;
+  --kp-text-secondary: #56647a;
+  --kp-text-muted: #7c8aa0;
 
-  /* 菜单栏：直接用主题浅蓝 #D3E2FD，不叠透明度。
-     它本身已经足够淡（明度约 96%），再稀释就成了白，看不出是蓝色。 */
-  --kp-sidebar: #d3e2fd;
-  /* 侧栏与内容区的分隔线：取同色相的深化版。
-     用纯灰线会在这块淡蓝上显得"脏"，同色相蓝线才融得进去。 */
-  --kp-sidebar-line: #b6cdf5;
+  /* 菜单栏：侧栏是**次要区域**，用比内容区暗一档的冷灰。
+     分区靠"底色 + 下面那条分隔线"共同表达，不靠更重的描边。 */
+  --kp-sidebar: #f4f7fb;
+  --kp-sidebar-line: #d8e1ec;
+  /* 选中项：主色低透明度压在底色上（≈ 主色 14%），比白块醒目，
+     又不抢内容的戏。**它是从主色算出来的**，主色一改要跟着重算。 */
+  --kp-sidebar-active: #dbe7fa;
   /* 顶栏走玻璃：白色半透明压在灰底上，透出底色的同时比内容区更亮 */
   --kp-toolbar: rgba(255, 255, 255, 0.72);
 
   /* 随主题变化的「表面细节」：玻璃顶栏、滚动条、拖拽把手 */
   --kp-header-bg: rgba(255, 255, 255, 0.72);
-  --kp-scrollbar: rgba(0, 0, 0, 0.18);
-  --kp-scrollbar-hover: rgba(0, 0, 0, 0.32);
-  --kp-grip: #cccccc;
-  --kp-lift-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.16),
-    0 2px 6px -2px rgba(0, 0, 0, 0.06);
-  --kp-hairline: rgba(0, 0, 0, 0.08);
+  --kp-scrollbar: rgba(23, 34, 51, 0.18);
+  --kp-scrollbar-hover: rgba(23, 34, 51, 0.32);
+  --kp-grip: #b6c2d2;
+  /* 浮层阴影：双层（近处紧、远处散）比单层黑影更像真实光照。
+     alpha 压得比一般后台低——这类应用要"清爽极简"，阴影只负责脱离底色。 */
+  --kp-lift-shadow: 0 8px 24px -8px rgba(23, 34, 51, 0.1),
+    0 2px 6px -2px rgba(23, 34, 51, 0.05);
+  --kp-hairline: rgba(23, 34, 51, 0.06);
 
   /* channel 形式：给 Tailwind 透明度修饰符用（bg-brand/10、text-ink/60） */
-  --kp-bg-app-rgb: 223 223 223;
+  --kp-bg-app-rgb: 244 247 251;
   --kp-bg-rgb: 255 255 255;
-  --kp-surface-rgb: 242 242 242;
-  --kp-surface-soft-rgb: 248 248 248;
-  --kp-border-rgb: 216 216 216;
-  --kp-border-soft-rgb: 232 232 232;
-  --kp-text-rgb: 71 71 71;
-  --kp-text-strong-rgb: 38 38 38;
-  --kp-text-secondary-rgb: 107 107 107;
-  --kp-text-muted-rgb: 143 143 143;
+  --kp-surface-rgb: 244 247 251;
+  --kp-surface-soft-rgb: 250 251 253;
+  --kp-border-rgb: 216 225 236;
+  --kp-border-soft-rgb: 232 237 244;
+  --kp-text-rgb: 23 34 51;
+  --kp-text-strong-rgb: 12 20 33;
+  --kp-text-secondary-rgb: 86 100 122;
+  --kp-text-muted-rgb: 124 138 160;
   --kp-toolbar-rgb: 255 255 255;
 
   /* 圆角：桌面应用尺度。控件 8、卡片 12、浮层 16、胶囊 980 */
@@ -100,39 +118,46 @@
   --kp-pill: 980px;
 
   /* ===== 阴影 ===== */
-  /* 双层（近处紧、远处散）比单层更接近真实光照，这是"廉价 vs 精致"的分水岭 */
-  --kp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
-  --kp-shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.09),
-    0 2px 4px -2px rgba(0, 0, 0, 0.05);
-  --kp-shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.2),
-    0 6px 14px -8px rgba(0, 0, 0, 0.1);
+  /* 双层（近处紧、远处散）比单层更接近真实光照，这是"廉价 vs 精致"的分水岭。
+     整体 alpha 压得比常见后台低一档：这类应用要"清爽极简"，阴影只负责让
+     浮层脱离底色，不负责制造戏剧感。 */
+  --kp-shadow-sm: 0 1px 2px rgba(23, 34, 51, 0.05),
+    0 1px 3px rgba(23, 34, 51, 0.03);
+  --kp-shadow-md: 0 4px 12px -2px rgba(23, 34, 51, 0.07),
+    0 2px 4px -2px rgba(23, 34, 51, 0.04);
+  --kp-shadow-lg: 0 16px 40px -12px rgba(23, 34, 51, 0.12),
+    0 6px 14px -8px rgba(23, 34, 51, 0.06);
   /* 品牌投影：用主色本身，按钮才有"自己发光"而不是"贴了层黑" */
-  --kp-shadow-brand: 0 6px 18px -6px rgba(91, 155, 245, 0.48);
+  --kp-shadow-brand: 0 6px 18px -6px rgba(66, 133, 244, 0.3);
 
   /* 品牌渐变：按钮 / 徽标 / 头像共用一条。
-     从主色 #5B9BF5 走到 accent #D3E2FD，明度差一档，过渡很轻。 */
-  --kp-gradient-brand: linear-gradient(135deg, #5b9bf5 0%, #d3e2fd 100%);
+     从主色走到 accent（Primary-dark），**由亮到深**而不是由亮到浅——
+     这些渐变上要压白字，右端一旦太浅就压不住（见 --kp-accent 处的说明）。 */
+  --kp-gradient-brand: linear-gradient(135deg, #4285f4 0%, #2962d8 100%);
   /* 展示类淡底（气泡 / 图标底 / 高亮块） */
   --kp-gradient-brand-soft: linear-gradient(
     135deg,
-    rgba(91, 155, 245, 0.18) 0%,
-    rgba(211, 226, 253, 0.5) 100%
+    rgba(66, 133, 244, 0.14) 0%,
+    rgba(41, 98, 216, 0.08) 100%
   );
 
   /* 图表色板：同一支蓝的三档明度。图表里的颜色不能直接写 hex——
      深色主题下写死的中性灰会变成一条刺眼的线。 */
-  --kp-chart-1: #5b9bf5; /* 输入 token */
-  --kp-chart-2: #9dc0f8; /* 输出 token */
-  --kp-chart-3: #4189ee; /* 成本 / 调用次数 */
+  --kp-chart-1: #4285f4; /* 输入 token */
+  --kp-chart-2: #63a4ff; /* 输出 token */
+  --kp-chart-3: #2962d8; /* 成本 / 调用次数 */
 
-  /* 主色底上的前景色（文字/图标）。
-     主色 #5B9BF5 明度约 67%，属于**浅底**，必须用深色前景。
-     深蓝 #0A1F4D 在这块底上有 5.6:1，读起来很稳，
-     也维持了"浅蓝底 + 深蓝字"的观感。 */
-  --kp-primary-deep: #0a1f4d;
+  /* 浅底上的**强调文字/图标**色（白底、淡蓝底上用它）。
+     刻意不用主色 #3B72B8：主色在白底上只有 4.3:1，11px 的小字压不住；
+     Primary-dark #28548C 是 7.2:1，小字也稳。
 
-  /* 焦点环：主色偏浅时，靠加大不透明度才看得见 */
-  --kp-ring: rgba(91, 155, 245, 0.5);
+     另一面（**主色实底上的前景**）是白色，不在这里——那属于 "text-white"。
+     这两件事以前共用一个变量，是因为旧主色是浅蓝、深蓝字在两种底上都成立；
+     主色变深之后必须拆开，否则会出现"蓝底白字"和"白底白字"同时发生。 */
+  --kp-primary-deep: #2962d8;
+
+  /* 焦点环：跟着主色走，否则焦点框会比按钮本身还旧色 */
+  --kp-ring: rgba(66, 133, 244, 0.45);
 
   /* Apple 缓动 */
   --kp-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
@@ -283,7 +308,7 @@ button {
   background:
     radial-gradient(
       1100px 360px at 50% -10%,
-      rgba(91, 155, 245, 0.09),
+      rgba(77, 166, 255, 0.09),
       transparent 70%
     ),
     radial-gradient(
@@ -637,85 +662,98 @@ button {
 /* ===== 深色主题（可选）：给 <html> 加 class="dark" 即整体切换 =====
    同样只换变量值，组件一行都不用改。 */
 .dark {
-  /* 深色下主色沿用同一支蓝（同样偏蓝的 216° 色相），但**比浅色主题再提亮一档**：
-     浅色主题里的 #5B9BF5 放在黑底上只有 4.5:1，按不太动；
-     提到 #8FB4F8（明度约 72%）后落在深色主题该有的高度上。
-     hover 再提亮，active 压回中间调。 */
-  --kp-primary: #8fb4f8;
-  --kp-primary-hover: #aecaf9;
-  --kp-primary-active: #5b9bf5;
-  --kp-primary-strong: #aecaf9;
-  --kp-primary-soft: rgba(143, 180, 248, 0.18);
-  --kp-primary-ring: rgba(143, 180, 248, 0.48);
-  --kp-primary-rgb: 143 180 248;
-  /* 深色下浅蓝"反过来用"：#D3E2FD 当高亮底太刺眼，
-     改作浅色文字/描边，背景角色交给 primary-soft */
-  --kp-accent: #d3e2fd;
-  --kp-accent-rgb: 211 226 253;
+  /* 深色是这套配色的**主推形态**（长时使用的 Agent 桌面端首选）：
+     底色用 Bg-base #121722 一档的深灰蓝，**不发黑**——纯黑底在长时间阅读时
+     更压抑，这套色板的取向是"通透的冷灰"。
+     层级与浅色相反：越靠前的表面越亮 = app < bg < surface < surface-soft。
+
+     主色**不因深色而提亮**：#4285F4 在 #121722 上有 4.2:1，够图形元素用。
+     提亮主色会让它变成"发光的蓝"，正是这套配色要避免的。真正需要更亮的是
+     hover 那一档（Primary-light）。 */
+  --kp-primary: #4285f4;
+  --kp-primary-hover: #63a4ff;
+  --kp-primary-active: #2962d8;
+  --kp-primary-strong: #63a4ff;
+  --kp-primary-soft: rgba(66, 133, 244, 0.24);
+  --kp-primary-ring: rgba(66, 133, 244, 0.5);
+  --kp-primary-rgb: 66 133 244;
+  /* 渐变第二端：深色下用 Primary-light 作 accent（供浅底强调文字的反向场景） */
+  --kp-accent: #63a4ff;
+  --kp-accent-rgb: 99 164 255;
 
   /* 深色下层级反过来：越靠前的表面越亮 = app < bg < surface < surface-soft */
-  --kp-bg-app: #09090b;
-  --kp-bg: #101013;
-  --kp-surface: #17171b;
-  --kp-surface-soft: #1e1e23;
-  --kp-border: #2a2a31;
-  --kp-border-soft: #1f1f25;
+  --kp-bg-app: #0e121b; /* Bg-inset：最底一档（输入框、凹陷区） */
+  --kp-bg: #121722; /* Bg-base：内容主背景 */
+  --kp-surface: #1a2130; /* Bg-card：卡片 / 对话框 / 面板 */
+  --kp-surface-soft: #232b3b; /* Bg-hover */
+  --kp-border: #273044;
+  --kp-border-soft: #232b3b;
 
-  --kp-text: #d4d4d8;
-  --kp-text-strong: #fafafa;
-  --kp-text-secondary: #a1a1aa;
-  --kp-text-muted: #71717a;
+  /* Text-primary #E8EDF7 三档往下走。strong 用纯白：标题是页面里最该被
+     看见的东西，不该被"柔和"打折。 */
+  --kp-text: #e8edf7;
+  --kp-text-strong: #ffffff;
+  --kp-text-secondary: #a9b4c8;
+  --kp-text-muted: #76839c;
 
-  --kp-header-bg: rgba(16, 16, 19, 0.72);
+  --kp-header-bg: rgba(18, 23, 34, 0.72);
   --kp-scrollbar: rgba(255, 255, 255, 0.14);
   --kp-scrollbar-hover: rgba(255, 255, 255, 0.26);
-  --kp-grip: #3f3f46;
-  --kp-lift-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6),
-    0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --kp-grip: #313c52;
+  /* 阴影只用纯黑：深底上带色的阴影会显脏 */
+  --kp-lift-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5),
+    0 2px 6px -2px rgba(0, 0, 0, 0.35);
   --kp-hairline: rgba(255, 255, 255, 0.08);
 
-  --kp-bg-app-rgb: 9 9 11;
-  --kp-bg-rgb: 16 16 19;
-  --kp-surface-rgb: 23 23 27;
-  --kp-surface-soft-rgb: 30 30 35;
-  --kp-border-rgb: 42 42 49;
-  --kp-border-soft-rgb: 31 31 37;
-  --kp-text-rgb: 212 212 216;
-  --kp-text-strong-rgb: 250 250 250;
-  --kp-text-secondary-rgb: 161 161 170;
-  --kp-text-muted-rgb: 113 113 122;
-  /* 深色下把蓝色压成一层冷色膜，而不是换成另一个色相——
-     这样"这里还是那个蓝"的认知能跨主题保留 */
-  --kp-sidebar: rgba(143, 180, 248, 0.1);
-  --kp-sidebar-line: rgba(143, 180, 248, 0.16);
-  --kp-toolbar: rgba(16, 16, 19, 0.72);
-  --kp-toolbar-rgb: 16 16 19;
+  --kp-bg-app-rgb: 14 18 27;
+  --kp-bg-rgb: 18 23 34;
+  --kp-surface-rgb: 26 33 48;
+  --kp-surface-soft-rgb: 35 43 59;
+  --kp-border-rgb: 39 48 68;
+  --kp-border-soft-rgb: 35 43 59;
+  --kp-text-rgb: 232 237 247;
+  --kp-text-strong-rgb: 255 255 255;
+  --kp-text-secondary-rgb: 169 180 200;
+  --kp-text-muted-rgb: 118 131 156;
+  /* 侧栏是**比内容区更暗**的一档（Bg-inset），不是蓝色膜：深灰蓝上叠蓝会浑。
+     分区靠明度差 + 那条 Border 色分隔线。 */
+  --kp-sidebar: #0e121b;
+  --kp-sidebar-line: #273044;
+  /* 选中项：主色压在近黑底上要比浅色那档更实（28%），否则看不出选中。
+     底色近黑，白字前景在其上有足够对比。 */
+  --kp-sidebar-active: rgba(66, 133, 244, 0.28);
+  --kp-toolbar: rgba(18, 23, 34, 0.72);
+  --kp-toolbar-rgb: 18 23 34;
 
-  --kp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --kp-shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.5),
-    0 2px 4px -2px rgba(0, 0, 0, 0.4);
-  --kp-shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.7),
-    0 6px 14px -8px rgba(0, 0, 0, 0.5);
-  --kp-shadow-brand: 0 6px 18px -6px rgba(143, 180, 248, 0.48);
+  /* 深色下阴影要**更弱**而不是更重：深底上已经不需要"投影"来制造层次，
+     这里的 alpha 压到 0.45 顶，防止糊成一片脏。 */
+  --kp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --kp-shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.3),
+    0 2px 4px -2px rgba(0, 0, 0, 0.2);
+  --kp-shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.45),
+    0 6px 14px -8px rgba(0, 0, 0, 0.3);
+  --kp-shadow-brand: 0 6px 18px -6px rgba(66, 133, 244, 0.4);
 
-  /* 深色下渐变方向反过来：从左端提亮到右端更亮，整体落在深底可读的区间 */
-  --kp-gradient-brand: linear-gradient(135deg, #5b9bf5 0%, #9dc0f8 100%);
+  /* 深色下的渐变仍**由亮到深**：右端若用 Primary-light，白字会掉到 2.5:1。
+     所以两端与浅色主题一致（主色 → Primary-dark），白字 3.56 → 5.6。 */
+  --kp-gradient-brand: linear-gradient(135deg, #4285f4 0%, #2962d8 100%);
   --kp-gradient-brand-soft: linear-gradient(
     135deg,
-    rgba(143, 180, 248, 0.16) 0%,
-    rgba(211, 226, 253, 0.1) 100%
+    rgba(66, 133, 244, 0.2) 0%,
+    rgba(41, 98, 216, 0.12) 100%
   );
 
-  /* 深色下主色底上同样用**深色前景**：#8FB4F8 上白字只有 1.9:1，
-     深蓝字有 6.7:1 —— 两条主题的规律一致 */
-  --kp-primary-deep: #0a1f4d;
+  /* 深底上的强调文字：反过来给浅蓝。深色下若还用 Primary-dark（暗于背景），
+     凡是"淡蓝底 + 强调字"的地方会直接看不见。主色实底上的前景在深色下
+     同样是白色（text-white）。 */
+  --kp-primary-deep: #8ab4f8;
 
-  --kp-ring: rgba(143, 180, 248, 0.52);
+  --kp-ring: rgba(66, 133, 244, 0.55);
 
-  /* 深色下图表色整体提亮一档，否则柱子在黑底上糊成一片 */
-  --kp-chart-1: #8fb4f8;
-  --kp-chart-2: #d3e2fd;
-  --kp-chart-3: #5b9bf5;
+  /* 深色下图表色整体提亮一档，否则柱子在深底上糊成一片 */
+  --kp-chart-1: #63a4ff;
+  --kp-chart-2: #a9c4f5;
+  --kp-chart-3: #4285f4;
 
   /* 让浏览器原生控件（滚动条、输入框、日期面板）跟随深色 */
   color-scheme: dark;

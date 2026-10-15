@@ -1,9 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  ArrowLeft,
   ArrowUp,
-  Code2,
   FolderOpen,
   List,
   ListChecks,
@@ -29,8 +27,18 @@ import AskBox from "../components/AskBox";
  */
 const FileExplorer = lazy(() => import("../components/FileExplorer"));
 const CodeView = lazy(() => import("../components/CodeView"));
+/* 浏览器工作台同样按需加载：不开工作台的人不该为它付首屏。
+   这里只有 Electron 嵌入的那一份（WebContentsView）。曾还有个Agent 浏览器工作台
+   （Playwright 自带的独立 Chromium 窗口），**已删**：它够不到用户自己 Chrome 里的
+   页面 —— 那条链路现在由浏览器扩展接管，见 keeper「浏览器」页。 */
+const BrowserPanel = lazy(() => import("../components/BrowserPanel"));
 import AgentInfoDrawer from "../components/AgentInfoDrawer";
 import UsageDetailModal from "../components/UsageDetailModal";
+import { ModelPicker } from "../components/ModelPicker";
+import {
+  WorkbenchPicker,
+  type WorkbenchType,
+} from "../components/WorkbenchPicker";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import type { UsageSummary } from "../api/types";
@@ -144,15 +152,7 @@ type StreamRun = {
   abort: AbortController | null;
 };
 
-export default function ChatPage({
-  agentId,
-  onExit,
-}: {
-  agentId: string;
-  /* 退出对话。原来由外层顶栏的「返回」按钮提供；顶栏移除后改由本页自渲染
-     （角标式返回钮，见下方左上角），所以从 props 传进来。 */
-  onExit?: () => void;
-}) {
+export default function ChatPage({ agentId }: { agentId: string }) {
   /**
    * 消息列表**按会话索引**。
    *
@@ -186,12 +186,14 @@ export default function ChatPage({
   const runIdRef = useRef<string>("");
   /** 正在流式的那条占位消息：停止时要就地收尾（补全文案、去掉光标） */
   const placeholderRef = useRef<string>("");
-  const [sessionId, setSessionId] = useState<string | undefined>(
-    () => localStorage.getItem(sessionKey(agentId)) || undefined
-  );
+  /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
+     只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
+  const remembered = () =>
+    localStorage.getItem(sessionKey(agentId)) || undefined;
+  const [sessionId, setSessionId] = useState<string | undefined>(remembered);
   /** 会话视图选中的会话：与「任务视图」用的任务会话分开保存，避免互相顶掉 */
   const [chatSessionId, setChatSessionId] = useState<string | undefined>(
-    () => localStorage.getItem(sessionKey(agentId)) || undefined
+    remembered
   );
   const qc = useQueryClient();
   /** 可观测：当前会话的累计用量（消息列表里看单轮，这里看整会话总计） */
@@ -284,8 +286,8 @@ export default function ChatPage({
 
   // 工作模式：会话视图 / 任务视图（合并原「会话模式」「任务模式」）
   const [mode, setMode] = useState<"chat" | "task">("chat");
-  // 工作台：关 / 编码工作台（原 Coding 模式，作为可叠加的右侧区域）
-  const [workbenchType, setWorkbenchType] = useState<"off" | "coding">("off");
+  // 工作台：关 / 编码工作台（文件浏览 + 编辑器）/ Agent 浏览器 —— 三选一，可叠加在左侧
+  const [workbenchType, setWorkbenchType] = useState<WorkbenchType>("off");
   const [drawerOpen, setDrawerOpen] = useState(false);
   // 会话浮层动画：mounted 控制挂载，closing 控制播放退场动画
   const [drawerMounted, setDrawerMounted] = useState(false);
@@ -304,9 +306,16 @@ export default function ChatPage({
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   // 保存文件后自增，触发文件浏览器刷新 git 角标
   const [explorerRefresh, setExplorerRefresh] = useState(0);
-  // 编码工作台：文件浏览器宽度（内部可拖拽），及工作台整体宽度（与主区域间可拖拽）
+  // 编码工作台：文件浏览器宽度（内部可拖拽）
   const [explorerWidth, setExplorerWidth] = useState(248);
+  // 工作台宽度（与主区域间可拖拽）。三种形态共用这一份宽度：从编码切到浏览器时
+  // 右侧边界必须停在原处，否则切换动作本身会让内容区宽度变化，看着像"页面跳了"
   const [workbenchWidth, setWorkbenchWidth] = useState(560);
+  const resizeWorkbench = useCallback(
+    (dx: number) =>
+      setWorkbenchWidth((w) => Math.max(360, Math.min(1100, w + dx))),
+    []
+  );
   // Agent 配置抽屉（入口在顶栏右侧）
   const [configOpen, setConfigOpen] = useState(false);
 
@@ -1118,6 +1127,9 @@ export default function ChatPage({
       );
       // 本轮产生了新用量：刷新整会话累计
       qc.invalidateQueries({ queryKey: ["session-usage", activeSessionId] });
+      // 侧栏会话列表也要刷：**首条用户消息落库后后端会自动派生出标题**，
+      // 不刷的话列表里这条会一直显示「新对话」直到手动刷新页面。
+      qc.invalidateQueries({ queryKey: ["sessions"] });
     }
   };
 
@@ -1361,7 +1373,7 @@ export default function ChatPage({
               "rounded-[18px] border border-line-soft bg-panel px-3.5 py-2.5",
               "shadow-[0_8px_28px_-8px_rgba(0,0,0,0.16),0_2px_6px_-2px_rgba(0,0,0,0.06)]",
               "transition-all duration-200 ease-apple",
-              "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(91,155,245,0.4)]"
+              "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(66,133,244,0.4)]"
             )}
           >
             {/* 正文输入：无边无底色，融进浮块 */}
@@ -1404,11 +1416,77 @@ export default function ChatPage({
               </span>
 
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                {/* 当前 agent / 模型标识 */}
-                <span className="hidden max-w-[140px] items-center gap-1 truncate text-[11.5px] text-ink-muted sm:flex">
-                  <Sparkles className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{agentId.slice(0, 12)}</span>
-                </span>
+                {/* 工作台 / 工作空间 / 模型：三个都在回答同一个问题——这次在哪儿、
+                    用哪个模型干活，所以并排放在输入框右侧，顺序也按这个来：
+                    工作台（用哪种工作台）→ 工作空间（在哪个目录）→ 模型（用谁思考）。
+
+                    这三个原先散在两处：工作台和工作空间在**会话抽屉头部**，模型在输入
+                    框里。抽屉是"选哪个会话"的地方，把干活的控件塞进去等于让它们离真正
+                    的使用现场很远——打开抽屉才够得着，而工作空间恰恰是**每轮都可能要换**
+                    的那个。
+
+                    工作台本身也从"开关按钮"改成了下拉：右侧那块区域不止文件浏览一种
+                    用法，现在是 关 / 编码工作台 / Agent 浏览器 三选一。 */}
+                <WorkbenchPicker
+                  value={workbenchType}
+                  onChange={setWorkbenchType}
+                />
+
+                {/* 工作空间选择：会话 / 任务模式共用。
+                    宽度给死（原 flex-1 会占满整行，把模型选择挤走），
+                    并保留 truncate：空间名可能很长。
+                    **最窄的一档整体隐藏**（md 以下）：这一行右侧同时挂着工作台、
+                    模型选择和发送钮，全展开时没有 900px 就一定会挤。空间切换在
+                    窄屏下仍可从「Agent 配置」里改，功能没有丢。 */}
+                {(() => {
+                  const dflt =
+                    userSpaces.find((u) => u.name === "default")?.id ?? "";
+                  const cur = sessionId
+                    ? workspace?.user_space?.id || dflt
+                    : userSpaceId || dflt;
+                  // 显式给「默认」一项。agent 与会话都没绑定用户空间时 user_space_id
+                  // 就是空字符串，此时下拉里一个能匹配上的选项都没有，Select 只能渲染
+                  // 成空白——看着就像"配置丢了"，其实只是没有可选项。
+                  const opts = [
+                    ...usOptions,
+                    // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
+                    // 否则下拉显示空白，用户看不出当前究竟在哪个目录
+                    ...(cur && !usOptions.some((o) => o.value === cur)
+                      ? [{ value: cur, label: cur }]
+                      : []),
+                  ];
+                  return (
+                    <div className="hidden h-7 w-[150px] shrink-0 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 shadow-[0_1px_2px_rgba(0,0,0,0.04)] md:flex">
+                      <FolderOpen className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                      <select
+                        title="切换工作空间"
+                        value={cur}
+                        onChange={(e) =>
+                          sessionId
+                            ? switchWorkspace(e.target.value)
+                            : setUserSpaceId(e.target.value)
+                        }
+                        className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-[12px] font-medium text-ink-muted outline-none"
+                      >
+                        {opts.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
+
+                {/*
+                  模型选择：改的是**这个 agent 的绑定**，不是逐会话的。
+                  所以在这里换了模型，对该 agent 的所有会话都生效（核心 agent
+                  更是如此——所有会话都在它身上）。服务端改完会重装配，让改动
+                  当场生效；装配失败时这里会显示原因，而不是静默不变。
+
+                  选「未绑定」= 解绑，该 agent 进入纯索引模式（不调模型）。
+                */}
+                <ModelPicker agentId={agentId} />
 
                 {/* 高度把手：向上拖放大输入框 */}
                 <div
@@ -1481,34 +1559,22 @@ export default function ChatPage({
         抽屉打开时才出现，正好和"选哪个会话"是同一件事。
 
         代价是丢掉了「打开列表」的常驻入口（顶栏那个列表按钮），所以这里补一个
-        浮在内容区左上角的小按钮顶上：抽屉关闭时才出现，且只在 hover 内容区时
-        显形——它是个"随时可唤出"的回退入口，不该常驻抢注意力。
-        没有会话时（新会话空态）则始终显示，否则用户找不到入口。
-      */}
-      {/* 左上角悬浮控件组：返回 + 列表入口。
-          原来是外层那条 44px 顶栏里的「返回」，顶栏移除后落到这里——
-          对话页没有 h1、也没有别回去的路，这个入口不能省。
-          两者一起用同一个显隐规则，视觉上是一组"随时可唤出"的回退控件。 */}
+        浮在内容区左上角的小按钮顶上。
+
+        它**常驻显示**：会话列表整体搬进抽屉之后，这个按钮就是"回到会话列表"的
+        唯一入口了——藏到 hover 才现形，等于让用户先在内容区里扫一圈才能发现
+        它。唯一隐藏的情形是抽屉已打开：那时它压在抽屉上，显出来只会挡住内容。
+
+        这里原先还有一颗「返回」按钮，已撤掉：返回是导航动作，归宿是侧栏那两项。 */}
+      {/* 左上角悬浮控件组：现在只剩「列表入口」一颗。 */}
       <div
         className={cn(
           "absolute left-3 top-3 z-10 flex items-center gap-1.5",
           "transition-opacity duration-200 ease-apple",
-          drawerOpen && "pointer-events-none opacity-0",
-          !sessionId
-            ? "opacity-100"
-            : "opacity-0 focus-within:opacity-100 group-hover/chat:opacity-100"
+          /* 抽屉打开时让位：这时它压在抽屉上，显出来只会挡住内容 */
+          drawerOpen && "pointer-events-none opacity-0"
         )}
       >
-        {onExit && (
-          <button
-            type="button"
-            onClick={onExit}
-            title="返回"
-            className="flex h-8 w-8 items-center justify-center rounded-[9px] border border-line-soft bg-panel text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-          </button>
-        )}
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
@@ -1521,76 +1587,108 @@ export default function ChatPage({
       </div>
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* 工作台区域：编码工作台 = 文件浏览器 + 编辑器（叠加在工作模式左侧） */}
-        {workbenchType === "coding" && (
+        {/* 工作台区域：叠加在工作模式左侧。三种形态（关 / 编码 / Agent 浏览器）共用同一套
+            宽度和拖拽把手——换形态时这块区域的位置不该跟着跳一下。 */}
+        {workbenchType !== "off" && (
           <Suspense
             fallback={
-              <div className="flex w-[240px] shrink-0 items-center justify-center border-r border-line-soft text-[13px] text-ink-muted">
-                加载编辑器…
+              <div
+                className="flex shrink-0 items-center justify-center border-r border-line-soft text-[13px] text-ink-muted"
+                style={{ width: workbenchWidth }}
+              >
+                加载工作台…
               </div>
             }
           >
-            <div
-              style={{
-                width: workbenchWidth,
-                flex: "0 0 auto",
-                display: "flex",
-                minHeight: 0,
-                overflow: "hidden",
-                borderRight: "1px solid var(--kp-border-soft)",
-              }}
-            >
-              <div
-                style={{
-                  width: explorerWidth,
-                  borderRight: "1px solid var(--kp-border-soft)",
-                  display: "flex",
-                  flexDirection: "column",
-                  minHeight: 0,
-                  flex: "0 0 auto",
-                }}
-              >
-                <FileExplorer
-                  agentId={agentId}
-                  sessionId={sessionId}
-                  onOpenFile={setActiveFilePath}
-                  onDeleted={(p) => {
-                    if (p === activeFilePath) setActiveFilePath(null);
+            {workbenchType === "coding" ? (
+              <>
+                <div
+                  style={{
+                    width: workbenchWidth,
+                    flex: "0 0 auto",
+                    display: "flex",
+                    minHeight: 0,
+                    overflow: "hidden",
+                    borderRight: "1px solid var(--kp-border-soft)",
                   }}
-                  onRenamed={(oldPath, newPath) => {
-                    if (oldPath === activeFilePath) setActiveFilePath(newPath);
+                >
+                  <div
+                    style={{
+                      width: explorerWidth,
+                      borderRight: "1px solid var(--kp-border-soft)",
+                      display: "flex",
+                      flexDirection: "column",
+                      minHeight: 0,
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    <FileExplorer
+                      agentId={agentId}
+                      sessionId={sessionId}
+                      onOpenFile={setActiveFilePath}
+                      onDeleted={(p) => {
+                        if (p === activeFilePath) setActiveFilePath(null);
+                      }}
+                      onRenamed={(oldPath, newPath) => {
+                        if (oldPath === activeFilePath) setActiveFilePath(newPath);
+                      }}
+                      refreshSignal={explorerRefresh}
+                      rootName={workspace?.user_space?.name}
+                    />
+                  </div>
+                  <Resizer
+                    onResize={(dx) =>
+                      setExplorerWidth((w) =>
+                        Math.max(160, Math.min(520, w + dx))
+                      )
+                    }
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      minHeight: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                    }}
+                  >
+                    <CodeView
+                      agentId={agentId}
+                      sessionId={sessionId}
+                      path={activeFilePath}
+                      readOnly={workspace?.read_only ?? true}
+                      onSaved={() => setExplorerRefresh((n) => n + 1)}
+                    />
+                  </div>
+                </div>
+                <Resizer onResize={resizeWorkbench} />
+              </>
+            ) : (
+              /* 浏览器工作台（Electron 嵌入的那一份 WebContentsView）：结构比编码工作台
+                 简单得多（没有内部分栏），但外框的宽度、边框、把手三处必须一致，
+                 否则形态互切时右侧边界会来回跳。 */
+              /* 浏览器工作台（用户可见那一份）：结构比编码工作台简单得多（没有内部分栏），
+                 但外框的宽度、边框、把手三处必须一致，否则形态互切时右侧边界会来回跳。 */
+              <>
+                <div
+                  style={{
+                    width: workbenchWidth,
+                    flex: "0 0 auto",
+                    display: "flex",
+                    minHeight: 0,
+                    overflow: "hidden",
+                    borderRight: "1px solid var(--kp-border-soft)",
                   }}
-                  refreshSignal={explorerRefresh}
-                  rootName={workspace?.user_space?.name}
-                />
-              </div>
-              <Resizer
-                onResize={(dx) =>
-                  setExplorerWidth((w) => Math.max(160, Math.min(520, w + dx)))
-                }
-              />
-              <div
-                style={{
-                  flex: 1,
-                  minHeight: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                }}
-              >
-                <CodeView
-                  agentId={agentId}
-                  sessionId={sessionId}
-                  path={activeFilePath}
-                  readOnly={workspace?.read_only ?? true}
-                  onSaved={() => setExplorerRefresh((n) => n + 1)}
-                />
-              </div>
-            </div>
-            <Resizer
-              onResize={(dx) =>
-                setWorkbenchWidth((w) => Math.max(360, Math.min(1100, w + dx)))
-              }
-            />
+                >
+                  {/* 抽屉打开时把原生浏览器视图藏起来：WebContentsView 不在 DOM 里，
+                      z-index 对它无效，不显式藏会被整个压在抽屉下面 */}
+                  <BrowserPanel
+                    className="min-w-0 flex-1"
+                    overlayOpen={drawerOpen || configOpen}
+                  />
+                </div>
+                <Resizer onResize={resizeWorkbench} />
+              </>
+            )}
           </Suspense>
         )}
 
@@ -1672,11 +1770,10 @@ export default function ChatPage({
             }}
           >
             {/*
-              抽屉头部承接了原顶栏的全部控件：
-                第一行「会话 / 任务」切换 + 关闭；
-                第二行「工作台」「工作空间」「配置」。
-              它们和"选哪个会话"本来就是同一件事，放在这里比悬在内容区上方
-              更合理；内容区则不再被一条工具带切掉一行高度。
+              抽屉头部承接了原顶栏的控件：
+                第一行「会话 / 任务」切换 + 关闭；第二行只剩「Agent 配置」。
+              「选哪个会话」和「配置 agent」放在这里合理；而「工作台」「工作空间」
+              已经搬到输入框右侧，和模型选择并排（见那里的说明）。
             */}
             <div className="shrink-0 border-b border-line-soft px-3 pb-2.5 pt-2.5">
               <div className="flex items-center gap-2">
@@ -1701,69 +1798,12 @@ export default function ChatPage({
                 </button>
               </div>
 
-              <div className="mt-2.5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setWorkbenchType(workbenchType === "off" ? "coding" : "off")
-                  }
-                  title={
-                    workbenchType === "coding"
-                      ? "关闭编码工作台"
-                      : "打开编码工作台"
-                  }
-                  className={cn(
-                    "flex h-7 items-center gap-1.5 rounded-[7px] px-2 text-[12px] font-medium transition-colors",
-                    workbenchType === "coding"
-                      ? "bg-brand/12 text-brand"
-                      : "text-ink-muted hover:bg-surface hover:text-ink"
-                  )}
-                >
-                  <Code2 className="h-3.5 w-3.5" />
-                  工作台
-                </button>
-
-                {/* 工作空间选择：会话 / 任务模式共用 */}
-                {(() => {
-                  const dflt =
-                    userSpaces.find((u) => u.name === "default")?.id ?? "";
-                  const cur = sessionId
-                    ? workspace?.user_space?.id || dflt
-                    : userSpaceId || dflt;
-                  // 显式给「默认」一项。agent 与会话都没绑定用户空间时 user_space_id
-                  // 就是空字符串，此时下拉里一个能匹配上的选项都没有，Select 只能渲染
-                  // 成空白——看着就像"配置丢了"，其实只是没有可选项。
-                  const opts = [
-                    ...usOptions,
-                    // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
-                    // 否则下拉显示空白，用户看不出当前究竟在哪个目录
-                    ...(cur && !usOptions.some((o) => o.value === cur)
-                      ? [{ value: cur, label: cur }]
-                      : []),
-                  ];
-                  return (
-                    <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                      <FolderOpen className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
-                      <select
-                        title="切换工作空间"
-                        value={cur}
-                        onChange={(e) =>
-                          sessionId
-                            ? switchWorkspace(e.target.value)
-                            : setUserSpaceId(e.target.value)
-                        }
-                        className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-[12px] font-medium text-ink-muted outline-none"
-                      >
-                        {opts.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  );
-                })()}
-
+              {/* 第二行现在只剩「Agent 配置」。
+                  原先这行是「工作台」「工作空间」「配置」三个 —— 前两个已搬到
+                  输入框右侧（与模型选择并排），因为它们决定"在哪儿干活"，是**每轮
+                  都可能改**的东西，不该藏在"选会话"的抽屉里翻。抽屉只保留"选会话"
+                  这件事本身。 */}
+              <div className="mt-2.5 flex items-center justify-end">
                 <button
                   type="button"
                   onClick={() => setConfigOpen(true)}

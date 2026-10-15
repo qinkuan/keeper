@@ -18,9 +18,13 @@ export default {
            这类透明度修饰符才可用。 */
         app: "rgb(var(--kp-bg-app-rgb) / <alpha-value>)",
         panel: "rgb(var(--kp-bg-rgb) / <alpha-value>)",
-        /* 菜单栏是半透明的浅蓝（要透出应用底色），所以走 rgba 变量，
-           不能再用 channel 形式——<alpha-value> 会把已有的透明度覆盖掉 */
+        /* 菜单栏底色（macOS App Store 的冷灰 #F2F2F7 系）。
+           它是不透明色，但刻意不走 channel 形式：底色将来若要改成半透明玻璃，
+           channel 的 <alpha-value> 会把变量里已有的透明度覆盖掉。 */
         sidebar: "var(--kp-sidebar)",
+        /* 侧栏选中项：淡蓝（accent 低透明度压在底色上的结果），
+           见 theme.css --kp-sidebar-active 的说明 */
+        "sidebar-active": "var(--kp-sidebar-active)",
         /* 顶栏走 rgba（玻璃材质要透），不能用 channel 形式 */
         toolbar: "var(--kp-toolbar)",
         surface: {
@@ -42,11 +46,16 @@ export default {
           hover: "var(--kp-primary-hover)",
           active: "var(--kp-primary-active)",
           soft: "var(--kp-primary-soft)",
+          /* 「重点蓝」：浅底上比主色更深（11px 小字压得住主色的 3.2:1），
+             深底上比主色更亮（否则会暗于背景直接消失）。两套主题各自取值，
+             但**都叫 deep/strong**——调用方不需要知道主题。 */
+          strong: "var(--kp-primary-strong)",
           /* 品牌渐变第二端 */
           accent: "rgb(var(--kp-accent-rgb) / <alpha-value>)",
-          /* 主色底上的**深色文字/图标**。主色明度约 60%，白字压上去只有
-             3.8:1，深蓝字反而有 4.3:1 —— 所以大片主色作底的地方
-             （菜单项 hover、选中标签）统一用它当前景色。 */
+          /* 浅底上的强调文字/图标。与 strong 同值，保留这个名字是因为组件里
+             大量沿用（11px 标签、侧栏折叠按钮等）。
+             **注意别拿它当主色实底上的前景**：主色 #4285F4 上白字 3.56:1，
+             深蓝字只有 1.57:1 —— 实底一律用 text-white。 */
           deep: "var(--kp-primary-deep)",
         },
       },

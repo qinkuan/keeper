@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Search, X } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  Loader2,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { cn } from "../lib/utils";
-import { apiSessions, apiListTasks, apiCreateTask } from "../api/client";
+import {
+  apiDeleteSession,
+  apiRenameSession,
+  apiSessions,
+  apiListTasks,
+  apiCreateTask,
+} from "../api/client";
 import type { SessionItem } from "../api/types";
 import { Modal } from "./ui/Modal";
 import { toast } from "./ui/Toast";
@@ -142,7 +156,7 @@ export default function SessionList({
 
       {/* 搜索 */}
       <div className="px-2 pb-2">
-        <div className="flex h-[28px] items-center gap-1.5 rounded-[7px] border border-line bg-panel px-2.5 shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-all focus-within:border-brand focus-within:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]">
+        <div className="flex h-[28px] items-center gap-1.5 rounded-[7px] border border-line bg-panel px-2.5 shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-all focus-within:border-brand focus-within:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]">
           <Search className="h-3 w-3 shrink-0 text-ink-faint" />
           <input
             value={kw}
@@ -186,52 +200,23 @@ export default function SessionList({
         )}
 
         {!loading &&
-          shown.map((s) => {
-            const status = taskMode ? taskStatusMap[s.id] : undefined;
-            const active = s.id === activeId;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => onSelect(s.id)}
-                className={cn(
-                  "mb-0.5 block w-full rounded-[7px] px-2.5 py-[7px] text-left transition-colors duration-150",
-                  // 选中态用品牌淡底而不是灰底：抽屉里灰底与白底只差一档，
-                  // 扫列表时很难一眼看出当前在哪一条
-                  active
-                    ? "bg-brand/10 text-brand"
-                    : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      "min-w-0 flex-1 truncate text-[12.5px]",
-                      active ? "font-medium" : "text-ink"
-                    )}
-                  >
-                    {s.title || (taskMode ? "未命名任务" : "新对话")}
-                  </span>
-                  {status && (
-                    <span
-                      className={cn(
-                        "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] leading-4",
-                        TASK_STATUS_CLASS[status] ??
-                          "bg-black/[0.06] text-ink-muted"
-                      )}
-                    >
-                      {TASK_STATUS_LABEL[status] || status}
-                    </span>
-                  )}
-                </div>
-                {/* 时间戳与标题**同行右对齐**（截图里是「12分钟前」贴在右侧）：
-                    两行会占掉一倍高度，而时间只是参考信息 */}
-                <div className="mt-px text-[10.5px] text-ink-faint">
-                  {fmt(s.updated_at)}
-                </div>
-              </button>
-            );
-          })}
+          shown.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              agentId={agentId}
+              active={s.id === activeId}
+              taskMode={taskMode}
+              status={taskMode ? taskStatusMap[s.id] : undefined}
+              onSelect={onSelect}
+              /* 删掉的正是当前会话时不能停在一条已不存在的会话上——
+                 这里复用「新建」，把视图挪到一个干净的新会话。 */
+              onDeleted={() => {
+                if (s.id === activeId) onNew();
+              }}
+              onChanged={load}
+            />
+          ))}
       </div>
 
       <Modal
@@ -270,7 +255,7 @@ export default function SessionList({
                 if (e.key === "Enter") doCreate();
               }}
               placeholder="给任务起个名字"
-              className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
+              className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]"
             />
           </div>
           <div>
@@ -280,11 +265,190 @@ export default function SessionList({
               value={createDesc}
               onChange={(e) => setCreateDesc(e.target.value)}
               placeholder="想让 agent 完成什么，越具体越好"
-              className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(91,155,245,0.48)]"
+              className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]"
             />
           </div>
         </div>
       </Modal>
     </div>
   );
+}
+
+/**
+ * 一行会话 / 任务：标题 + 状态 + 时间，hover 时露出**重命名 / 删除**。
+ *
+ * 这两个操作原先只在侧栏的会话轨里，而那里已经搬走了。会话的新建、查询本来就
+ * 在这个面板（也就是"会话管理 / 任务管理"），把改和删补齐之后，增删改查四件事
+ * 才真正聚在**一处**——否则用户管一个会话要跨两个地方找动作。
+ *
+ * 拆成独立组件：它自己要管两份局部状态（是否在改名、输入框内容），塞进
+ * SessionList 会让那个组件同时管「列表与筛选」和「某一项的编辑」两件事。
+ */
+function SessionRow({
+  session,
+  agentId,
+  active,
+  taskMode,
+  status,
+  onSelect,
+  onDeleted,
+  onChanged,
+}: {
+  session: SessionItem;
+  agentId: string;
+  active: boolean;
+  taskMode: boolean;
+  status?: string;
+  onSelect: (sessionId: string) => void;
+  /** 删掉的是当前会话时调用：让上层离开这条已不存在的会话 */
+  onDeleted: () => void;
+  onChanged: () => Promise<void> | void;
+}) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(session.title ?? "");
+
+  const renameM = useMutation({
+    mutationFn: (title: string) => apiRenameSession(agentId, session.id, title),
+    onSuccess: async () => {
+      setEditing(false);
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      // 本面板是自管数据的（load() 拉列表），react-query 的失效不会自动刷新它
+      await onChanged();
+      toast.success("已重命名");
+    },
+    onError: (e: Error) => toast.error("重命名失败：" + e.message),
+  });
+
+  const delM = useMutation({
+    mutationFn: () => apiDeleteSession(agentId, session.id),
+    onSuccess: async () => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      if (active) onDeleted();
+      await onChanged();
+      toast.success("已删除，可在「回收站」恢复");
+    },
+    onError: (e: Error) => toast.error("删除失败：" + e.message),
+  });
+
+  if (editing) {
+    return (
+      <form
+        className="mb-0.5 flex items-center gap-1 rounded-[7px] bg-brand/10 px-2 py-[6px]"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const t = draft.trim();
+          // 允许清空标题：回落到后端给的默认名，而不是拦下这次提交
+          if (t) renameM.mutate(t);
+          else setEditing(false);
+        }}
+      >
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setEditing(false);
+          }}
+          className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-ink-faint"
+          placeholder={taskMode ? "任务标题" : "会话标题"}
+        />
+        <button
+          type="submit"
+          disabled={renameM.isPending}
+          className="shrink-0 text-[11.5px] font-medium text-brand disabled:opacity-50"
+        >
+          {renameM.isPending ? "…" : "存"}
+        </button>
+      </form>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "group mb-0.5 flex w-full items-center rounded-[7px] transition-colors duration-150",
+        // 选中态用品牌淡底而不是灰底：抽屉里灰底与白底只差一档，
+        // 扫列表时很难一眼看出当前在哪一条
+        active
+          ? "bg-brand/10"
+          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(session.id)}
+        className="min-w-0 flex-1 px-2.5 py-[7px] text-left"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-[12.5px]",
+              active ? "font-medium text-brand" : "text-ink"
+            )}
+          >
+            {session.title || (taskMode ? "未命名任务" : "新对话")}
+          </span>
+          {status && (
+            <span
+              className={cn(
+                "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] leading-4",
+                TASK_STATUS_CLASS[status] ?? "bg-black/[0.06] text-ink-muted"
+              )}
+            >
+              {TASK_STATUS_LABEL[status] || status}
+            </span>
+          )}
+        </div>
+        {/* 时间戳与标题**分行**：两行会占掉一倍高度，所以这里压成一行 */}
+        <div className="mt-px text-[10.5px] text-ink-faint">
+          {fmtTime(session.updated_at)}
+        </div>
+      </button>
+
+      {/* hover 才显形：常驻会把标题挤没 */}
+      <span className="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100">
+        <button
+          type="button"
+          title="重命名"
+          onClick={() => {
+            setDraft(session.title ?? "");
+            setEditing(true);
+          }}
+          className="flex h-6 w-6 items-center justify-center rounded-[6px] text-ink-faint transition-colors hover:bg-black/[0.06] hover:text-ink dark:hover:bg-white/10"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+        <button
+          type="button"
+          title="删除"
+          disabled={delM.isPending}
+          onClick={() => {
+            const name = session.title || (taskMode ? "未命名任务" : "新对话");
+            if (
+              confirm(
+                `删除${taskMode ? "任务" : "会话"}「${name}」？删除后它会从列表里消失，可在「回收站」恢复。`
+              )
+            )
+              delM.mutate();
+          }}
+          className="flex h-6 w-6 items-center justify-center rounded-[6px] text-ink-faint transition-colors hover:bg-red-500/12 hover:text-red-600 disabled:opacity-50 dark:hover:bg-red-500/20 dark:hover:text-red-300"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/** 短时间戳：抽屉宽度有限，秒没用还占地方。 */
+function fmtTime(iso?: string | null): string {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }

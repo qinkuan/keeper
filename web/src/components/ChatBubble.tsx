@@ -147,7 +147,7 @@ function ChatBubble({
       {/* 助手头像（左）：圆形品牌渐变 + 同色投影 + 顶部内高光。
           内高光那一条是"看起来像玻璃/珐琅"的最小成本做法，纯色圆点会显得很平。 */}
       {!isUser && (
-        <div className="mt-[3px] flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white shadow-[0_2px_6px_-1px_rgba(91,155,245,0.5),inset_0_1px_0_rgba(255,255,255,0.3)]">
+        <div className="mt-[3px] flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white shadow-[0_2px_6px_-1px_rgba(66,133,244,0.5),inset_0_1px_0_rgba(255,255,255,0.3)]">
           <Bot className="h-[14px] w-[14px]" strokeWidth={2.2} />
         </div>
       )}
@@ -191,7 +191,7 @@ function ChatBubble({
           // 用户气泡：品牌色的极淡渐变底 + 无边框。比纯色底多一层"从左上到右下"
           // 的明度变化，斜着的方向和产品统一的气晕光一致，界面就不散。
           isUser &&
-            "rounded-[14px] rounded-br-[5px] bg-brand-gradient-soft px-3.5 py-2.5 shadow-[inset_0_0_0_1px_rgba(91,155,245,0.48)]"
+            "rounded-[14px] rounded-br-[5px] bg-brand-gradient-soft px-3.5 py-2.5 shadow-[inset_0_0_0_1px_rgba(66,133,244,0.48)]"
         )}
       >
         {msg.streaming && !msg.text ? (

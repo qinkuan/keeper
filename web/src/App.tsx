@@ -2,12 +2,13 @@ import { useState } from "react";
 import {
   Activity,
   Bot,
+  ChevronRight,
   Database,
+  Globe,
+  MessageSquare,
   PanelLeft,
-  Plus,
-  Puzzle,
   Settings,
-  ShoppingBag,
+  Trash2,
   Users,
 } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -16,49 +17,65 @@ import {
   SettingsDialog,
   type SettingsSection,
 } from "./components/SettingsDialog";
-
 /* Radix 的 dropdown-menu 拆成很多子组件，这里给最常用的几个起短名，
    免得下面每处都写一长串前缀 */
 const {
   Trigger: DropdownMenuTrigger,
   Content: DropdownMenuContent,
   Item: DropdownMenuItem,
+  Sub: DropdownMenuSub,
+  SubTrigger: DropdownMenuSubTrigger,
+  SubContent: DropdownMenuSubContent,
+  Separator: DropdownMenuSeparator,
 } = DropdownMenu;
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "./lib/utils";
 import ChatPage from "./pages/ChatPage";
-import AgentList from "./pages/AgentList";
+import AgentsHubPage, { isAgentTab, type AgentTab } from "./pages/AgentsHubPage";
 import AgentCreatePage from "./pages/AgentCreatePage";
-import AgentMarketPage from "./pages/AgentMarketPage";
-import PluginPage from "./pages/PluginPage";
 import UserSpacePage from "./pages/UserSpacePage";
 import ObservabilityPage from "./pages/ObservabilityPage";
 import ModelManage from "./pages/ModelManage";
+import RecycleBinPage from "./pages/RecycleBinPage";
+import BrowserConnectPage from "./pages/BrowserConnectPage";
 import { apiHealth, apiListAgents } from "./api/client";
 import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
 import { Stat } from "./components/ui/Stat";
 
 /**
- * 侧栏导航。
+ * 侧栏常驻导航。三项，都是"去干活"而不是"去配置"：
  *
- * 按截图的做法分成两组：主功能在上，低频的「管理」类在下（用一条分组标题
- * 隔开）。分组标题是 11px 的次级色文字，不是分隔线——桌面应用里分组靠
- * 字重和颜色区分，靠线条会显得很碎。
+ * - **对话**：点一下开一段新对话并进去。它是侧栏里的**主动作**，但形式上和
+ *   「智能体」一样是导航项 —— 因为两者回答的是同一个问题："我要干什么"，
+ *   而不是一个是动作、一个是页面。点击时会先建好会话（见 startChat）。
+ * - **智能体**：装下「我的智能体 / 我的插件 / 智能体市场」三个 tab。
+ * - **浏览器**：把 keeper 的扩展接进用户的 Chrome，显示连接码、安装步骤与接入状态。
+ *   它是"我现在在哪、怎么让它认出我"的入口，放侧栏而不是设置里，因为它往往是
+ *   用户**第一次**来就要找的地方（"浏览器那边连不上"）。
+ *
+ * 会话记录本身（增删改查）搬进了对话页的「会话管理 / 任务管理」面板：那是会话
+ * 真正待着的地方，把它们拆在两个界面只会让人找不到重命名和删除。
+ *
+ * 低频配置（设置 / 可观测 / 回收站 / 模型管理 / 用户空间）收在底部 Keeper 菜单。
  */
 const NAV_MAIN = [
+  { key: "chat", label: "对话", icon: MessageSquare },
   { key: "agents", label: "智能体", icon: Bot },
-  { key: "agent-market", label: "智能体市场", icon: ShoppingBag },
-  { key: "plugins", label: "插件", icon: Puzzle },
+  { key: "browser", label: "浏览器", icon: Globe },
 ] as const;
 
-const NAV_ADMIN = [
-  { key: "models", label: "模型管理", icon: Database },
-  { key: "user-spaces", label: "用户空间", icon: Users },
-  { key: "observability", label: "可观测", icon: Activity },
-] as const;
-
-type Route = { page: string; agentId?: string };
+type Route = {
+  page: string;
+  agentId?: string;
+  /**
+   * 「智能体」页当前停在哪个 tab（我的智能体 / 我的插件 / 智能体市场）。
+   *
+   * 放路由里而不是组件内部 state：点侧栏「智能体」要能回到第一个 tab（而不是
+   * 记住上次那个），从「创建 Agent」返回也要能精确落回「我的智能体」。缺省即第一个。
+   */
+  agentTab?: AgentTab;
+};
 
 export default function App() {
   const [collapsed, setCollapsed] = useState<boolean>(
@@ -77,25 +94,41 @@ export default function App() {
     return agentId ? { page: "chat", agentId } : { page: "agents" };
   });
 
-  /* 退出对话回到「智能体」页（原先是「概览」，那一页已撤下）。 */
-  const exitChat = () => setRoute({ page: "agents" });
-
   /* 设置弹窗当前展示哪一段；null = 未打开。设置从侧栏底部齿轮进入，
      选一段开一个弹窗，用完即走（低频操作不该占一个常驻导航位）。 */
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(
     null
   );
 
-  /* 核心 agent = 新建会话的默认落点，由后端从设置里解析（未配则取第一个已装载的）。
-     与概览页共用 ["agents"] 缓存，不会多打一次请求。 */
+  /* 核心 agent = 新建会话的默认落点。它的 id 由后端从配置里解析
+   （config.yaml 的 core_agent.id，默认 "core"），所以一定有值——除非
+   一个 agent 都没装配成功。共用 ["agents"] 缓存，不会多打一次请求。 */
   const agentsQ = useQuery({ queryKey: ["agents"], queryFn: apiListAgents });
   const coreAgentId = agentsQ.data?.core_agent_id ?? null;
-  /* 开始对话：直接进核心 agent 的会话。没有核心 agent（一个都没装载）时退到
-     「智能体」页——那时用户唯一能做的就是先去装载一个。 */
-  const startChat = () => {
-    if (coreAgentId) setRoute({ page: "chat", agentId: coreAgentId });
-    else setRoute({ page: "agents" });
+
+  /* 「对话」：**直接进对话页**，不预建会话。
+
+     原先这里会先 POST 一条空会话再进去，理由是"空页面刷新就没了"。但那条会话
+     是**建在点击的那一刻**的：用户点「对话」往往只是想回到刚才那段对话，结果
+     每次都被丢进一条新的空白会话，历史会话反而要靠左上角的列表入口去找。
+
+     现在不预建 —— 对话页自己会用 localStorage 恢复上次看的那条会话（见
+     ChatPage 的 remembered()），没有可用会话时就是欢迎语空态，用户在那边点
+     「新对话」或直接发第一条消息即可（后端在第一条消息时才真正建会话）。
+     想显式开新对话，走对话页里的「新对话」按钮，那才是语义正确的位置。 */
+  const openChat = () => {
+    if (!coreAgentId) {
+      // 一个 agent 都没有：用户唯一能做的就是先去装载一个
+      setRoute({ page: "agents" });
+      return;
+    }
+    setRoute({ page: "chat", agentId: coreAgentId });
   };
+
+  /* 「智能体」页的 tab：路由里可能缺省（点侧栏进来）或带着旧值，统一规范化成一个
+     合法 key。非法值（手改 URL、旧版本残留的路由状态）落到第一个 tab，而不是让
+     Tabs 一个都不选中。 */
+  const agentTab: AgentTab = isAgentTab(route.agentTab) ? route.agentTab : "mine";
 
   const healthQ = useQuery({
     queryKey: ["health"],
@@ -108,18 +141,31 @@ export default function App() {
   /** 侧栏导航条目 */
   const NavItem = ({
     item,
-    badge,
+    onClick,
+    disabled,
   }: {
     item: { key: string; label: string; icon: typeof Bot };
-    badge?: string;
+    /** 覆盖默认的「跳到该页」。「对话」用它做"新建一段并进去" */
+    onClick?: () => void;
+    /** 没有已装载的 agent 时为 true：用户唯一能做的就是先去装载一个 */
+    disabled?: boolean;
   }) => {
     const Icon = item.icon;
-    const active = !inChat && route.page === item.key;
+    // 在对话页时，「对话」这一项仍然算选中：它就是用户此刻所在的地方，
+    // 而不是一个"已经离开"的页面。
+    const active = inChat ? item.key === "chat" : route.page === item.key;
     return (
       <button
         type="button"
-        title={collapsed ? item.label : undefined}
-        onClick={() => setRoute({ page: item.key })}
+        title={
+          disabled
+            ? "还没有已装载的智能体，先到「智能体」页装载一个"
+            : collapsed
+              ? item.label
+              : undefined
+        }
+        disabled={disabled}
+        onClick={disabled ? undefined : (onClick ?? (() => setRoute({ page: item.key })))}
         aria-current={active ? "page" : undefined}
         className={cn(
           /* 三种状态，三种"材质"：
@@ -131,11 +177,16 @@ export default function App() {
           "group relative mb-0.5 flex items-center gap-2.5 rounded-[8px] py-[6px] px-2.5 text-[14px]",
           "transition-colors duration-150 ease-apple",
           collapsed ? "w-[34px] justify-center px-0" : "w-full",
-          active ? "bg-panel font-medium text-ink-strong" : "text-ink-muted",
+          disabled && "cursor-not-allowed opacity-45",
+          /* 选中态是**淡蓝底**而不是白块：侧栏底色是 App Store 的冷灰（#F2F2F7），
+             白块会和底色糊在一起，"当前在哪"就看不清了。 */
+          active
+            ? "bg-sidebar-active font-medium text-ink-strong"
+            : "text-ink-muted",
           /* hover 用主色的**深色文字**而不是白字：#3B7BF6 上白字只有
              3.8:1，而深蓝字在同一底色上有 4.3:1 —— 后者读起来更稳。
              这也让"浅蓝底 + 深蓝字"的观感贯穿侧栏的常态与 hover。 */
-          !active && "hover:bg-brand hover:text-brand-deep"
+          !active && "hover:bg-brand hover:text-white"
         )}
       >
         {/* 图标跟着文字一起走：常态最淡、hover 深蓝、选中上品牌色。 */}
@@ -148,25 +199,54 @@ export default function App() {
           )}
         />
         {!collapsed && (
-          <>
-            <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
-            {badge && (
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-1.5 py-px text-[10.5px] font-medium tabular-nums transition-colors duration-150",
-                  active
-                    ? "bg-black/[0.06] text-ink-muted dark:bg-white/10"
-                    : "bg-black/[0.06] text-ink-muted group-hover:bg-brand-deep/15 group-hover:text-brand-deep dark:bg-white/10"
-                )}
-              >
-                {badge}
-              </span>
-            )}
-          </>
+          <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
         )}
       </button>
     );
   };
+
+  /**
+   * 底部 Keeper 菜单里"点了就跳页面"的项。
+   *
+   * 与设置子菜单里的项不同：这些有**确定的目标路由**，所以要能显示"当前正在这一页"，
+   * 否则用户点了菜单却看不出自己在哪（尤其菜单会自动关闭）。高亮用淡蓝底而不是
+   * 主色实底——菜单是浮层，实底会和菜单自身抢注意力。
+   */
+  const MenuLink = ({
+    icon: Icon,
+    label,
+    active,
+    onSelect,
+  }: {
+    icon: typeof Bot;
+    label: string;
+    active?: boolean;
+    onSelect: () => void;
+  }) => (
+    <DropdownMenuItem
+      onSelect={onSelect}
+      className={cn(
+        "flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100",
+        active ? "bg-brand/12" : "data-[highlighted]:bg-brand/12"
+      )}
+    >
+      <Icon
+        className={cn(
+          "h-[15px] w-[15px] shrink-0",
+          active ? "text-brand" : "text-ink-faint"
+        )}
+      />
+      <span
+        className={cn(
+          "flex-1 font-medium",
+          active ? "text-brand-deep dark:text-brand-strong" : "text-ink-strong"
+        )}
+      >
+        {label}
+      </span>
+      {active && <span className="text-[10.5px] text-brand-deep dark:text-brand-strong">当前</span>}
+    </DropdownMenuItem>
+  );
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-panel text-ink">
@@ -191,165 +271,174 @@ export default function App() {
         )}
         style={{ borderRight: "1px solid var(--kp-sidebar-line)" }}
       >
-        {/* 1. 产品名 + 在线状态 + 折叠按钮
+        {/* 1. **开始对话**
 
-            logo 用品牌渐变 + 一道内高光（inset 白色半透明细线），这是让一个
-            纯色方块看起来"有厚度"的最小成本做法。
+            这里原来有一块"产品名 + Keeper 字样 + 在线状态 + 折叠按钮"。它已整块
+            移到底部（见第 3 块）：顶部不再有任何块 —— 侧栏现在只有两个导航项。
 
-            折叠按钮放在这里（右上角、纯图标）而不是底部：它是**视图状态**，
-            不是导航项——放底部会让人误以为那里还有一个可去的页面。放在标题栏
-            右上角，位置固定、也符合桌面应用的习惯（工具栏收拢按钮）。 */}
-        <div
-          className={cn(
-            "flex shrink-0 items-center gap-2.5 pt-3.5",
-            /* 左内边距与外层导航区的 px-2.5 对齐，logo、齿轮、药丸三者
-               的左边缘才能落在同一条竖线上 */
-            collapsed ? "justify-center px-0 pb-3" : "pl-2.5 pr-2 pb-3"
+            这里原先有两块：「开始对话」按钮 + 下面的会话轨（SessionRail）。
+            两块都已撤掉，理由不同：
+            - 会话轨（列出会话 + 重命名 / 删除）搬进了**对话页**的「会话管理 /
+              任务管理」面板。增删改查聚在一处，用户不必在两个界面之间来回找动作；
+            - 「开始对话」变成下面 nav 里的**「对话」导航项**——它是侧栏里的主动作，
+              但形式上和「智能体」一样是导航项（两者回答同一个问题："我要干什么"），
+              不该一个用按钮形态、一个用菜单项形态。点击时仍然先建会话再进去。*/}
+        <nav className="shrink-0 px-2.5 pt-3.5">
+          {NAV_MAIN.map((item) =>
+            item.key === "chat" ? (
+              <NavItem
+                key={item.key}
+                item={item}
+                onClick={openChat}
+                /* 没有已装载的 agent 时禁用：用户唯一能做的就是先去装载一个。 */
+                disabled={!coreAgentId}
+              />
+            ) : (
+              <NavItem key={item.key} item={item} />
+            )
           )}
-        >
-          <button
-            type="button"
-            onClick={toggleCollapsed}
-            title={collapsed ? "展开菜单" : "收起菜单"}
-            className={cn(
-              "flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[7px] transition-colors duration-150",
-              collapsed
-                ? "text-brand-deep hover:bg-white/70 dark:text-brand dark:hover:bg-white/[0.12]"
-                : "text-brand-deep hover:bg-white/60 dark:text-brand dark:hover:bg-white/[0.12]"
-            )}
-          >
-            <PanelLeft className="h-[15px] w-[15px]" />
-          </button>
-          <div className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] bg-brand-gradient text-[12px] font-semibold text-white shadow-[0_2px_6px_-1px_rgba(91,155,245,0.5),inset_0_1px_0_rgba(255,255,255,0.28)]">
-            K
-          </div>
-          {!collapsed && (
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-semibold leading-tight tracking-[-0.01em] text-ink-strong">
-                Keeper
-              </div>
-              <div className="mt-[1px] flex items-center gap-1.5 text-[10.5px] leading-tight text-ink-faint">
-                <span
-                  className={cn(
-                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                    online ? "bg-emerald-500" : "bg-red-500"
-                  )}
-                />
-                {online ? "服务正常" : "服务离线"}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* 2. **开始对话**：会话是一等公民，所以它排在所有管理入口之前。
-
-            原来这里放的是「搜索」框，点进去跳「智能体」页——那是 agent-first
-            的残留：用户想聊天却先被丢到一份配置清单里。现在直接落核心 agent，
-            一次点击就进对话；找不到智能体的时候才退回去让用户挑。
-            「概览」页也随之撤下（它的全部职能就是"挑一个 agent 来聊"，
-            正是这一步要消灭的决策成本）。 */}
-        <div className="px-2.5 pb-2">
-          <button
-            type="button"
-            onClick={startChat}
-            disabled={!coreAgentId}
-            title={
-              coreAgentId
-                ? "开始对话"
-                : "还没有已装载的智能体，先到「智能体」页装载一个"
-            }
-            className={cn(
-              "flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-[7px] text-[14px] font-medium transition-colors duration-150 ease-apple",
-              coreAgentId
-                ? "bg-white/70 text-ink-strong shadow-card hover:bg-white dark:bg-white/[0.12] dark:text-ink-strong dark:hover:bg-white/[0.16]"
-                : "cursor-not-allowed text-ink-faint"
-            )}
-          >
-            <Plus
-              className={cn(
-                "h-4 w-4 shrink-0",
-                coreAgentId ? "text-brand" : "text-ink-faint"
-              )}
-            />
-            {!collapsed && <span>开始对话</span>}
-          </button>
-        </div>
-
-        {/* 3-4. 导航 + 分组 */}
-        <nav className="flex-1 overflow-y-auto overflow-x-hidden px-2.5">
-          {!collapsed && (
-            <div className="pl-2.5 pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.06em] text-ink-faint">
-              配置
-            </div>
-          )}
-          {NAV_MAIN.map((item) => (
-            <NavItem key={item.key} item={item} />
-          ))}
-
-          {!collapsed && (
-            /* 分组标题与药丸左边缘对齐（药丸 pl-3 = 12px），标题也补 12px */
-            <div className="pl-2.5 pb-1.5 pt-4 text-[11px] font-medium uppercase tracking-[0.06em] text-ink-faint">
-              管理
-            </div>
-          )}
-          {collapsed && <div className="my-2 border-t border-line-soft" />}
-          {NAV_ADMIN.map((item) => (
-            <NavItem key={item.key} item={item} />
-          ))}
         </nav>
 
-        {/* 5. 底部：设置齿轮
+        {/* 4. 底部：Keeper 身份块 —— **也是全局菜单的入口**
 
-            设置是**低频操作**，所以不占侧栏一个常驻导航位（那会让"管理"分组
-            永远挂着一项几乎没人点的条目），而是收进底部齿轮。点开是一个**向上**
-            弹出的菜单：设置在底部，菜单往上弹才不会被窗口边缘挡住。
+            `mt-auto`：吃掉剩余高度把这一块压到窗口下沿。让导航块去顶（`flex-1` +
+            `justify-end`）同样能贴底，但会把「智能体」一起推下去，看起来像菜单的一部分。
 
-            菜单项带一行说明文字——四段设置的名字（上下文 / 协作 / 调试）都是
-            内部术语，光看名字猜不出里面能改什么。 */}
+            logo 用品牌渐变 + 一道内高光（inset 白色半透明细线），这是让一个纯色方块
+            看起来"有厚度"的最小成本做法。
+
+            折叠按钮：展开态在身份块右侧同一行；**折叠态改为竖排**（logo 在上、按钮在
+            下）——52px 宽塞不进并排的两个 26px 控件，硬挤会把 logo 压掉一半；而且收起
+            之后必须还留着**一个能直接点开**的入口，不能逼用户先点开菜单才找得到。 */}
         <div
-          className="shrink-0 px-2.5 py-2"
+          className="mt-auto shrink-0 px-2.5 py-2"
           style={{ borderTop: "1px solid var(--kp-sidebar-line)" }}
         >
-          <DropdownMenu.Root>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                title="设置"
-                className={cn(
-                  // 与导航项同一套状态语言与同样的宽度（hover 也是主色底 + 深色字）
-                  "flex items-center gap-2.5 rounded-[8px] py-[6px] px-2.5 text-[14px] text-ink-muted",
-                  "transition-colors duration-150 ease-apple",
-                  "hover:bg-brand hover:text-brand-deep",
-                  collapsed ? "mx-auto w-[34px] justify-center px-0" : "w-full"
-                )}
-              >
-                <Settings className="h-[15px] w-[15px] shrink-0" />
-                {!collapsed && <span>设置</span>}
-              </button>
-            </DropdownMenuTrigger>
-            {/* side="top"：贴着触发器向上弹出 */}
-            <DropdownMenuContent
-              side="top"
-              align="start"
-              sideOffset={6}
-              className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop"
-            >
-              {SETTINGS_SECTIONS.map((s) => (
-                <DropdownMenuItem
-                  key={s.key}
-                  onSelect={() => setSettingsSection(s.key)}
-                  className="flex cursor-pointer flex-col gap-0.5 rounded-[7px] px-2.5 py-2 outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+          {/* 折叠态竖排（logo 上 / 展开按钮 下），展开态横排 —— 见上面说明 */}
+          <div className={cn("flex gap-1", collapsed ? "flex-col items-center" : "items-center")}>
+            <DropdownMenu.Root>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  title="Keeper — 设置与管理"
+                  className={cn(
+                    "flex items-center gap-2.5 rounded-[8px] py-[6px] pl-2.5 pr-2",
+                    "text-left transition-colors duration-150 ease-apple",
+                    "hover:bg-brand/12 dark:hover:bg-brand/20",
+                    collapsed ? "w-[34px] justify-center px-0" : "min-w-0 flex-1"
+                  )}
                 >
-                  <span className="text-[13px] font-medium text-ink-strong">
-                    {s.label}
+                  <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] bg-brand-gradient text-[12px] font-semibold text-white shadow-[0_2px_6px_-1px_rgba(66,133,244,0.5),inset_0_1px_0_rgba(255,255,255,0.28)]">
+                    K
                   </span>
-                  <span className="text-[11px] leading-4 text-ink-muted">
-                    {s.desc}
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu.Root>
+                  {!collapsed && (
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-semibold leading-tight tracking-[-0.01em] text-ink-strong">
+                        Keeper
+                      </span>
+                      <span className="mt-[1px] flex items-center gap-1.5 text-[10.5px] leading-tight text-ink-faint">
+                        <span
+                          className={cn(
+                            "h-1.5 w-1.5 shrink-0 rounded-full",
+                            online ? "bg-emerald-500" : "bg-red-500"
+                          )}
+                        />
+                        {online ? "服务正常" : "服务离线"}
+                      </span>
+                    </span>
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+              {/* side="top"：菜单在底部，必须往上弹才不会顶出窗口 */}
+              <DropdownMenuContent
+                side="top"
+                align="start"
+                sideOffset={6}
+                className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop"
+              >
+                {/* 设置：带子菜单。子菜单由 Radix 在**悬停**时自动展开——
+                    这比"点开子菜单"少一次点击，也符合桌面应用的习惯。
+                    「用户空间」也归在这里：它本质是一段配置（读写目录 + 只读标志），
+                    和上下文 / 协作 / 调试同类，只是不用弹窗、直接开一个页面。 */}
+                <DropdownMenu.Sub>
+                  <DropdownMenuSubTrigger
+                    className="flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+                  >
+                    <Settings className="h-[15px] w-[15px] shrink-0 text-ink-faint" />
+                    <span className="flex-1 font-medium text-ink-strong">
+                      设置
+                    </span>
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent
+                    sideOffset={4}
+                    className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop"
+                  >
+                    {SETTINGS_SECTIONS.map((s) => (
+                      <DropdownMenuItem
+                        key={s.key}
+                        onSelect={() => setSettingsSection(s.key)}
+                        className="flex cursor-pointer flex-col gap-0.5 rounded-[7px] px-2.5 py-2 outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+                      >
+                        <span className="text-[13px] font-medium text-ink-strong">
+                          {s.label}
+                        </span>
+                        <span className="text-[11px] leading-4 text-ink-muted">
+                          {s.desc}
+                        </span>
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuSeparator className="my-1 h-px bg-line-soft" />
+                    <DropdownMenuItem
+                      onSelect={() => setRoute({ page: "user-spaces" })}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100",
+                        route.page === "user-spaces"
+                          ? "bg-brand/12"
+                          : "data-[highlighted]:bg-brand/12"
+                      )}
+                    >
+                      <Users className="h-[15px] w-[15px] shrink-0 text-ink-faint" />
+                      <span className="font-medium text-ink-strong">
+                        用户空间
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenu.Sub>
+
+                <MenuLink
+                  icon={Activity}
+                  label="可观测"
+                  active={route.page === "observability"}
+                  onSelect={() => setRoute({ page: "observability" })}
+                />
+                <MenuLink
+                  icon={Trash2}
+                  label="回收站"
+                  active={route.page === "trash"}
+                  onSelect={() => setRoute({ page: "trash" })}
+                />
+                <MenuLink
+                  icon={Database}
+                  label="模型管理"
+                  active={route.page === "models"}
+                  onSelect={() => setRoute({ page: "models" })}
+                />
+              </DropdownMenuContent>
+            </DropdownMenu.Root>
+
+            {/* 折叠 / 展开按钮：两个状态都要**直接可见**。
+                收起之后如果只能点开菜单才找得到展开入口，用户会以为侧栏再也
+                打不开了 —— 视图开关的可见性不该依赖另一层交互。 */}
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              title={collapsed ? "展开菜单栏" : "收起菜单栏"}
+              className="flex h-[26px] w-[24px] shrink-0 items-center justify-center rounded-[7px] text-brand-deep transition-colors duration-150 hover:bg-white/60 dark:text-brand dark:hover:bg-white/[0.12]"
+            >
+              <PanelLeft className="h-[15px] w-[15px]" />
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -370,22 +459,22 @@ export default function App() {
               「智能体」页继续承担"装载 / 配置 / 管理"的职能。 */}
           {route.page === "agents" && (
             <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <AgentList onCreate={() => setRoute({ page: "agent-create" })} />
-            </div>
-          )}
-          {route.page === "agent-market" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <AgentMarketPage />
+              <AgentsHubPage
+                tab={agentTab}
+                onTabChange={(t) => setRoute({ page: "agents", agentTab: t })}
+                onCreate={() =>
+                  // 进创建页时记住来源 tab：创建完要落回它，而不是把用户丢回
+                  // 另一个 tab（现在来源固定是「我的智能体」）
+                  setRoute({ page: "agent-create", agentTab })
+                }
+              />
             </div>
           )}
           {route.page === "agent-create" && (
             <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <AgentCreatePage onDone={() => setRoute({ page: "agents" })} />
-            </div>
-          )}
-          {route.page === "plugins" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <PluginPage />
+              <AgentCreatePage
+                onDone={() => setRoute({ page: "agents", agentTab })}
+              />
             </div>
           )}
           {route.page === "user-spaces" && (
@@ -398,13 +487,25 @@ export default function App() {
               <ObservabilityPage />
             </div>
           )}
+          {/* 「浏览器」：连接码 + 安装步骤 + 接入状态。见 pages/BrowserConnectPage.tsx
+              顶部那段注释——它解释的是为什么必须由用户手动填一次 token。 */}
+          {route.page === "browser" && (
+            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+              <BrowserConnectPage />
+            </div>
+          )}
+          {route.page === "trash" && (
+            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+              <RecycleBinPage />
+            </div>
+          )}
           {route.page === "models" && (
             <div className="h-full animate-fade-up overflow-auto px-7 py-6">
               <ModelManage />
             </div>
           )}
           {inChat && (
-            <ChatPage agentId={route.agentId!} onExit={exitChat} />
+            <ChatPage agentId={route.agentId!} />
           )}
         </main>
       </div>
@@ -414,10 +515,6 @@ export default function App() {
       <SettingsDialog
         section={settingsSection}
         onClose={() => setSettingsSection(null)}
-        onGoToAgents={() => {
-          setSettingsSection(null);
-          setRoute({ page: "agents" });
-        }}
       />
 
       {/* 全局 Toast 挂载点 */}
