@@ -136,6 +136,287 @@ async def _send(ws: WebSocket, payload: Dict[str, Any]) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# 浮球对话（agent:ask / agent:sessions）
+# ---------------------------------------------------------------------------
+#
+# 这两条与上面的「抓取」链路**完全分开**：抓取走 submit_extension_job，只整理
+# 扩展自取的数据；这里要真的跑一轮 agent（几十秒），因此必须自己管超时、定向回包
+# 和后台任务，不能塞进那条 to_thread 的路里。
+#
+# 三件事决定了它的形状：
+#
+# 1. **必须定向回，不能 publish**：publish 是广播给所有在线连接的，而结果属于
+#    某一个标签页的浮球。用 _send(ws, ...) 直接发给发起那条连接。
+# 2. **必须先 ack 再跑**：agent 一轮 30~120 秒。不先回一个 accepted，浮球就只能
+#    干等超时，用户会以为按钮坏了。
+# 3. **必须放后台任务**：主循环还要收 ping 和后续消息。挂在 await 上会把这条
+#    连接彻底堵死。
+#
+# 不做流式：浮球只显示最新一条最终答案，SSE 那套（hub / delta / abort）在这里全是
+# 复杂度换不来东西。
+
+
+def _ball_prompt(q: str, page: Dict[str, Any]) -> str:
+    """把「问了什么」+「在哪一页问的」拼成一条用户消息。
+
+    为什么拼进 content 而不是新开一列
+    ------------------------------
+    这段文字会进 agent 的 prompt，所以「agent 知道这条来自浮球、来自哪一页」靠它
+    就够了，不需要 schema 变更，也不会出现「某一层忘了读那个字段」的静默失效。
+
+    代价是浏览器页里看到的就是这段原文。我认为这个代价划算：用户需要看到
+    「agent 到底以为我在哪个页面上」，这句话本身就是有用的确认。
+
+    没选区时不给选区块——**这里必须让用户看见"没带内容"**。内核的 Playwright 够不
+    到用户 Chrome 那一页（见 :mod:`keeper.browser.agent_browser`），所以没带选区的
+    提问里 agent 基本是盲的，它只会凭 URL 猜。留个空段等于骗用户 agent 看得到。
+    """
+    title = str(page.get("title") or "").strip()
+    url = str(page.get("url") or "").strip()
+    sel = str(page.get("selection") or "").strip()
+
+    head = ""
+    if title or url:
+        where = f"页面「{title}」" if title else "当前页面"
+        head = f"我在{where}（{url}）上提问。\n\n" if url else f"我在{where}上提问。\n\n"
+
+    parts = []
+    if head:
+        parts.append(head.rstrip("\n"))
+    if sel:
+        # 选区可能很长（全选整页）。截断写进消息里，好过让一个超长块挤掉真正的
+        # 问题——顺序上问题在前，这里是补充材料。
+        body = sel[:BALL_SELECTION_LIMIT]
+        more = f"…（选区共 {len(sel)} 字，已截断）" if len(sel) > BALL_SELECTION_LIMIT else ""
+        parts.append(f"页面选中内容：\n{body}{more}")
+    parts.append(f"问题：{q}")
+    return "\n\n".join(parts)
+
+
+#: 选区送进 prompt 的字数上限。够覆盖「选中一段话/几段话来问」这个主场景，
+#: 又不至于把问题本身挤出上下文。
+BALL_SELECTION_LIMIT = 4000
+
+
+async def _resolve_ball_target(agent_id: str, want_sid: str) -> str:
+    """定下这一轮记到哪条会话：用户指定的那条，或浮球自己的默认会话。
+
+    指定的那条查不到时**退回默认会话而不是报错**：浮球是随手点一下的地方，
+    而「刚才选的那条会话被删了」是用户在另一个界面的操作导致的——在这里弹错等于
+    让用户为别的界面的事负责。
+    """
+    from ..chat import service as chat_service
+
+    if want_sid:
+        svc = chat_service.ChatService(agent_id=agent_id, session_id=want_sid)
+        try:
+            await svc.verify_session()
+            return want_sid
+        except ValueError:
+            logger.info("浮球指定的会话 %s 不可用，退回浮球默认会话", want_sid)
+    return await chat_service.get_or_create_ball_session(agent_id)
+
+
+async def _ball_latest(ws: WebSocket, msg: Dict[str, Any]) -> None:
+    """补取某条会话的**最新一条回答**。浮球每次打开面板时问一次。
+
+    为什么需要它
+    ------------
+    MV3 的 service worker 空闲约 30 秒就被 Chrome 杀掉，浮球那一轮可能要跑很久。
+    SW 要是死了，content script 里那个 Promise 随端口一起消失，浮球只会显示
+    「连接断了」——但内核侧那一轮**照跑不误**，而且结果已经落进会话了。
+
+    于是这里提供一条与 SW 存活**无关**的补取路径：下次打开面板，问一次"那条会话
+    最后说了什么"。浮球本来就只显示最新一条，所以这个形状和它的显示逻辑正好对上，
+    不需要保存任何一份"上一次显示到哪"的状态（除了一条消息 id 用来判重）。
+
+    还在跑时如实回 ``in_progress``，不假装有答案——浮球据此显示「正在思考…」并继续
+    轮询，这样"跨过一次 SW 重启"的这一轮也能看着它走完。
+    """
+    from ..agent.keeper import resolve_core_agent_id
+    from ..chat import service as chat_service
+
+    agent_id = resolve_core_agent_id()
+    want = str(msg.get("session_id") or "").strip()
+    sid = want or (await chat_service.find_ball_session(agent_id) if agent_id else None)
+    empty = {"session_id": sid or "", "text": "", "in_progress": False, "message_id": ""}
+    if not agent_id or not sid:
+        await _send(ws, {"event": "result", "id": msg.get("id"), "result": empty})
+        return
+
+    svc = chat_service.ChatService(agent_id=agent_id, session_id=sid)
+    try:
+        await svc.verify_session()
+    except ValueError:
+        # 用户在浏览器页把它删了。回空而不是报错：浮球接下来会重新拉列表并落到
+        # 默认会话，这里报错的唯一效果是面板上冒一条看不懂的提示。
+        await _send(ws, {"event": "result", "id": msg.get("id"), "result": empty})
+        return
+
+    # 直接查表取最后一条 assistant，不走 load_messages（理由见
+    # chat/service.py::latest_ball_answer 的 docstring）。
+    last = await chat_service.latest_ball_answer(sid)
+    await _send(ws, {
+        "event": "result",
+        "id": msg.get("id"),
+        "result": {
+            "session_id": sid,
+            "text": last["text"],
+            "in_progress": last["in_progress"],
+            "message_id": last["message_id"],
+        },
+    })
+
+
+async def _ball_sessions(ws: WebSocket, msg: Dict[str, Any]) -> None:
+    """列浏览器会话，供浮球选「这一轮记到哪条名下」。
+
+    只回 id 与标题两个字段：浮球拿到 id 是为了路由，拿到标题是为了显示，别的都用
+    不上。排序沿用后端的 ``updated_at DESC``（最近更新的在前），所以不必把时间戳
+    也传过去——浮球自己不再排一次序。
+    """
+    from ..agent.keeper import resolve_core_agent_id
+    from ..chat import service as chat_service
+
+    agent_id = resolve_core_agent_id()
+    if not agent_id:
+        await _send(ws, {
+            "event": "result", "id": msg.get("id"),
+            "error": "内核还没有可用的智能体，先在 keeper 里装载一个。",
+        })
+        return
+    items = await chat_service.ChatService(agent_id=agent_id).list_sessions(
+        limit=50, kind=chat_service.SESSION_KIND_BROWSER
+    )
+    # 用 event:"result" 而不是自造一个 "sessions" 事件：这条查询**本身就是**一次请求的
+    # 终点。扩展侧只需一条 result 通路（按 id 兑现 promise），中间态另外走 onNote。
+    # 混用两套会给「哪个事件会兑现 promise」留下一个需要读者自己推导的约定。
+    await _send(ws, {
+        "event": "result",
+        "id": msg.get("id"),
+        "result": {
+            "sessions": [
+                {"id": s["id"], "title": s.get("title") or chat_service.DEFAULT_SESSION_TITLE}
+                for s in items
+            ],
+            # 默认那条**单独给**，不放进条目里：浮球得知道"不选就发哪条"。如果让它靠
+            # "列表第一条"来判断，用户在浏览器页新建一条会话后，浮球下一次就会静默往
+            # 那条里追加——而用户从没表达过这个意图。
+            "default_id": await chat_service.find_ball_session(agent_id),
+        },
+    })
+
+
+async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
+    """浮球「对这一页提问」：立刻 ack，真正跑 agent 放后台任务。
+
+    run_id 由**内核**生成而不是扩展给：这一路的 run 只需要被"服务端自己"和
+    "浏览器页那个界面"看到，扩展全程只等最终一条结果，看不到过程也不需要 run_id。
+    让内核生成省掉了「扩展没带 run_id 时怎么办」这个分支——那种情况下 run 无法
+    登记，整轮会既不可见也不可停。
+    """
+    req_id = msg.get("id")
+    q = str(msg.get("q") or "").strip()
+    if not q:
+        await _send(ws, {"event": "result", "id": req_id, "error": "问题不能为空"})
+        return
+
+    from ..agent.keeper import resolve_core_agent_id
+    from ..chat import service as chat_service
+    from ..store.models import new_id
+
+    agent_id = resolve_core_agent_id()
+    if not agent_id:
+        await _send(ws, {
+            "event": "result", "id": req_id,
+            "error": "内核还没有可用的智能体，先在 keeper 里装载一个。",
+        })
+        return
+
+    page = msg.get("page") if isinstance(msg.get("page"), dict) else {}
+    # 「新对话」是浮球横条上显式的第一个选项，选它就必须**真的新建一条**。
+    #
+    # 关键：不能用「session_id 传空」来表达新建——空的语义在
+    # :func:`_resolve_ball_target` 里是「用浮球默认会话」（见那里的回退分支）。
+    # 于是点了「新对话」、发出去、却记进了上一条：用户选的是新会话，得到的是旧会话，
+    # 而界面上没有任何迹象能让他发现这件事。所以新建必须由扩展显式说一遍。
+    fresh = bool(msg.get("new_session"))
+    try:
+        sid = "" if fresh else await _resolve_ball_target(
+            agent_id, str(msg.get("session_id") or "").strip()
+        )
+    except Exception as e:  # noqa: BLE001
+        await _send(ws, {"event": "result", "id": req_id, "error": str(e)})
+        return
+
+    # 会话定下来之后才 ack：浮球显示的「已收到」顺便可以带上"记到哪条会话"，
+    # 用户点回浏览器页就能直接找到它，不用自己猜。
+    #
+    # 新建时 sid 是空的（会话还没建），真实 id 要等 run_one_ask 里
+    # ensure_session_id() 定下来 —— 那时由 on_session 回调补发一个 accepted。
+    # 这里**绝不能**改发 result：result 是兑现 promise 的那一个（扩展那边
+    # request() 收到它就 resolve 了），提前发等于把整条请求的回答吞掉。
+    if sid:
+        await _send(ws, {"event": "accepted", "id": req_id, "session_id": sid})
+    content = _ball_prompt(q, page)
+
+    async def run() -> None:
+        # run_id 由**内核**生成：这一路的 run 只需要被"服务端自己"和"浏览器页那个
+        # 界面"看到，扩展全程只等最终一条结果，看不到过程也不需要 run_id。让内核
+        # 生成省掉了「扩展没带 run_id 时怎么办」这个分支——那种情况下 run 无法登记，
+        # 整轮会既不可见也不可停。
+        run_id = new_id()
+        try:
+            async def note_session(real_sid: str) -> None:
+                """新建时补发 accepted：真实 id 只有 ``run_one_ask`` 里
+                ``ensure_session_id()`` 定下来才知道，而扩展要靠它把这条新会话
+                立刻加进横条——否则用户发完消息，横条上还是那一条旧的，
+                看起来就像"新对话没生效"。"""
+                await _send(ws, {"event": "accepted", "id": req_id, "session_id": real_sid})
+
+            # 执行走的是和浏览器页**同一份** run_one_ask（见 chat/service.py）：
+            # run 的登记、停止检查、事件缓冲、注销，全在那边。这里的差别只有两处——
+            # 不推 SSE 队列（浮球只回一条最终结果），以及工作区取默认值。
+            resp = await chat_service.run_one_ask(
+                agent_id=agent_id,
+                session_id=sid,
+                text=content,
+                run_id=run_id,
+                kind=chat_service.SESSION_KIND_BROWSER,
+                # 工作区：只在**新建**那一次生效（已有会话忽略），但每次都传是安全的
+                # ——与 new_session 同一口径，省得浮球会话的工作区规则和别处不一致。
+                user_space_id=await chat_service._default_space_id(),
+                on_session=note_session if fresh else None,
+                # 标题用**用户原始的问题**，而不是 content 里拼好的那段 prompt：
+                # 后者开头是「我在页面「X」（URL）上提问。」，而 derive_session_title
+                # 只取首行前 18 字符 —— 用它做标题的结果是每条浮球会话都长一个样，
+                # 完全分辨不出。页面信息该进 prompt（agent 要看见），不该进标题
+                # （用户要看见的是自己问了什么）。
+                title_text=q,
+            )
+            if resp.get("error"):
+                text = f"（这一轮没跑完：{resp['error']}）"
+            elif resp.get("waiting_human"):
+                text = resp.get("answer") or "这个问题需要你补充点信息才能继续。"
+            else:
+                text = resp.get("answer") or ""
+            await _send(ws, {
+                "event": "result", "id": req_id,
+                # 新建那一轮 sid 本来是空的，取 run_one_ask 补出来的真实 id ——
+                # 扩展靠它刷新横条、回填选中项。
+                "result": {"kind": "text", "text": text,
+                           "session_id": resp.get("session_id") or sid,
+                           "url": page.get("url") or ""},
+            })
+        except Exception as e:  # noqa: BLE001
+            # run_one_ask 内部已经把 hub 终态封成 error 了，这里不重复做。
+            logger.warning("浮球提问失败: %s", e, exc_info=True)
+            await _send(ws, {"event": "result", "id": req_id, "error": str(e)})
+
+    asyncio.create_task(run())
+
+
 @router.websocket("/agent-bridge")
 async def agent_bridge(ws: WebSocket) -> None:
     """扩展接入端点。"""
@@ -187,6 +468,34 @@ async def agent_bridge(ws: WebSocket) -> None:
             if cmd == "shutdown":
                 break
 
+            # 浮球对话：自己管生命周期（先 ack、后台跑、定向回包）。
+            # 必须排在下面的抓取之前 —— 抓取那条路是无脑把消息丢给 submit_extension_job，
+            # 它只认 op=text/shot/eval，浮球消息会被当成一个看不懂的 op 然后报错。
+            #
+            # 每个分支都单独包一层 try：**处理器的异常会一路冒到下面的
+            # ``except``，那里是关连接的**。也就是说任何一个分支出错，用户看到的
+            # 都是「连接断了」，而不是「哪一步失败了」——他既看不到原因，也没法只
+            # 重试这一条。而这里任何一个分支都有可能在某次调用里抛（模块 import、
+            # 目标会话刚被删、agent 装配异常…），所以不能指望"代码没写错"。
+            if cmd in ("agent:sessions", "agent:latest", "agent:ask"):
+                handler = {
+                    "agent:sessions": _ball_sessions,
+                    "agent:latest": _ball_latest,
+                    "agent:ask": _ball_ask,
+                }[cmd]
+                try:
+                    await handler(ws, msg)
+                except Exception as e:  # noqa: BLE001
+                    # 记 warning 而不是 debug：这一层的异常**关掉了用户的连接**，
+                    # 只记 debug 等于"发生了什么永远查不到"。
+                    logger.warning("处理 %s 失败（已转为错误应答，连接保持）: %s",
+                                   cmd, e, exc_info=True)
+                    await _send(ws, {
+                        "event": "result", "id": msg.get("id"),
+                        "error": f"{cmd} 处理失败：{e}",
+                    })
+                continue
+
             try:
                 # 内核不碰浏览器：结果由 submit_extension_job 直接 publish 回来
                 await asyncio.to_thread(submit_extension_job, msg)
@@ -195,7 +504,9 @@ async def agent_bridge(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("扩展断开")
     except Exception:  # noqa: BLE001
-        logger.debug("扩展连接异常", exc_info=True)
+        # 到这里已经不是"某条消息处理失败"，而是连接本身出问题了（读帧、协议层）。
+        # 仍然要记 warning —— 这类问题唯一的诊断线索就是这条日志。
+        logger.warning("扩展连接异常（连接将被关闭）", exc_info=True)
     finally:
         _hub.unregister(ws)
         try:

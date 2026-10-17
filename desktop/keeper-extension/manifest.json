@@ -5,7 +5,7 @@
   "description": "keeper 桌面端自带扩展：在页面上提供 keeper 浮球，并把页面数据接给本地内核。",
   "minimum_chrome_version": "116",
 
-  "permissions": ["storage", "tabs", "scripting", "activeTab"],
+  "permissions": ["storage", "tabs", "scripting", "activeTab", "alarms"],
   "host_permissions": ["<all_urls>"],
 
   "background": {

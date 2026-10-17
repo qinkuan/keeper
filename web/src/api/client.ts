@@ -129,6 +129,8 @@ import type {
 
   AgentBridgeInfo,
 
+  SessionKind,
+
 } from "./types";
 
 
@@ -915,15 +917,43 @@ export function apiUpdateCoreAgentSoul(body: { soul: string }) {
 }
 
 
-/** 新建一个空会话（点「开始对话」时调用，让新会话立刻出现在列表里） */
+/**
 
-export function apiNewSession(agentId: string, userSpaceId?: string) {
+ * 新建一个空会话（点「开始对话」时调用，让新会话立刻出现在列表里）。
 
-  return apiPost<{ session_id: string }>(`/agents/${agentId}/sessions`, {
+ *
 
-    user_space_id: userSpaceId ?? "",
+ * `kind` 决定这条会话属于哪一页：缺省 chat（「对话」页），浏览器页传 "browser"。
 
-  });
+ * 它**只在建会话的那一刻生效**——之后一律沿用库里的值，所以传错了只能删掉重建来改，
+
+ * 和用户空间绑定是同一个性质。
+
+ */
+
+export function apiNewSession(
+
+  agentId: string,
+
+  userSpaceId?: string,
+
+  kind: SessionKind = "chat"
+
+) {
+
+  return apiPost<{ session_id: string; kind: SessionKind }>(
+
+    `/agents/${agentId}/sessions`,
+
+    {
+
+      user_space_id: userSpaceId ?? "",
+
+      kind,
+
+    }
+
+  );
 
 }
 
@@ -1316,6 +1346,10 @@ export function apiChatStream(
 
     userSpaceId?: string;
 
+    /** 新建会话时写进 kind 的类别；已有会话忽略这个值 */
+
+    kind?: SessionKind;
+
     runId?: string;
 
     signal?: AbortSignal;
@@ -1353,6 +1387,8 @@ export function apiChatStream(
       step_id: opts.stepId || "",
 
       user_space_id: opts.userSpaceId === "" ? undefined : opts.userSpaceId,
+
+      kind: opts.kind || "chat",
 
       run_id: opts.runId || "",
 
@@ -1561,6 +1597,20 @@ export function apiRestoreSession(sessionId: string) {
 }
 
 
+/**
+
+ * 会话列表。`kind` 收窄类别：不传就是全部，传了只列那一类。
+
+ *
+
+ * 类别过滤**必须交给后端**（查询参数），不能取回来在前端筛：分页是 limit/offset，
+
+ * 前端筛等于「这一页 50 条里挑出 browser 那几条」，浏览器会话一多就会把普通会话
+
+ * 挤出第一页，翻页还会出现空洞。
+
+ */
+
 export function apiSessions(
 
   agentId: string,
@@ -1569,7 +1619,9 @@ export function apiSessions(
 
   limit = 50,
 
-  offset = 0
+  offset = 0,
+
+  kind?: SessionKind
 
 ) {
 
@@ -1580,6 +1632,8 @@ export function apiSessions(
     limit: String(limit),
 
     offset: String(offset),
+
+    kind,
 
   });
 
@@ -1624,6 +1678,22 @@ export function apiSessionMessages(
 
   );
 
+}
+
+/**
+ * 这条会话此刻有没有在跑的一轮。
+ *
+ * 存在的理由：页面的 3 秒轮询和 SSE 重连都被门控在「页面已经知道有这一轮」上
+ * （前者要已有进行中气泡，后者要 recoverRunId）。页面自己发起的轮次天然满足，
+ * 浮球发起的那一轮页面却完全不知情——于是只能手动刷新才看得见。
+ *
+ * 与其为此全量拉一次消息（最多 200 条）来发现变化，不如问这个几十字节的问题。
+ * 内核那边是纯内存查表，不打库，所以便宜到可以每 3 秒问一次。
+ */
+export function apiSessionActivity(agentId: string, sessionId: string) {
+  return apiGet<{ running: boolean; run_id: string }>(
+    `/agents/${agentId}/sessions/${sessionId}/activity`
+  );
 }
 
 export function apiSkills(agentId: string) {

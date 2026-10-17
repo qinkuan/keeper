@@ -83,9 +83,22 @@ class ChatSession(Base):
     # 单独记一列而不复用 updated_at：updated_at 会被后续任何一次写顶掉，
     # 而「什么时候删的」决定要留多久——保留策略得按它算。
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    # 会话种类：chat=普通会话，task=任务绑定会话（D1：一个任务一个 session）。
-    # 用于在同一个会话列表里区分两种来源，而不必分两套 UI。
+    # 会话种类：chat=普通会话（「对话」页），task=任务绑定会话（D1：一个任务一个
+    # session），browser=浏览器会话（「浏览器」页）。
+    #
+    # 三者在列表里**互斥**：每页只展示自己那类，因此按这列筛就是分类的全部机制，
+    # 不需要另一张类别表或一棵类别树。
+    #
+    # 没有任何 DB 约束（TEXT + default，无 CHECK）——新增取值不需要迁移，但校验
+    # 责任在接口层，见 chat/service.py::SESSION_KINDS。
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
+    # 「谁来认领这条会话」的标记：目前只有浮球那一条用它（值见
+    # chat/service.py::BALL_SESSION_KEY）。非空即代表它是浮球的默认会话。
+    #
+    # 为什么不靠固定 id：那行被软删除后 id 就复用了（主键还在），浮球下次就找不到
+    # 「自己的」会话，于是默默新建第二条——用户会看到两条「浮球对话」。而靠标题找
+    # 又会被用户改个名就失效。这列既不参与用户可见字段，也不随重命名/删除变化。
+    ball_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

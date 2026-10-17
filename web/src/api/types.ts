@@ -1033,6 +1033,16 @@ export interface CapabilityToggle {
   enabled: boolean;
 }
 
+/**
+ * 会话种类。后端 chat_sessions.kind 的取值集合（见 keeper/chat/service.py
+ * 的 SESSION_KINDS）。
+ *
+ * 收紧成字面量联合而不是 `string`：三个取值**在列表里互斥**，任何一处漏改
+ * （忘了加 browser 的筛选条件）都会表现为「那条会话在哪个列表里都看不见」，
+ * 这种 bug 没有任何报错。联合类型让漏改在 tsc 阶段就暴露。
+ */
+export type SessionKind = "chat" | "task" | "browser";
+
 /** 会话列表里的一项（对应后端 chat_sessions 表） */
 export interface SessionItem {
   id: string;
@@ -1041,11 +1051,8 @@ export interface SessionItem {
   /** 本会话绑定的用户空间（可空 → 回落 agent 默认目录） */
   user_space_id?: string | null;
   status?: string | null;
-  /**
-   * 会话种类：chat=普通会话，task=任务绑定会话（D1：一个任务一个 session）。
-   * 用于在同一个会话列表里区分两种来源。
-   */
-  kind?: string | null;
+  /** chat=普通会话（「对话」页）／task=任务绑定会话／browser=浏览器会话（「浏览器」页） */
+  kind?: SessionKind | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1124,7 +1131,8 @@ export interface TrashSessionItem {
   /** 所属 agent；查不到名字时后端回填成 id（核心 agent 不在 agent 表里） */
   agent_id?: string | null;
   agent_name?: string | null;
-  kind?: string | null;
+  /** 同 {@link SessionItem}：会话种类，决定回收站里显示成「任务/对话/浏览器」 */
+  kind?: SessionKind | null;
   /** 消息条数：标题常是「新对话」这种占位，靠它判断是不是要找的那条 */
   message_count: number;
   created_at?: string | null;

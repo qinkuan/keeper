@@ -38,6 +38,32 @@ logger = logging.getLogger(__name__)
 # session_id -> 正在跑的 run_id
 _active_runs: Dict[str, str] = {}
 
+# 被用户要求停止的 run_id 集合。执行循环每步 / 每块都问一次「该停了吗」。
+#
+# 为什么不住在 ``chat/api.py`` 里：这条集合现在**两个模块**要用——流式对话，以及
+# 浮球的「对这一页提问」（见 api/agent_bridge.py::_ball_ask）。私藏在 api.py 里
+# 就得跨模块 import 一个下划线开头的名字，那是明摆着的「它本来不该在这儿」。
+_stop_runs: set = set()
+
+
+def request_stop(run_id: Optional[str]) -> None:
+    """请求停止某次运行。只置标记，不 kill——执行循环在下一个检查点优雅停下。"""
+    if run_id:
+        _stop_runs.add(run_id)
+
+
+def is_stopped(run_id: Optional[str]) -> bool:
+    """这个 run 该停了吗？"""
+    return bool(run_id and run_id in _stop_runs)
+
+
+def clear_stop(run_id: Optional[str]) -> None:
+    """清掉停止标记。**必须在 runner 的 finally 里调**，否则同一 run_id 被复用时
+    会带着上一次的停止标记出生——而 run_id 由前端生成，正常不会复用；但内核侧
+    生成的（浮球那条路）就必须自己保证干净。"""
+    if run_id:
+        _stop_runs.discard(run_id)
+
 
 def register_run(session_id: Optional[str], run_id: Optional[str]) -> None:
     """登记「这个会话正在跑这个 run」。

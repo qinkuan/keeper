@@ -37,7 +37,7 @@ import UserSpacePage from "./pages/UserSpacePage";
 import ObservabilityPage from "./pages/ObservabilityPage";
 import ModelManage from "./pages/ModelManage";
 import RecycleBinPage from "./pages/RecycleBinPage";
-import BrowserConnectPage from "./pages/BrowserConnectPage";
+import BrowserConnectPanel from "./components/BrowserConnectPanel";
 import { apiHealth, apiListAgents } from "./api/client";
 import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
@@ -137,6 +137,11 @@ export default function App() {
   });
   const online = !healthQ.isLoading && !healthQ.isError && healthQ.data?.ok;
   const inChat = route.page === "chat" && !!route.agentId;
+  /* 浏览器页：只列浏览器类别的会话。没有核心 agent 时不挂 ChatPage —— 会话要发消息
+     就得有 agent（会话从第一句话才开始建），这时页面退化成纯「扩展接入」面板，
+     仍然有意义的指引不该因为 agent 没装载好就一起看不见。 */
+  const inBrowser = route.page === "browser";
+  const showBrowserChat = inBrowser && !!coreAgentId;
 
   /** 侧栏导航条目 */
   const NavItem = ({
@@ -487,11 +492,18 @@ export default function App() {
               <ObservabilityPage />
             </div>
           )}
-          {/* 「浏览器」：连接码 + 安装步骤 + 接入状态。见 pages/BrowserConnectPage.tsx
-              顶部那段注释——它解释的是为什么必须由用户手动填一次 token。 */}
-          {route.page === "browser" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <BrowserConnectPage />
+          {/* 「浏览器」：顶部一条可折叠的扩展接入面板（没接上时自动展开，接上后收成
+              一行状态条），下面就是浏览器会话的列表与对话区 —— 与「对话」页同一个
+              ChatPage，只是锁死类别为 browser。见 components/BrowserConnectPanel.tsx
+              顶部那段注释，它解释的是为什么必须由用户手动填一次 token。 */}
+          {inBrowser && (
+            <div className="flex h-full animate-fade-up flex-col">
+              <BrowserConnectPanel />
+              {showBrowserChat && (
+                <div className="min-h-0 flex-1">
+                  <ChatPage agentId={coreAgentId} sessionKind="browser" />
+                </div>
+              )}
             </div>
           )}
           {route.page === "trash" && (

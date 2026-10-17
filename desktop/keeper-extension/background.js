@@ -28,6 +28,70 @@
 
 const RECONNECT_MS = 1500;
 
+/**
+ * 「对这一页提问」的超时。
+ *
+ * 给到 30 分钟，因为这一轮可以在 keeper 的浏览器页里**看着它跑、必要时手动停掉**
+ * ——那意味着一轮可能真的跑很久（长任务、逐步等外部输入）。30 秒是抓取那种秒级操作
+ * 的量级，180 秒也仍然偏短：超时一小，用户在浏览器页看着 agent 正常工作，
+ * 浮球这边却先报「没回」，两边的说法直接打架。
+ *
+ * 这条超时是**兜底**，不是设计目标：真正的反馈来自内核立刻回的那帧 accepted
+ * （1 秒内），用户不必靠这个计时器判断有没有生效。
+ */
+const ASK_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 秒数 → 「30 秒 / 1800 秒（30 分钟）」，只给大值换算分钟。 */
+const fmtTimeout = (ms) => {
+  const s = Math.round(ms / 1000);
+  return s >= 120 ? `${s} 秒（${Math.round(s / 60)} 分钟）` : `${s} 秒`;
+};
+
+/* ---- SW 保活 ----
+ *
+ * 为什么需要：MV3 的 service worker 空闲约 30 秒就被 Chrome 杀掉。「对这一页提问」
+ * 这一轮可能要跑很久，SW 一死，pending 里的 Promise 随端口一起消失，浮球立刻显示
+ * 「连接断了」——而内核侧那一轮**还在正常跑**，于是两边说法直接打架。
+ *
+ * 为什么用 alarms 而不是 setInterval：SW 里的定时器不保证被唤醒（进程随时可能被
+ * 冻结），只有 alarms 会被 Chrome 事件循环可靠地触发。而 alarms 每次响都是一次
+ * 「事件」，恰好也重置了 SW 的空闲计时器——这是它顺带起到的作用。
+ *
+ * 0.5 分钟是生产环境允许的**最小周期**（Chrome 120+ 从 1 分钟放宽到 30 秒）。
+ * 它正好卡在 30 秒空闲线上，属于「刚好够」而不是「稳过」：真遇到 Chrome 提前回收，
+ * 兜底是内核那条 agent:latest（浮球重开面板时补取最新结果），不是这个闹钟。
+ * 别把它当成保证，只当成把概率压低。
+ */
+const KEEPALIVE_ALARM = "keeper-keepalive";
+
+function ensureKeepalive() {
+  try {
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  } catch (e) {
+    /* 保活失败不该影响请求本身 */
+  }
+}
+
+function clearKeepalive() {
+  try { chrome.alarms.clear(KEEPALIVE_ALARM); } catch (e) { }
+}
+
+function refreshKeepalive() {
+  if (pending.size) ensureKeepalive();
+  else clearKeepalive();
+}
+
+chrome.alarms.onAlarm.addListener((a) => {
+  if (!a || a.name !== KEEPALIVE_ALARM) return;
+  // 没有在等的请求就收摊：空闲时 Keeping alive 纯属白耗唤醒
+  if (!pending.size) {
+    clearKeepalive();
+    return;
+  }
+  // 顺便校正一次连接：SW 可能在这个闹钟响起之前就已经重启过、socket 早就断了
+  ensureConnected().then(() => refreshKeepalive());
+});
+
 /** @type {WebSocket|null} */
 let ws = null;
 /** @type {Promise<WebSocket|null>|null} */
@@ -93,17 +157,38 @@ function ensureConnected() {
         clearTimeout(failTimer);
         ws = sock;
         connecting = null;
+        lastDenial = "";   // 真连上了，之前那次拒绝已经过去，别让它继续影响新提示
         console.log('[keeper] 已连内核', baseUrl);
         resolve(sock);
       };
       sock.onmessage = (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        /* 内核拒绝连接。它**没有 id**（拒绝发生在握手阶段，还没有具体请求），
+         * 所以不能走下面按 id 认领 pending 的路——那一帧会被静默丢掉，用户最后只
+         * 看到「与内核的连接断了」。这里把原因记下来，onclose 时用它给出可执行的话。 */
+        if (msg.event === 'denied') {
+          lastDenial = String(msg.reason || "");
+          console.warn('[keeper] 内核拒绝连接:', lastDenial);
+          return;
+        }
+        /* 中间态：内核收到了、正在跑。只 accepted 一种——它**不** resolve promise
+           （结果还没出来），只作为通知转给发起的那一页的 content script。
+           注意不要把"查询类"的应答也放进来：那类消息同样是终点，必须走下面的
+           result 分支兑现 promise，否则请求会一直挂到超时。 */
+        if (msg.event === 'accepted') {
+          const p = pending.get(msg.id);
+          if (p && typeof p.onNote === 'function') {
+            try { p.onNote(msg); } catch (e) { /* 通知失败不该影响请求本身 */ }
+          }
+          return;
+        }
         if (msg.event === 'result' || msg.event === 'denied') {
           const p = pending.get(msg.id);
           if (p) {
             pending.delete(msg.id);
             clearTimeout(p.timer);
+            refreshKeepalive();
             if (msg.error) p.reject(new Error(msg.error));
             else p.resolve(msg.result);
           }
@@ -113,12 +198,16 @@ function ensureConnected() {
         clearTimeout(failTimer);
         if (ws === sock) ws = null;
         connecting = null;
+        // 有拒绝原因就用它：说清"是 token 不对"还是"内核没跑"。
+        // 「连接断了」对这两件事说了同一句话，用户只能靠猜——而猜错方向很费时间。
+        const why = lastDenial ? denialText(lastDenial) : '与内核的连接断了';
         // 所有在等的请求直接失败，别让它们挂到超时
         pending.forEach((p) => {
           clearTimeout(p.timer);
-          p.reject(new Error('与内核的连接断了'));
+          p.reject(new Error(why));
         });
         pending.clear();
+        clearKeepalive();
       };
       sock.onerror = () => { /* onclose 会接手 */ };
     });
@@ -151,17 +240,50 @@ function scheduleReconnect() {
   retryTimer = setTimeout(tick, 300);
 }
 
-/** content script 的入口：发一条请求，等结果。 */
-async function request(req) {
+/* 内核拒绝连接的原因（token / origin）。只在"连上又被拒"的那一瞬间有意义——
+ * 连上就清掉，否则一次陈旧的拒绝会污染后面所有的重连提示。
+ *
+ * 为什么需要它：内核发来的是 ``{event:"denied", reason:"token"}``，**没有 id**。
+ * 而下面按 id 认领 pending 的那段对它是空转——这一帧会被原样丢掉，用户最终只看到
+ * 「与内核的连接断了」。那句话对两种完全不同的情况说了同一件事：
+ *   · 网线断了 / 内核没跑        → 该去启动内核
+ *   · 内核在跑、但不认这个扩展   → 该去重新复制连接码
+ * 用户按前者去排查会白花半小时。 */
+let lastDenial = "";
+
+/** 把内核给的原因翻成一句能照着做的话。 */
+function denialText(reason) {
+  if (reason === "token") {
+    return "连接码不对——内核每次启动端口和 token 都会重新生成。去 keeper「浏览器」页复制新的连接码，在浮球里重填一次";
+  }
+  if (reason === "origin") {
+    return "内核不认这个扩展的 id（多半是扩展目录换了位置加载的）";
+  }
+  return "内核拒绝了这条连接";
+}
+
+/** content script 入口：发一条请求，等结果。 */
+async function request(req, opts) {
   const sock = await ensureConnected();
   if (!sock) throw new Error('没连上内核');
   const id = req.id || `r${++seq}`;
+  // 默认 30 秒（抓取）。跑 agent 的那条要放宽，由调用方通过 opts.timeoutMs 给。
+  const timeoutMs = (opts && opts.timeoutMs) || 30000;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error('内核 30s 没回'));
-    }, 30000);
-    pending.set(id, { resolve, reject, timer });
+      refreshKeepalive();
+      reject(new Error(`内核 ${fmtTimeout(timeoutMs)} 没回`));
+    }, timeoutMs);
+    // onNote：收中间态（accepted / sessions）用。不 resolve，只是把消息透出去。
+    pending.set(id, {
+      resolve,
+      reject,
+      timer,
+      onNote: opts && opts.onNote,
+    });
+    // 有请求在飞就把保活闹钟挂上：这一轮可能跑很久，SW 不能在这期间被回收
+    ensureKeepalive();
     sock.send(JSON.stringify({ ...req, id }));
   });
 }
@@ -352,10 +474,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // 下一步完全不同，混成一个布尔就没法给出对应指引了。
   if (msg && msg.type === 'keeper:status') {
     loadConfig().then((cfg) => {
+      const isOpen = !!(ws && ws.readyState === WebSocket.OPEN);
       sendResponse({
-        ok: !!(ws && ws.readyState === WebSocket.OPEN),
+        ok: isOpen,
+        /* 「正在连接」必须来自**真实的握手状态**（connecting 非空 = 手上有个没
+           兑现的连接 promise），不能让 content script 自己乐观地假装。
+           假装的代价是：内核根本没跑时状态条会一直转，用户对着一个永远在旋转
+           的东西等下去，而真相是早就失败了——那比显示「未连接」更糟。
+           真实状态下，握手一旦失败 connecting 就被清掉，这里自然回到「未连接」。 */
+        connecting: connecting !== null && !isOpen,
         url: baseUrl || cfg.kernelUrl || "",
         configured: !!cfg.kernelUrl,
+        /* 最近一次被拒的原因。状态条要能把「地址填了但内核不认」和「地址根本没填」
+           区分开——前者的下一步是重新复制连接码，后者是去填。合成一个 ok 就没了，
+           而这两种情况都会表现为"连不上"。 */
+        denial: lastDenial || "",
+        denialText: lastDenial ? denialText(lastDenial) : "",
       });
     });
     return true;
@@ -375,11 +509,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (!msg || msg.type !== 'keeper:request') return false;
 
+  const payload = Object.assign({}, msg.payload || {});
+  const tabId = sender && sender.tab && sender.tab.id;
+
+  /* ---- 浮球对话：不取页面数据，原样转发 ----
+     抓取那条路会先 attachPageData 把整页 innerText 塞进 payload，而提问这条路
+     恰恰**不能**这么做：内核够不到用户 Chrome 那一页，能送过去的只有用户在
+     content.js 里亲自读到的那点上下文（URL / 标题 / 选区）。替他把整页塞进去
+     既是没必要的几万字 token，也会让「没选中内容 → agent 看不到这页」这件事
+     变得看不出来——用户会以为 agent 读过了。 */
+  if (payload.cmd === 'agent:ask' || payload.cmd === 'agent:sessions'
+      || payload.cmd === 'agent:latest') {
+    const ask = payload.cmd === 'agent:ask';
+    request(payload, {
+      timeoutMs: ask ? ASK_TIMEOUT_MS : 30000,
+      /* 内核的中间态（accepted / sessions）转回发起的那一页。它不在 DOM 里的
+         地方也不涉及权限，`chrome.tabs.sendMessage` 是发给自己扩展的标签页。 */
+      onNote: (note) => {
+        if (typeof tabId !== 'number' || tabId < 0) return;
+        chrome.tabs.sendMessage(tabId, { type: 'keeper:note', note }).catch(() => {
+          /* 页面已经关了/导航走了：请求本身还在内核侧跑，结果回来时同样收不到 */
+        });
+      },
+    })
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;
+  }
+
   /* 先就地取数再转发：内核拿到 page_data 就不再需要去浏览器里"找"这一页。
      注意 payload 是**拷贝**——直接改 msg.payload 会在 content script 重用同一个
      对象时留下上一次的数据。 */
-  const payload = Object.assign({}, msg.payload || {});
-  const tabId = sender && sender.tab && sender.tab.id;
   attachPageData(tabId, payload)
     .catch(() => {})// 取不到不是错误，交给内核老路
     .then(() => request(payload))

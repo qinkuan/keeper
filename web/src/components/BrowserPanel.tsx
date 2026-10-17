@@ -169,10 +169,6 @@ function NativeBrowser({
     b.setVisible(!overlayOpen);
   }, [b, overlayOpen]);
 
-  // 面板被卸载（工作台切到编码 / 关闭）必须销毁原生视图：留着它会继续跑
-  // 自己的定时器和视频，白耗 CPU，而且它还浮在页面上挡住别的东西
-  useEffect(() => () => b.close(), [b]);
-
   // 状态订阅之外再主动拉一次当前地址：视图是在挂载那刻创建的，头几条状态事件
   // 很可能早于这次订阅（StrictMode 下还会先建后拆一次），只靠事件的话
   // state.url 会一直空着 —— 页面明明开着，抓取按钮却一直是灰的。

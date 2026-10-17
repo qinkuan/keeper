@@ -19,7 +19,7 @@ import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -37,20 +37,16 @@ from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, resolve_artifact_uri
 from .context import set_agent, set_task_id, set_task_item
 from .hub import (
-    ensure_run,
-    finish as hub_finish,
-    publish_delta,
-    publish_step,
     snapshot as hub_snapshot,
     subscribe as hub_subscribe,
     unsubscribe as hub_unsubscribe,
 )
-from .runs import register_run, unregister_run
 from .service import (
     SESSION_STATUS_DELETED,
     ChatService,
     default_initiator_id,
     resolve_workspace,
+    run_one_ask,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,6 +171,12 @@ class ChatStreamIn(BaseModel):
     session_id: str = ""
     step_id: str = ""
     user_space_id: str = ""
+    # 本次运行要建的会话属于哪一类。「对话」页发 chat，浏览器页发 browser。
+    #
+    # 为什么发消息这条路也要带：会话是**发第一条消息时**才建的（侧栏「新对话」只清
+    # 状态、不预建），所以对「点新对话后发第一条」这个最常见的路径，这里就是它落库
+    # 时唯一的类别来源。已有会话一律沿用库里的值，不因为这里传了什么而改写。
+    kind: Literal["chat", "task", "browser"] = "chat"
     # 本次运行的标识（前端生成）：点「停止生成」时按它精确中止这一次，
     # 而不是按 session 粗粒度停——同一会话可能有别的请求在跑。
     run_id: str = ""
@@ -186,8 +188,9 @@ class ChatAbortIn(BaseModel):
     run_id: str
 
 
-# 被请求中止的 run_id 集合：流式循环每步 / 每块都来这里问一次「该停了吗」
-_STOP_RUNS: set = set()
+# 「被请求中止的 run_id 集合」原本是个模块级私有集合。浮球的「对这一页提问」也要用
+# 同一套停止机制（否则那一轮停不掉），所以它现在住在 chat/runs.py 里。
+from .runs import clear_stop, is_stopped, request_stop
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
@@ -284,7 +287,7 @@ def _sse_stream(factory, run_id: str = "") -> StreamingResponse:
     # （add）先于本请求执行时写入的停止标记，导致「停止生成」失效。清理交给 runner
     # 的 finally。
     async def should_stop() -> bool:
-        return bool(run_id and run_id in _STOP_RUNS)
+        return is_stopped(run_id)
 
     async def runner() -> None:
         try:
@@ -296,8 +299,7 @@ def _sse_stream(factory, run_id: str = "") -> StreamingResponse:
             logger.exception("流式执行失败")
             await q.put(("error", {"message": str(e)}))
         finally:
-            if run_id:
-                _STOP_RUNS.discard(run_id)
+            clear_stop(run_id)
             await q.put(None)  # 结束哨兵
 
     task = asyncio.create_task(runner())
@@ -333,71 +335,46 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
     _agent(agent_id)
     q: asyncio.Queue = asyncio.Queue()
 
-    async def on_step(seq: int, step) -> None:
-        data = {
-            "seq": seq,
-            "thought": getattr(step, "thought", "") or "",
-            "tool": getattr(step, "tool", None),
-            "args": getattr(step, "args", None),
-            "observation": getattr(step, "observation", None),
-            "kind": getattr(step, "kind", None),
-        }
-        # 双写：本连接的队列照旧推给当前订阅者；hub 再留一份缓冲，
-        # 供「整页刷新后拿同一 run_id 重连」时回放（见 chat/hub.py）
-        publish_step(run_id, data)
+    async def on_step(seq: int, data: Dict[str, Any]) -> None:
+        """把步骤推给**本连接**的订阅者。
+
+        hub 缓冲那份由 run_one_ask 写（它对所有入口统一负责），这里只管当前这条 SSE——
+        这就是当初注释里说的「双写」的另一半。
+        """
         await q.put(("step", data))
 
     async def on_delta(text: str) -> None:
         """最终回答的一小段（token 级流式）。"""
-        publish_delta(run_id, text)
         await q.put(("delta", {"text": text}))
 
     run_id = body.run_id or ""
     # 注意：不要在 runner 启动前 discard(run_id)。run_id 由前端每次 newRunId 全局
     # 唯一，不存在「上次遗留同 id」的情况；若在此 pre-discard，会误清掉 apiAbortChat
-    # （add）先于本请求执行时写入的停止标记，导致「停止生成」失效。清理交给 finally。
-
-    svc = ChatService(agent_id=agent_id, session_id=body.session_id or None)
-    # 给这一轮留一份内存缓冲：整页刷新后靠它把「已经发生过的」回放出来（见 hub.py）
-    ensure_run(run_id, agent_id)
-
-    async def should_stop() -> bool:
-        """用户点了「停止生成」？流式每收到一块、每跑完一步都问一次。"""
-        return bool(run_id and run_id in _STOP_RUNS)
+    # （add）先于本请求执行时写入的停止标记，导致「停止生成」失效。清理交给
+    # run_one_ask 的 finally。
 
     async def runner() -> None:
         try:
-            # 会话 id 必须在**真正开跑之前**定下来：它是「这一轮在哪儿」的唯一 key——
-            # register_run 靠它建 session→run 映射，刷新后 load_messages 也靠它查活跃
-            # run。原本注册挂在第一个 step 上，于是「发完消息还在思考」就刷新（最
-            # 常见的刷新时机）时，影射还没建立，那一轮整个找不回来。
-            await svc.ensure_session_id()
-            register_run(svc.session_id, run_id)
-            # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进 localStorage，
-            # 否则用户刷新后连「该去看哪个会话」都不知道，历史也会整片消失。
-            await q.put(("session", {"session_id": svc.session_id}))
-            res = await svc.ask(
-                body.q,
-                step_id=body.step_id or None,
-                user_space_id=body.user_space_id or None,
+            res = await run_one_ask(
+                agent_id=agent_id,
+                session_id=body.session_id or "",
+                text=body.q,
+                run_id=run_id,
+                kind=body.kind,
+                step_id=body.step_id or "",
+                user_space_id=body.user_space_id or "",
+                # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
+                # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
+                # 整片消失。
+                on_session=lambda sid: q.put(("session", {"session_id": sid})),
                 on_step=on_step,
                 on_delta=on_delta,
-                should_stop=should_stop,
             )
-            # 先封存终态再推给当前连接：hub 里的 done 帧是「刷新后重连」时
-            # 直接拿结果的依据（那一轮已经跑完的情况）
-            hub_finish(run_id, "done", res)
             await q.put(("done", res))
         except Exception as e:  # 兜底：异常也要收尾，否则前端会一直挂着
             logger.exception("chat/stream 执行失败")
-            hub_finish(run_id, "error", {"message": str(e)})
             await q.put(("error", {"message": str(e)}))
         finally:
-            if run_id:
-                _STOP_RUNS.discard(run_id)
-            # 注销放在最后，且用**注销时**的 svc.session_id 而不是进来时的
-            # body.session_id：新会话的 id 是 ask() 里补建的，只有 svc 知道
-            unregister_run(svc.session_id, run_id)
             await q.put(None)  # 结束哨兵
 
     task = asyncio.create_task(runner())
@@ -421,8 +398,7 @@ async def abort_chat(agent_id: str, body: ChatAbortIn) -> Dict[str, Any]:
     停下来，已生成的内容和已完成的步骤都会保留并落库。
     """
     _agent(agent_id)
-    if body.run_id:
-        _STOP_RUNS.add(body.run_id)
+    request_stop(body.run_id)
     return {"ok": True, "run_id": body.run_id}
 
 
@@ -506,6 +482,12 @@ class NewSessionIn(BaseModel):
     """新建一个空会话。"""
 
     user_space_id: str = ""
+    # 会话类别。缺省 chat（普通会话）；浏览器页传 browser。
+    #
+    # 用 Literal 而不是 str：数据库这列是无 CHECK 的 TEXT，写错一个字母不会报错，
+    # 只会让那条会话在所有列表里都消失（哪个类别都不匹配）。在入口挡成 422，
+    # 比让人对着一个空列表猜强得多。
+    kind: Literal["chat", "task", "browser"] = "chat"
 
 
 @router.post("/{agent_id}/sessions")
@@ -522,11 +504,14 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
 
     _agent(agent_id)
     svc = ChatService(agent_id=agent_id)
+    # 类别必须在这里定下来：_ensure_session 只在**新建**的那一次读它，之后一律沿用
+    # 库里的值。所以这一行是"这条会话属于哪一页"的唯一决定点。
+    svc.session_kind = body.kind
     # 工作区：没指定就用默认用户空间。这里必须显式定下来，因为绑定只发生在
     # **建会话那一刻**——等第一次 ask 再定就晚了（那时会话已存在，不再改绑定）。
     svc.user_space_id = body.user_space_id or await chat_service._default_space_id()
     sid = await svc.ensure_session_id()
-    return {"session_id": sid}
+    return {"session_id": sid, "kind": body.kind}
 
 
 
@@ -570,8 +555,13 @@ async def sessions(
     initiator_id: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
+    kind: Optional[Literal["chat", "task", "browser"]] = None,
 ) -> Dict[str, Any]:
     """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。
+
+    传 ``kind`` 则只列该类别，不传就是全部。「浏览器」页靠它把列表收窄到浏览器
+    会话——**必须由后端筛**：前端过滤是"取 50 条再挑出 browser 那几条"，浏览器
+    会话一多就会把普通会话挤掉，且翻页会出现空洞（每页都可能一条都不匹配）。
 
     ``offset`` + ``limit`` 是分页：侧栏一次只取几条（每页 5 条）往下翻，
     而不是一次性把全部会话捞回来——会话多了以后那能把侧栏卡住。
@@ -579,7 +569,7 @@ async def sessions(
     _agent(agent_id)
     items = await ChatService(
         agent_id=agent_id, initiator_id=initiator_id
-    ).list_sessions(limit=limit, offset=offset)
+    ).list_sessions(limit=limit, offset=offset, kind=kind)
     return {"sessions": items}
 
 
@@ -605,6 +595,35 @@ async def session_messages(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return await svc.load_messages(session_id, limit=limit, before_seq=before_seq)
+
+
+@router.get("/{agent_id}/sessions/{session_id}/activity")
+async def session_activity(agent_id: str, session_id: str) -> Dict[str, Any]:
+    """这条会话**此刻有没有在跑的一轮**。只回两个字段，几十字节。
+
+    为什么需要它
+    ------------
+    前端已经有两套「接住正在跑的那一轮」的机制——3 秒轮询和 SSE 重连——但它们
+    **都被门控在"页面已经知道有这一轮"上**：
+
+    * 轮询：``if (!msgs.some((m) => m.streaming)) return;``，要已有「进行中」气泡；
+    * 重连：``recoverRunId`` 来自 ``load_messages`` 合成的那个气泡。
+
+    页面自己发起的轮次天然满足（它自己知道 runId），于是两套都能启动。但**浮球发起
+    的那一轮，页面完全不知情**——两套都不启动，用户只能手动刷新去触发一次
+    ``load_messages``。这就是"浮球发了消息、agent 界面要刷新才看得到"的成因。
+
+    与其让页面去全量拉消息（一次最多 200 条）来发现"有没有新东西"，不如问一个
+    几十字节的问题：**变了才去拉**。
+
+    纯内存查表（``chat/runs.py`` 的注册表），不打库、不校验归属——所以它便宜到可以
+    每 3 秒问一次。归属校验放在真正取消息的 ``/messages`` 上，那里本来就有。
+    """
+    _agent(agent_id)
+    from .runs import active_run_id
+
+    run_id = active_run_id(session_id) or ""
+    return {"running": bool(run_id), "run_id": run_id}
 
 
 @router.get("/{agent_id}/config")

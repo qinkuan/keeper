@@ -24,7 +24,10 @@
    * 生效"和"我还没刷新页面"这两件事，从外面看**一模一样**——按钮在、点下去没反应、
    * 不报错。这标记就是用来一眼分清的：hover 浮球看 title 尾部，或打开连接码输入框
    * 看提示行末尾。 */
-  const BUILD = "1018e";
+  /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
+     代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
+     MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
+  const BUILD = "1024a";
 
   // ---------- 页面身份（cid）----------
   //
@@ -153,7 +156,10 @@
     ".k-panel{",
     // 球在右上角，面板就在它下方展开（原来是 bottom:50px 在球上方）
     "  position:absolute;right:0;top:50px;width:328px;",
-    "  max-height:min(62vh,520px);display:none;flex-direction:column;",
+    /* 高度上限从 520px 放宽到 660px：多了一个「对这一页提问」区（输入框 + 会话
+       选择 + 结果，约 210px）。不放宽的话结果区会被压到只剩几十像素，而它恰恰
+       是这一块唯一要看的东西——面板能显示、不等于显示得下。 */
+    "  max-height:min(76vh,660px);display:none;flex-direction:column;",
     "  background:rgba(17,20,26,.97);color:#e8eaed;",
     "  border:1px solid rgba(255,255,255,.12);border-radius:12px;",
     "  box-shadow:0 12px 40px rgba(0,0,0,.4);overflow:hidden;",
@@ -168,6 +174,11 @@
     ".k-dot{width:7px;height:7px;border-radius:50%;background:#80868b;",
     "  flex:0 0 auto;transition:background .15s ease}",
     ".k-dot.k-on{background:#34a853;box-shadow:0 0 0 2px rgba(52,168,83,.22)}",
+    /* 握手中：琥珀色 + 轻微呼吸。为什么不能用 k-on 那种纯色常亮——「正在连」是
+       一个**过程**，需要一个仍在发生的信号；静态的绿点会被当成"已经好了"。 */
+    ".k-dot.k-wait{background:#fbbc04;box-shadow:0 0 0 2px rgba(251,188,4,.22);",
+    "  animation:k-blink 1s ease-in-out infinite}",
+    "@keyframes k-blink{0%,100%{opacity:1}50%{opacity:.35}}",
     ".k-lurl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;",
     "  white-space:nowrap;color:#9aa0a6;",
     "  font:10.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}",
@@ -215,6 +226,54 @@
     ".k-out img{max-width:100%;display:block;border-radius:7px;",
     "  border:1px solid rgba(255,255,255,.12)}",
     ".k-hint{color:#80868b;padding:0 10px 10px}",
+    // ---- 对这一页提问 ----
+    /* 分区标题：两块能力（提问 / 抓取）用途完全不同，混在一排按钮里会让人以为
+       「发送」和「抓文字」是同一件事的两步。 */
+    ".k-sec{padding:9px 10px 4px;font-size:10.5px;color:#80868b;flex:0 0 auto}",
+    ".k-askrow{display:flex;gap:6px;padding:0 10px;align-items:flex-end;flex:0 0 auto}",
+    ".k-q{flex:1;min-width:0;resize:none;background:rgba(255,255,255,.07);",
+    "  border:1px solid rgba(255,255,255,.14);border-radius:7px;color:#e8eaed;",
+    "  padding:6px 8px;font:12px/1.5 ui-sans-serif,system-ui,sans-serif;",
+    "  outline:none;min-height:36px}",
+    ".k-q:focus{border-color:" + BRAND + "}",
+    ".k-q::placeholder{color:#7b8087}",
+    ".k-go{cursor:pointer;border:0;border-radius:7px;background:" + BRAND + ";",
+    "  color:#fff;font-size:11.5px;padding:0 13px;height:36px;flex:0 0 auto}",
+    ".k-go:disabled{opacity:.45;cursor:not-allowed}",
+    ".k-askmeta{display:flex;align-items:center;gap:8px;padding:6px 10px 0;flex:0 0 auto}",
+    /* 会话横条：最左一个「新对话」，右边各会话，横向可滚动。
+       原来是原生 <select>：它只能纵向弹出列表，看不到"现在选的是哪条"，
+       而这条选择决定这轮对话记到哪去——是发消息前就该看见的事实。
+       tab 不限宽也不截断：横条本来就能左右滑，把标题截成「浮球…」反而分不清
+       两条会话；能滑就不需要省略号。 */
+    ".k-tabs{display:flex;gap:5px;margin-top:5px;padding:0 10px 6px;",
+    "  overflow-x:auto;flex:0 0 auto;scrollbar-width:none;-ms-overflow-style:none}",
+    ".k-tabs::-webkit-scrollbar{display:none}",
+    ".k-tab{flex:0 0 auto;overflow:visible;white-space:nowrap;cursor:pointer;",
+    "  border-radius:5px;font-size:10.5px;line-height:1.5;padding:2px 7px;",
+    "  background:rgba(255,255,255,.05);color:#9aa0a6;",
+    "  border:1px solid rgba(255,255,255,.12);outline:none}",
+    ".k-tab:hover{border-color:rgba(138,180,248,.5);color:#c7d7f5}",
+    ".k-tab.k-on{background:" + BRAND + ";border-color:" + BRAND + ";color:#fff;font-weight:600}",
+    /* 加载失败时横条上那个**不可点**的提示。它必须看得见：横条整个由内核数据
+       渲染，内核一断就只剩「新对话」，而那看起来跟"加载成功但你没别的会话"
+       一模一样——用户没法判断到底是哪一回事。 */
+    ".k-tab.k-bad{color:#f28b82;border-color:rgba(242,139,130,.4);",
+    "  background:rgba(242,139,130,.08)}",
+    ".k-tab.k-bad:hover{border-color:rgba(242,139,130,.75);color:#f28b82}",
+    /* 可复制：光标形状就是"这里能点"的唯一提示（浮球里没有按钮标签的位置），
+       别省。 */
+    ".k-copy{cursor:copy}",
+    ".k-sel{margin-left:auto;font-size:10.5px;color:#80868b;",
+    "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}",
+    /* 有选中文字时点亮：它是"agent 能不能看见这页"唯一的信号，必须一眼可辨。 */
+    ".k-sel.k-has{color:#8ab4f8}",
+    ".k-askout{margin:7px 10px 0;padding:8px 9px;border-radius:8px;",
+    "  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);",
+    "  font-size:11.5px;line-height:1.65;color:#e8eaed;white-space:pre-wrap;",
+    "  word-break:break-word;user-select:text;max-height:240px;overflow:auto;",
+    "  flex:0 0 auto}",
+    ".k-askout.k-wait{color:#9aa0a6}",
     "</style>",
     '<div class="k-panel" id="p">',
     '  <div class="k-link">',
@@ -231,6 +290,21 @@
     '    </div>',
     '    <div class="k-cfgtip" id="ctip">整段粘贴即可，不用拆开填。</div>',
     "  </div>",
+    /* 占位文案就是这一节的用途本身，所以上面不再挂一个「对这一页提问」的小节
+       标题——同一句话在一屏里出现两次，读起来像出了什么重复渲染。 */
+    /* 会话横条放在**输入框上面**：它决定"这轮记到哪条会话"，是发消息前就该看见
+       的事实，压在输入框下面（原来那个 <select> 的位置）会让人发完才知道记哪了。 */
+    '  <div class="k-tabs" id="pick" title="这条对话记到哪条会话"></div>',
+    '  <div class="k-askrow">',
+    '    <textarea class="k-q" id="q" rows="2" spellcheck="false"',
+    '      placeholder="对这一页提问"></textarea>',
+    '    <button class="k-go k-primary" id="go" type="button">发送</button>',
+    '  </div>',
+    '  <div class="k-askmeta">',
+    '    <span class="k-sel" id="sel">未选中文字</span>',
+    "  </div>",
+    '  <div class="k-askout" id="ao" hidden></div>',
+    '  <div class="k-sec">抓取</div>',
     '  <div class="k-bar">',
     '    <button class="k-b k-primary" id="bText">抓文字</button>',
     '    <button class="k-b" id="bShot">截图</button>',
@@ -307,7 +381,66 @@
     if (/Receiving end does not exist/i.test(msg)) {
       return "扩展后台没响应，刷新本页试试。";
     }
+    /* 内核拒绝连接时 SW 给出的是**可执行**的句子（"去重新复制连接码"），
+       已经是人话了，别再包一层前缀把它说得更含糊。 */
+    if (/连接码不对|内核不认这个扩展|内核拒绝了这条连接/.test(msg)) {
+      return msg;
+    }
+    if (/与内核的连接断了/.test(msg)) {
+      return "和内核的连接断了。先看浮球状态条那里写的是什么——"
+        + "如果是「连接码已过期」，去 keeper「浏览器」页复制新的连接码重填一次。";
+    }
     return msg;
+  };
+
+  /** 复制一段文本，返回成功与否。
+   *
+   *  为什么不能直接调 ``navigator.clipboard``：content script 跑在**页面**的上下文
+   *  里，而页面可能是 http（非安全上下文），那种页面上 ``navigator.clipboard``
+   *  是 undefined。``execCommand`` 虽然早被废弃，但它在这些页面上仍然可用，是
+   *  唯一出路——所以留着它当后备，而不是为了"用新 API"把一批页面甩在后面。
+   *
+   *  临时输入框放进 shadow root 而不碰页面 DOM：页面可能带严格 CSP 或全局
+   *  CSS（``textarea{...}``），插进去既可能报错也可能被染上样式。
+   */
+  const copyText = (text) => {
+    const s = String(text || "");
+    if (!s) return false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(s);
+        return true;
+      }
+    } catch (e) { /* 落到下面的后备 */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = s;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      root.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      root.removeChild(ta);
+      return !!ok;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  /** 把某个元素变成"点一下复制这段文本"，并在复制后给一次即时反馈。
+   *
+   *  反馈必须**可见**：剪贴板是看不见的地方，点了没反应时用户会以为按钮坏了，
+   *  于是再点七八次。所以文案临时变成「✓ 已复制」，过一会儿自己还原。 */
+  const makeCopyable = (el, getText, doneLabel = "✓ 已复制") => {
+    el.classList.add("k-copy");
+    el.title = "点击复制";
+    let timer = null;
+    el.addEventListener("click", () => {
+      const ok = copyText(getText());
+      if (timer) clearTimeout(timer);
+      const origin = el.textContent;
+      el.textContent = ok ? doneLabel : "复制失败";
+      timer = setTimeout(() => { el.textContent = origin; }, 1400);
+    });
   };
 
   /* 把内部状态镜像到 host 的 dataset，让**闭 shadow** 的内容能被外部读到。
@@ -328,6 +461,385 @@
   ball.title = "keeper·" + BUILD;
   const bText = $("bText"), bShot = $("bShot"), bEval = $("bEval"), bCopy = $("bCopy");
   const ldot = $("ld"), lurl = $("lu"), lbtn = $("lb");
+  const qbox = $("q"), goBtn = $("go"), pickBar = $("pick"),
+        selTip = $("sel"), askOut = $("ao");
+  mark("ask", "idle");
+
+  /* ---------- 对这一页提问 ----------
+   *
+   * 这条路的上下文完全来自**用户给的东西**（URL / 标题 / 选中的文字），不是整页。
+   *
+   * 为什么不给整页：内核的 Playwright 只连得着桌面壳那个内置浏览器，够不到用户
+   * 自己的 Chrome（见 keeper/browser/agent_browser.py 开头）。所以从浮球到 agent
+   * 这一段里，页面内容只能由扩展自己送；而送多少是**用户的决定**——全选整页动辄
+   * 几万字，塞进上下文既贵又挤掉问题本身。
+   *
+   * 于是"没选中文字"这件事必须**明说**：那种情况下 agent 只看得到一句问题和
+   * 一个 URL，它会开始猜。把这件事藏起来，用户看到的是"模型不行"。
+   */
+  const SEL_LIMIT = 4000;   // 与内核 BALL_SELECTION_LIMIT 对齐
+
+  const currentSelection = () => {
+    try {
+      const t = String((window.getSelection && window.getSelection()) || "");
+      return t.replace(/\s+/g, " ").trim().slice(0, SEL_LIMIT);
+    } catch (e) {
+      return "";
+    }
+  };
+
+  const paintSelection = () => {
+    const s = currentSelection();
+    const n = s.length;
+    selTip.textContent = n
+      ? "已选中 " + n + " 字" + (n >= SEL_LIMIT ? "（已截断）" : "")
+      : "未选中文字 · agent 看不到本页";
+    selTip.className = "k-sel" + (n ? " k-has" : "");
+    return s;
+  };
+
+  /* 选区变化很频繁（拖动选择的过程每个字符都触发），但提示文案按字数走，
+     只在"有无/字数"变化时才重画，省掉无意义的 DOM 写入。 */
+  let selPainted = -1;
+  const onSelChange = () => {
+    const n = currentSelection().length;
+    if (n === selPainted) return;
+    selPainted = n;
+    paintSelection();
+  };
+  document.addEventListener("selectionchange", onSelChange);
+
+  /* 会话选择：存扩展自己的 storage，内核不需要知道用户上次选了哪条。
+     不存内核是因为这条选择是**浮球这个界面**的偏好，而内核没有"某个浮球"的概念
+     ——存过去就得再引入一张映射表，换来的只是一个能省两次点击的功能。
+
+     记在单独一个变量里而不是读某个控件的 value：控件上的选中态是**渲染出来的
+     结果**（横条的 .k-on 类），拿它当真相来源就得在每次改值后再去 DOM 里反查一遍，
+     而选项列表又是异步到的——那段时间控件上根本没有可反查的东西。变量没有这个
+     时序问题，控件只是它的投影。 */
+  const SESS_KEY = "ballSessionId";
+  /* 「新对话」在内部的表示。
+   *
+   * 为什么不能直接用空串：内核把"空的 session_id"解释成「用浮球默认会话」
+   * （api/agent_bridge.py::_resolve_ball_target 的回退分支）。所以点「新对话」
+   * 发出去，会记进上一条——用户选的是新会话，拿到的却是旧会话，界面上还没有
+   * 任何迹象能让他发现。原先那个 <select> 里的「（新对话）」项也是这么假着。
+   *
+   * 所以新建必须**显式**告诉内核（new_session: true）。这个哨兵值不可能撞上真实
+   * 会话 id——后者是 26 位 ULID。 */
+  const NEW_SESS = "__new__";
+  let chosenSess = "";
+  try {
+    chrome.storage.local.get([SESS_KEY]).then((g) => {
+      chosenSess = (g && g[SESS_KEY]) || "";
+      mark("session", chosenSess === NEW_SESS ? "new" : (chosenSess || "default"));
+    }).catch(() => {});
+  } catch (e) { /* 存储不可用就用默认值 */ }
+
+  const isNewSess = () => chosenSess === NEW_SESS;
+
+  const setChosen = (sid) => {
+    chosenSess = sid || "";
+    mark("session", isNewSess() ? "new" : (chosenSess || "default"));
+    try { chrome.storage.local.set({ [SESS_KEY]: chosenSess }); } catch (e) { }
+  };
+
+  /* 画一个 tab。
+   *
+   * 抽到模块级（而不是留在 applySessions 里）是因为**横条不该依赖内核**：「新对话」
+   * 是一个本地选项，不拉列表也该在。整个横条原先都由 applySessions 渲染，于是内核
+   * 一断、`agent:sessions` 一失败，横条就是**彻底空的**：连「新对话」都没了，用户
+   * 连"现在还能不能发消息"都看不出来。
+   *
+   * 代价是这里引用了 applySessions 之后才声明的 shownMsgId / setAskOut / askOut /
+   * fetchLatest —— 但它们只在**点击时**才用到，那必然发生在脚本执行完毕之后，
+   * 没有 TDZ 风险。 */
+  const addTab = (sid, label, title) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "k-tab" + (sid === chosenSess ? " k-on" : "");
+    b.textContent = label;
+    b.dataset.sid = sid || "";
+    if (title) b.title = title;
+    b.addEventListener("click", () => {
+      /* 点当前已选中的那条 = 什么都不该发生。原来挂在 <select> 的 change 上，
+         浏览器只在值**变化**时才触发 change，所以重复点是安全的；换成 button
+         的 click 就得自己守住这道门——否则手滑点两下，正在看的那条回答就被
+         清空了还要重新拉一遍。 */
+      if (sid === chosenSess) return;
+      setChosen(sid);
+      /* 就地更新高亮，不重拉列表：列表内容没变，重拉只会让滚动位置跳一下，
+         用户点一下却看到界面在动。 */
+      Array.prototype.forEach.call(pickBar.children, (el) => {
+        el.classList.toggle("k-on", el.dataset.sid === (sid || ""));
+      });
+      const on = pickBar.querySelector(".k-on");
+      if (on && on.scrollIntoView) {
+        on.scrollIntoView({ block: "nearest", inline: "center" });
+      }
+      /* 换了会话，之前那条结果就不该继续占着显示位（这段原来挂在
+         <select> 的 change 上，横向条没有 change，统一放到点击里）。 */
+      shownMsgId = "";
+      setAskOut("");
+      askOut.hidden = true;
+      fetchLatest();
+    });
+    pickBar.appendChild(b);
+  };
+
+  /** 按会话列表重画整条横条（列表变了、或初次挂载时都走这里）。
+   *
+   *  ``persist=false`` 只更新内存、不落 storage：挂载那一刻 chosenSess 还没从
+   *  storage 读回来（get 是异步的），这时 setChosen("") 会把用户上次选的那条
+   *  **抹掉**——而它只是"还没读到"，不是"没有"。 */
+  const paintTabs = (list, def, persist = true) => {
+    pickBar.textContent = "";
+    /* 「新对话」固定在最左：它不是列表里的一条，而是"这一轮另起一条会话"这个动作。 */
+    addTab(NEW_SESS, "＋ 新对话", "新对话（这一轮另起一条会话）");
+    list.forEach((s) => addTab(s.id, s.title || "未命名", s.title || "未命名"));
+
+    // 优先级：用户上次选的（仍在列表里）→ 内核的默认那条 → 列表第一条。
+    // 后两级不能省：内核重启、或用户在浏览器页新建/删除了会话，上次那条可能没了。
+    //
+    // def 也必须在**列表里**才认：内核的 default_id 指向的那条可能刚被删、或这次
+    // 列表还没包含它。认了它却找不到对应 tab，结果是横条上一个都不高亮——比
+    // 落到「新对话」更糟，因为用户看不出自己处在一个不存在的会话上。
+    //
+    // 新对话态要**放行**：它本来就不在列表里（还没建），被当成"已失效"清掉的话，
+    // 用户刚点的「新对话」会被立刻弹回别的会话。
+    if (chosenSess && chosenSess !== NEW_SESS && !list.some((s) => s.id === chosenSess)) {
+      chosenSess = "";
+    }
+    const want = chosenSess
+      || (list.some((s) => s.id === def) ? def : "")
+      /* 列表只有一条时直接选它：横条上就它一个，不选中会显得"哪条都没选" */
+      || (list.length === 1 ? list[0].id : "");
+    if (persist) setChosen(want);
+    else chosenSess = want;
+    Array.prototype.forEach.call(pickBar.children, (el) => {
+      el.classList.toggle("k-on", el.dataset.sid === (want || ""));
+    });
+  };
+
+  /* 面板一挂上就先画一次空的：新对话这一项不依赖内核，先让它在，
+     内核连上后 applySessions 会带着列表重画一遍（persist=false：此时
+     storage 里的上次选择还没读回来，不能拿它去覆盖）。 */
+  paintTabs([], "", false);
+
+  const applySessions = (res) => {
+    const list = (res && res.sessions) || [];
+    const def = (res && res.default_id) || "";
+    /* 选中态只以 chosenSess 为真相来源，DOM 上的 .k-on 类是它的投影。 */
+    paintTabs(list, def);
+    mark("sessions", String(list.length));
+  };
+
+  /** 会话列表没拿到：在横条末尾挂一个不可点的红色提示。
+   *
+   *  为什么非做不可：横条的内容全部来自内核，失败时若什么都不显示，用户看到的
+   *  就只是"只有新对话"——与"加载成功、但我确实只有一条浮球会话"完全无法区分。
+   *  而这两种情况的处置完全不同（前者去查连接 / token，后者什么都不用做）。 */
+  const showTabsError = (why) => {
+    const text = why || "会话加载失败";
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "k-tab k-bad";
+    b.textContent = "⚠ " + text;
+    /* 可一键复制：这类报错通常是"说给用户听的一句话 + 要他做的一个动作"，
+       而真正的排查信息（Chrome 的原始英文、内核地址、token 状态）不在这句话里。
+       用户要么得手动选中这行小字（浮球里它本来就窄），要么得去翻控制台——
+       而绝大多数反馈里，对方要的第一句就是"把报错原文发我"。 */
+    makeCopyable(b, () => text);
+    pickBar.appendChild(b);
+  };
+
+  /* 这里**不**做并发去重。
+   *
+   * 试过，并因此出过事：用「正在拉就跳过」的布尔挡住重复请求，只要那一次
+   * sendMessage 挂起（SW 被回收、WS 半开等），标志就**永远停在 true**，
+   * 之后每次 loadSessions() 都被静默跳过 —— 表现正是"重新打开面板也拉不出
+   * 会话"，而连接灯好端端是绿的，用户和代码都看不出卡在哪。
+   *
+   * 省一个内核往返换不来这个风险：会话列表是低频动作，偶发重复拉一次最多多一
+   * 个往返，而卡死是永久的、且没有任何迹象。宁可重拉。 */
+  const loadSessions = async () => {
+    try {
+      const r = await chrome.runtime.sendMessage({
+        type: "keeper:request",
+        payload: { cmd: "agent:sessions" },
+      });
+      if (r && r.ok) applySessions(r.result);
+      else showTabsError((r && r.error) || "内核没回应");
+    } catch (e) {
+      showTabsError(explain(e));
+    }
+  };
+
+  const askAgent = async (q) => {
+    /* 新对话态：session_id 传空 + new_session=true，让内核**新建**一条。
+       只传空是不够的——空在 _resolve_ball_target 里的意思是「用浮球默认会话」，
+       那样点了新对话却记进上一条。（NEW_SESS 是内部哨兵，绝不能原样发出去。） */
+    const fresh = isNewSess();
+    const r = await chrome.runtime.sendMessage({
+      type: "keeper:request",
+      payload: {
+        cid: ensureCid() || "",
+        cmd: "agent:ask",
+        q,
+        session_id: fresh ? "" : chosenSess,
+        new_session: fresh,
+        page: {
+          url: location.href,
+          title: document.title,
+          selection: currentSelection(),
+        },
+      },
+    });
+    if (!r) throw new Error("内核没响应（扩展可能已被禁用）");
+    if (!r.ok) throw new Error(r.error || "内核返回失败");
+    return r.result;
+  };
+
+  const setAskOut = (text, cls) => {
+    askOut.textContent = text;
+    askOut.className = "k-askout" + (cls ? " " + cls : "");
+    askOut.hidden = false;
+    /* 报错那几行都以「⚠ 」开头，让它们一键可复制。正常回答**不加**：
+       那里用户常要的是自己拖选其中一段，整段复制反而抢了他的动作。
+       （出错时他要的是"把这个报错发给对方"，所以整段正是他想要的。）
+       用 onclick 赋值而不是 addEventListener：本函数会被反复调用，累加监听器
+       会让一次点击连着复制好几遍。 */
+    const isErr = String(text || "").startsWith("⚠ ");
+    askOut.classList.toggle("k-copy", isErr);
+    askOut.title = isErr ? "点击复制报错原文" : "";
+    if (!isErr) { askOut.onclick = null; return; }
+    const full = String(text);
+    askOut.onclick = () => {
+      const ok = copyText(full);
+      askOut.textContent = full + (ok ? "\n\n✓ 已复制" : "\n\n复制失败");
+      setTimeout(() => { askOut.textContent = full; }, 1400);
+    };
+  };
+
+  /* 已经显示过的那条结果。判重只用这一个值——浮球只显示最新一条，所以「同一条
+     消息被重新拉到」是常态（每次开面板都会补取一次），只有「多了一条新的」才该
+     更新。不记它的话每次打开面板都会重写结果区，滚动位置被顶回顶部。 */
+  let shownMsgId = "";
+
+  /* 「这一轮还在跑」的轮询。2.5 秒一次，够跟手又不至于变成对内核的打扰；
+     面板一关就停——没必要在看不见的时候继续问。 */
+  let latestTimer = null;
+  const scheduleLatest = () => {
+    if (latestTimer || !panel.classList.contains("k-open")) return;
+    latestTimer = setTimeout(() => {
+      latestTimer = null;
+      fetchLatest();
+    }, 2500);
+  };
+
+  /** 补取某条会话的最新一条回答。与 SW 存活无关，所以它是 SW 被回收后的兜底。 */
+  const fetchLatest = async () => {
+    /* 新对话态直接跳过：这一轮还没有会话，没有"最新回答"可补。
+       不跳过的话内核会拿浮球默认会话（那条旧会话）来答，把**上一轮的内容**
+       显示在"新对话"的提问区里——用户会以为 agent 在复读。 */
+    if (isNewSess()) return;
+    try {
+      const r = await chrome.runtime.sendMessage({
+        type: "keeper:request",
+        payload: { cmd: "agent:latest", session_id: chosenSess },
+      });
+      if (!r || !r.ok) return;
+      const last = r.result || {};
+      if (last.in_progress) {
+        /* 这一轮还在跑（多半是浮球关着、或中途 SW 被回收过一次）。
+           如实说"还在跑"并继续轮询——否则用户看到的是一片空白的提问区，
+           分不清是还没开始还是已经失败了。 */
+        setAskOut("这一轮还在跑…", "k-wait");
+        mark("ask", "running");
+        scheduleLatest();
+        return;
+      }
+      if (!last.message_id || last.message_id === shownMsgId) return;
+      shownMsgId = last.message_id;
+      setAskOut(last.text || "（这一轮没有内容）");
+      mark("ask", "done");
+    } catch (e) {
+      mark("ask", "err");
+    }
+  };
+
+  let asking = false;
+  const doAsk = async () => {
+    if (asking) return;
+    const q = qbox.value.trim();
+    if (!q) { setAskOut("先写点什么。", "k-wait"); return; }
+    asking = true;
+    goBtn.disabled = true;
+    qbox.disabled = true;
+    // 立刻给反馈，不等内核：这一轮可能跑很久，没有这句用户会以为按钮坏了
+    setAskOut("正在思考…", "k-wait");
+    mark("ask", "waiting");
+    try {
+      const res = await askAgent(q);
+      setAskOut(res && res.text ? res.text : "（没有返回内容）");
+      // 置空而不是记下 id：这条已经被本地消费过，下次开面板补取时不必重画
+      shownMsgId = "";
+      mark("ask", "done");
+      qbox.value = "";         // 只留最新一条，问完清空方便连续问
+      if (res && res.session_id && res.session_id !== chosenSess) {
+        /* 新建那一轮：把选中项从「新对话」切到刚落地的这条。不切的话用户接着
+           追问第二条时仍是新对话态 —— 那就又建一条新会话，一次追问散成好几条，
+           与他点「新对话」时"换个话题重新开始"的意图正好相反。 */
+        if (isNewSess()) setChosen(res.session_id);
+        loadSessions();       // 新建了一条，或内核回退了会话（选中的那条被删）
+      }
+    } catch (e) {
+      setAskOut("⚠ " + explain(e), "k-wait");
+      mark("ask", "error");
+    } finally {
+      asking = false;
+      goBtn.disabled = false;
+      qbox.disabled = false;
+    }
+  };
+
+  goBtn.addEventListener("click", doAsk);
+  // Enter 发送、Shift+Enter 换行：单行 textarea 上这是最符合预期的映射
+  qbox.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      doAsk();
+    }
+  });
+  /* 横向条没有 <select> 的 change：选中变化由各 tab 自己的 click 处理
+     （见 applySessions 里的 addTab），那里顺带做清结果 + 拉该会话最新回答。 */
+  paintSelection();
+
+  /* 竖向滚轮 → 横向滚动。
+     会话一多就横向溢出，而面板是个窄条，鼠标滚轮默认只推纵向——用户会发现
+     "条子滑不动"。所以把 deltaY 转成 scrollLeft。
+     必须挂 { passive: false } 才能 preventDefault：不拦的话滚轮会先把整个面板
+     （甚至页面）滚走，横条却纹丝不动。宽裕时不管，免得用户想滚别的却被按住。 */
+  pickBar.addEventListener("wheel", (e) => {
+    if (pickBar.scrollWidth <= pickBar.clientWidth) return;
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;  // 已是横向手势
+    const before = pickBar.scrollLeft;
+    pickBar.scrollLeft = before + e.deltaY;
+    if (pickBar.scrollLeft !== before) e.preventDefault();
+  }, { passive: false });
+
+  /* 内核的中间通知。它**不**带结果，只用于把选择器与内核的真实落点对齐：
+     用户选的那条会话可能刚在浏览器页被删了，内核会静默回退到默认会话，
+     而选择器还停在那条已不存在的 id 上——不更新的话用户会以为消息进了
+     他指定的地方。 */
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== "keeper:note" || !msg.note) return;
+    const n = msg.note;
+    if (n.event === "accepted") {
+      mark("askAccepted", n.session_id || "");
+      if (n.session_id && n.session_id !== chosenSess) loadSessions();
+    }
+  });
 
   /* ---------- 连接状态条 ----------
    *
@@ -355,7 +867,34 @@
       mark("link", "unconfigured");
       return;
     }
+    /* 正在握手：单独给一个状态，别让它落在「未连接」里。
+       「未连接」在这几毫秒里其实不假，但它同时覆盖了「根本没打算连」和「连不上」，
+       而用户那会儿真正想要的只是一个字面的确认：**我在连了**。
+
+       这个 connecting 来自 SW 里**真实的握手状态**，不是这里乐观猜的 —— 见
+       background.js 里 keeper:status 那段注释：状态查询刻意不触发重连，否则 MJ3
+       的 SW 每次被唤醒都顺手一连，状态条就会在**断线时一直闪「连接中…」**，反而
+       看不出是断了还是填错了。真握手失败时 connecting 会被清掉，这里自然回到
+       「未连接」并带上被拒的原因。 */
+    if (s.connecting && !s.ok) {
+      ldot.className = "k-dot k-wait";
+      lurl.textContent = "连接中…";
+      lbtn.textContent = "重新连接";
+      lbtn.title = "正在与内核建立连接";
+      mark("link", "connecting");
+      return;
+    }
     ldot.className = s.ok ? "k-dot k-on" : "k-dot";
+    /* 被内核拒绝过时直接说原因，别只显示「未连接」——拒绝和没连上是两回事，
+       下一步也完全不同：前者要重新复制连接码，后者先重试。而「未连接」这三个字
+       在这两种情况下都成立，等于把有用的信息抹掉了。 */
+    if (!s.ok && s.denialText) {
+      lurl.textContent = s.denial === "token" ? "连接码已过期" : "内核拒绝了这个扩展";
+      lbtn.textContent = "重新连接";
+      lbtn.title = s.denialText;
+      mark("link", "denied-" + s.denial);
+      return;
+    }
     lurl.textContent = shortUrl(s.url) + (s.ok ? "" : " · 未连接");
     lbtn.textContent = "重新连接";
     lbtn.title = "重试一次连接，并可粘贴新的连接码";
@@ -374,9 +913,14 @@
    * 毫无反应的按钮猜要做什么强。 */
   let deadContext = false;
   let deadStrikes = 0;
+  /* 上一次探到的「是否真的连上了」。用来识别**跃迁**：只有从未连上变成已连上
+     那一次才去拉会话列表，而不是每 4 秒的轮询都拉一遍。 */
+  let wasLinked = false;
   const refreshLink = async () => {
+    let s = null;
     try {
-      paintLink(await chrome.runtime.sendMessage({ type: "keeper:status" }));
+      s = await chrome.runtime.sendMessage({ type: "keeper:status" });
+      paintLink(s);
       deadStrikes = 0;
     } catch (e) {
       if (++deadStrikes < 2) return;   // 一次失败多半是 SW 正在启动，不打扰
@@ -387,7 +931,21 @@
       lbtn.title = "刷新本页后浮球才会重新工作（⌘⇧R / Ctrl+F5）";
       mark("link", "dead-context");
       cfgBox.hidden = true;
+      return;
     }
+    /* 刚连上就去拉会话列表。
+     *
+     * 为什么必须补这一步：会话列表原先只在**面板展开那一刻**拉一次。用户第一次
+     * 打开面板时常正好赶上内核刚开始握手，那一拉必然失败（"没连上内核"），
+     * 之后即使连接成功，列表也再不会刷新 —— 表现就是"得重新打开一次浮球才出
+     * 会话"。而连接成功本身就是唯一值得重拉的时刻：列表里的内容在另一边随时
+     * 会变（浏览器页新建/删除/改名）。 */
+    const linked = !!(s && s.ok);
+    if (linked && !wasLinked) {
+      // 面板关着时不必拉：看不见的东西拉回来只是白跑一个内核往返
+      if (panel.classList.contains("k-open")) loadSessions().then(fetchLatest);
+    }
+    wasLinked = linked;
   };
 
   /* ---------- 就地填连接码 ----------
@@ -417,6 +975,18 @@
   const sayCfg = (text, bad) => {
     ctip.className = "k-cfgtip" + (bad ? " k-bad" : "");
     ctip.textContent = text;
+    /* 出错时让这行可一键复制：连接码这类问题，对方要的第一句就是报错原文，
+       而这行字在浮球里又窄又小，手动拖选很别扭。
+       用 onclick 赋值：本函数会被反复调用，累加监听器会让一次点击复制好几遍。 */
+    ctip.classList.toggle("k-copy", !!bad);
+    ctip.title = bad ? "点击复制报错原文" : "";
+    if (!bad) { ctip.onclick = null; return; }
+    const full = String(text || "");
+    ctip.onclick = () => {
+      const ok = copyText(full);
+      ctip.textContent = ok ? "✓ 已复制" : "复制失败";
+      setTimeout(() => { ctip.textContent = full; }, 1400);
+    };
   };
 
   // 面板级探针（捕获阶段）：click 到达面板时先记一笔。
@@ -473,7 +1043,11 @@
       csave.textContent = "保存并连接";
       // 存盘是瞬时的，连接是异步的 —— 这里立刻收起输入框，连上没连上交给顶部
       // 状态条播报，不让用户对着按钮等一个可能长达 4 秒的结果。
+      //
+      // 这两行只是**等到第一次真实状态回来之前**的占位：紧接着的 refreshLink
+      // 会按 SW 报上来的 connecting / ok 覆盖掉它。所以不用等它自己消失。
       lurl.textContent = "连接中…";
+      ldot.className = "k-dot k-wait";
       refreshLink();
     } catch (e) {
       sayCfg(explain(e), true);
@@ -646,8 +1220,13 @@
     if (panel.classList.contains("k-open")) {
       refreshLink();
       if (!linkTimer) linkTimer = setInterval(refreshLink, 4000);
+      /* 会话列表也在这里拉：它在浏览器页那一侧随时会变（新建、删除、改名），
+         面板关着的时候拉纯属浪费一个内核往返。顺带把上次选的那条恢复出来。 */
+      loadSessions().then(fetchLatest);
     } else {
       stopLinkPoll();
+      // 面板看不见了，"还在跑"的轮询也就没有意义——继续问只是在打扰内核
+      if (latestTimer) { clearTimeout(latestTimer); latestTimer = null; }
     }
   });
 

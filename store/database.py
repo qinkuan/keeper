@@ -491,6 +491,24 @@ async def _migrate_chat_session_kind(conn) -> None:
     )
 
 
+async def _migrate_chat_session_ball_key(conn) -> None:
+    """chat_sessions 补 ball_key 列：标记「浮球的默认会话」（存量库升级）。
+
+    存量行一律留空 —— 只有浮球第一次发消息时才会建带这个标记的会话，
+    而那一刻本来就会新建一条，不存在"存量里已经有一条该被认领"的情形。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "ball_key" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN ball_key VARCHAR(32)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_sessions_ball_key "
+            "ON chat_sessions (ball_key)"
+        )
+
+
 async def _seed_default_user_space(conn) -> None:
     """播种系统默认用户空间 ``~/.keeper/workspace/user/default``（幂等）。
 
@@ -727,6 +745,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_task_paused(conn)
         await _migrate_task_review_fields(conn)
         await _migrate_chat_session_kind(conn)
+        await _migrate_chat_session_ball_key(conn)
         await _migrate_chat_session_deleted_at(conn)
         await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)

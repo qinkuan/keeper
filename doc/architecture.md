@@ -279,6 +279,7 @@ test_planner_parse.py ReAct 文本协议解析
 |---|---|
 | **`architecture.md`**（本文） | **模块地图与设计取舍**——想了解全貌从这里开始 |
 | `positioning.md` | 产品定位：两平面、A2A、与同类产品的分界 |
+| `security.md` | **威胁模型与已知缺口**——哪些能信、哪些不能信、哪里还没堵上 |
 | — 运行机制 — | |
 | `session-design.md` | 会话存储模型（表结构、跨端链路、挂起恢复） |
 | `task-design.md` | 任务模式（计划 → 审批 → 执行 → 验收） |

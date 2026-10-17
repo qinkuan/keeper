@@ -16,7 +16,7 @@ import {
   apiListTasks,
   apiCreateTask,
 } from "../api/client";
-import type { SessionItem } from "../api/types";
+import type { SessionItem, SessionKind } from "../api/types";
 import { Modal } from "./ui/Modal";
 import { toast } from "./ui/Toast";
 
@@ -45,18 +45,26 @@ const TASK_STATUS_CLASS: Record<string, string> = {
 export default function SessionList({
   agentId,
   activeId,
-  taskMode = false,
+  kind = "chat",
   onSelect,
   onNew,
   onNewTask,
 }: {
   agentId: string;
   activeId?: string | null;
-  taskMode?: boolean;
+  /**
+   * 只列这一类会话：「对话」页按当前 tab 传 chat / task，浏览器页传 browser。
+   *
+   * 为什么用类别而不是「要不要任务」这种布尔：三类是**互斥**的，浏览器会话不该
+   * 出现在「会话」tab 里。而布尔只能表达二分，`kind !== "task"` 会把 browser
+   * 一并放进去——一个不报错的静默串类。
+   */
+  kind?: SessionKind;
   onSelect: (sessionId: string) => void;
   onNew: () => void;
   onNewTask?: (sessionId: string) => void;
 }) {
+  const taskMode = kind === "task";
   const [items, setItems] = useState<SessionItem[]>([]);
   const [taskStatusMap, setTaskStatusMap] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
@@ -69,12 +77,12 @@ export default function SessionList({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const resp = await apiSessions(agentId);
-      const list = (resp.sessions || []).filter((s) =>
-        taskMode ? s.kind === "task" : s.kind !== "task"
-      );
-      setItems(list);
-      if (taskMode) {
+      /* 类别过滤交给后端（apiSessions 的 kind 参数），这里不再二次筛。
+         前端筛是错的：列表分页在服务端就已经切好了，前端再筛等于「这一页 50 条里
+         挑出属于这一类的那几条」，同类会话一多就会把另一页挤成空洞。 */
+      const resp = await apiSessions(agentId, undefined, 50, 0, kind);
+      setItems(resp.sessions || []);
+      if (kind === "task") {
         try {
           const tr = await apiListTasks(agentId);
           const map: Record<string, string> = {};
@@ -91,7 +99,7 @@ export default function SessionList({
     } finally {
       setLoading(false);
     }
-  }, [agentId, taskMode]);
+  }, [agentId, kind]);
 
   useEffect(() => {
     load();
