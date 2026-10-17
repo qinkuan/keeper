@@ -553,3 +553,11 @@ chrome.runtime.onStartup.addListener(() => { ensureConnected().then(s => { if (!
 chrome.runtime.onInstalled.addListener(() => { ensureConnected().then(s => { if (!s) scheduleReconnect(); }); });
 ensureConnected().then((sock) => { if (!sock) scheduleReconnect(); });
 
+/* 选中文字的入口原先做成右键菜单（contextMenus），后来改成**选中即浮现小按钮**。
+ *
+ * 换掉的原因是交互路径：右键要先移动手到菜单、再从一组项里挑一个，而"把这段
+ * 加进提问"这个动作本身是唯一的（不需要在几个动作里选）。直接出现在选区边上，
+ * 一次点击就完成，比"右键 → 找项 → 点"短得多。
+ *
+ * 顺带省掉一个权限：contextMenus 从此不再需要。 */
+

@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1024a";
+  const BUILD = "1028b";
 
   // ---------- 页面身份（cid）----------
   //
@@ -231,10 +231,27 @@
        「发送」和「抓文字」是同一件事的两步。 */
     ".k-sec{padding:9px 10px 4px;font-size:10.5px;color:#80868b;flex:0 0 auto}",
     ".k-askrow{display:flex;gap:6px;padding:0 10px;align-items:flex-end;flex:0 0 auto}",
-    ".k-q{flex:1;min-width:0;resize:none;background:rgba(255,255,255,.07);",
+    /* 输入框 + 高亮层的共同外框。定位锚点放在这里，两层都相对它铺满。 */
+    ".k-qwrap{position:relative;flex:1;min-width:0}",
+    /* 两个必须逐项相同的量：padding / font / 换行 / 最小高度。
+       字体和内边距差 1px，高亮块就会整体偏移，看起来像坏了。 */
+    ".k-q,.k-qhl{padding:6px 8px;font:12px/1.5 ui-sans-serif,system-ui,sans-serif;",
+    "  white-space:pre-wrap;word-break:break-word;min-height:36px;",
+    "  box-sizing:border-box;letter-spacing:normal}",
+    ".k-q{flex:1;min-width:0;resize:none;background:transparent;",
     "  border:1px solid rgba(255,255,255,.14);border-radius:7px;color:#e8eaed;",
-    "  padding:6px 8px;font:12px/1.5 ui-sans-serif,system-ui,sans-serif;",
-    "  outline:none;min-height:36px}",
+    "  outline:none;position:relative;width:100%;display:block}",
+    /* 高亮层：铺在输入框**下面**（z-index 更低），Pointer events 全部放行，
+       否则它挡住 textarea，用户就点不进输入框了。
+       文字透明——它的作用只是给引用那几段提供底色，真正可见的文字在上面那层。
+       末尾补一个换行：textarea 的值以 \n 结尾时，最后一行渲染不出来，
+       高亮层会少一行而错位。 */
+    ".k-qhl{position:absolute;inset:1px;z-index:0;pointer-events:none;",
+    "  color:transparent;overflow:hidden;background:transparent;border:0}",
+    /* 浅浅的高亮：只给底色和一点描边，不抢文字的视觉重量。 */
+    ".k-qmark{background:rgba(138,180,248,.22);color:transparent;",
+    "  border-radius:3px;box-shadow:0 0 0 1px rgba(138,180,248,.28)}",
+    ".k-qwrap>.k-q{background:rgba(255,255,255,.07);z-index:1}",
     ".k-q:focus{border-color:" + BRAND + "}",
     ".k-q::placeholder{color:#7b8087}",
     ".k-go{cursor:pointer;border:0;border-radius:7px;background:" + BRAND + ";",
@@ -264,6 +281,22 @@
     /* 可复制：光标形状就是"这里能点"的唯一提示（浮球里没有按钮标签的位置），
        别省。 */
     ".k-copy{cursor:copy}",
+    /* 选区浮标。z-index 取到 int32 上限：页面自己的浮层（吸顶导航、弹窗、视频
+       控件）常常是 9999 / 2147483647 量级，比它低就会被盖住——而它一旦被盖住，
+       整个功能看起来就是坏的。 */
+    ".k-bubble{position:fixed;z-index:2147483647;padding:3px 9px;border:none;",
+    "  border-radius:6px;font-size:11px;line-height:1.5;color:#fff;cursor:pointer;",
+    "  background:" + BRAND + ";box-shadow:0 2px 8px rgba(0,0,0,.35)}",
+    ".k-bubble:hover{filter:brightness(1.08)}",
+    ".k-bubble[hidden]{display:none}",
+    /* 引用条：整条可溢出截断，但「×」不能被截掉——它是唯一的移除入口，
+       一起被截掉的话用户就没法取消了。所以截断只作用在文字那一段。 */
+    ".k-quote{display:flex;align-items:center;gap:4px;min-width:0}",
+    ".k-quote-t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".k-quote-x{flex:0 0 auto;border:none;background:rgba(255,255,255,.1);color:#9aa0a6;",
+    "  border-radius:3px;width:14px;height:14px;line-height:1;font-size:11px;",
+    "  cursor:pointer;padding:0}",
+    ".k-quote-x:hover{background:rgba(242,139,130,.25);color:#f28b82}",
     ".k-sel{margin-left:auto;font-size:10.5px;color:#80868b;",
     "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}",
     /* 有选中文字时点亮：它是"agent 能不能看见这页"唯一的信号，必须一眼可辨。 */
@@ -296,8 +329,15 @@
        的事实，压在输入框下面（原来那个 <select> 的位置）会让人发完才知道记哪了。 */
     '  <div class="k-tabs" id="pick" title="这条对话记到哪条会话"></div>',
     '  <div class="k-askrow">',
-    '    <textarea class="k-q" id="q" rows="2" spellcheck="false"',
-    '      placeholder="对这一页提问"></textarea>',
+    /* 引用要在输入框里**高亮**，而 textarea 是纯文本、做不到局部着色。
+       所以叠一层：底层 qhl 渲染同样内容、文字透明、只给引用那几段上底色；
+       上层 textarea 透明背景、负责真正接收输入。两层字体 / 内边距 / 换行
+       规则必须逐项对齐，差一点高亮就会飘。 */
+    '    <div class="k-qwrap">',
+    '      <div class="k-qhl" id="qhl" aria-hidden="true"></div>',
+    '      <textarea class="k-q" id="q" rows="2" spellcheck="false"',
+    '        placeholder="对这一页提问"></textarea>',
+    '    </div>',
     '    <button class="k-go k-primary" id="go" type="button">发送</button>',
     '  </div>',
     '  <div class="k-askmeta">',
@@ -462,7 +502,7 @@
   const bText = $("bText"), bShot = $("bShot"), bEval = $("bEval"), bCopy = $("bCopy");
   const ldot = $("ld"), lurl = $("lu"), lbtn = $("lb");
   const qbox = $("q"), goBtn = $("go"), pickBar = $("pick"),
-        selTip = $("sel"), askOut = $("ao");
+        selTip = $("sel"), askOut = $("ao"), qhl = $("qhl");
   mark("ask", "idle");
 
   /* ---------- 对这一页提问 ----------
@@ -488,6 +528,57 @@
     }
   };
 
+  /* 已经添加的引用，按**添加顺序**存完整原文。
+   *
+   * 为什么必须存一份、而不是发送时现读 currentSelection()：用户点完「添加」
+   * 必然要去浮球里打字，那时页面选区早就被清掉了（一点别处就没）。
+   *
+   * 为什么是数组而不是单个字符串：一次提问可能要引好几段（对比两处说法、
+   * 挑两段一起问）。输入框里只放缩略占位（见 QUOTE_RE），完整原文按序号存在
+   * 这里，发送那一刻才换上去。 */
+  let quotedList = [];
+
+  /* 输入框里的引用占位，形如「【引用1：这是前五个…】」。
+   *
+   * 带序号是为了支持多段：占位被删掉一条时，剩下几条的序号仍然能对上各自
+   * 的完整原文（靠下标取会整串错位）。
+   * 括号选中文书名号：正文里极少出现，撞车概率远低于 [] 或 {}。 */
+  const QUOTE_RE = /【引用(\d+)：[^】]*】/g;
+
+  /** 把输入框的值渲染到高亮层：引用那几段包一层 mark，其余文字透明。 */
+  const syncHighlight = () => {
+    const raw = qbox.value;
+    if (!raw) { qhl.innerHTML = ""; return; }
+    /* 先转义再替换：页面文字里带 < 或 & 时，不转义就会被当成标签解析，
+       轻则高亮错位，重则把选中内容变成真元素。 */
+    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    /* 末尾补一个换行：textarea 的值以 \n 结尾时最后一行不渲染，
+       高亮层少一行就会整体错位。 */
+    qhl.innerHTML = esc(raw).replace(
+      /【引用(\d+)：[^】]*】/g,
+      (m) => '<span class="k-qmark">' + m + "</span>"
+    ) + "\n";
+  };
+
+  /** 追加一条引用（不覆盖已有的），并同步高亮。 */
+  const insertQuote = (text) => {
+    if (!text) return;
+    quotedList.push(text);
+    const idx = quotedList.length;
+    /* 只留前 5 个字：够确认"加的是不是这段"，又不会把输入框占满。 */
+    const brief = text.slice(0, 5) + (text.length > 5 ? "…" : "");
+    const token = "【引用" + idx + "：" + brief + "】";
+    /* 展示时**不换行**，用空格接着写：占位本来就只有几个字，多段挤在一行才
+       看得出它们同属一次提问；每段各占一行的话，输入框会被几条短短的占位
+       撑得很高，真正要写的问题反而被推到看不见的地方。
+       分段留到发送那一刻再做（见 doAsk）—— 那时换的是完整原文，才需要边界。 */
+    qbox.value = (qbox.value ? qbox.value.replace(/\s+$/, "") + " " : "") + token;
+    syncHighlight();
+    qbox.focus();
+    // 光标挪到末尾：占位是刚追加的，用户接着要写"这两段有什么不一样"
+    try { qbox.setSelectionRange(qbox.value.length, qbox.value.length); } catch (e) { }
+  };
+
   const paintSelection = () => {
     const s = currentSelection();
     const n = s.length;
@@ -508,6 +599,134 @@
     paintSelection();
   };
   document.addEventListener("selectionchange", onSelChange);
+
+  /* ---------- 选区浮标 ----------
+   *
+   * 选中文字后直接在选区边上冒出一个小按钮，一次点击就把这段加进提问。
+   *
+   * 为什么不用右键菜单：那个路径要"移动手到菜单 → 在一组项里挑一个"，而这
+   * 里的动作**只有一个**（加进提问），不需要挑。出现在选区边上省掉一整个来回。
+   * 动作多于一个时右键菜单才划算——那时"挑哪个"本身就是用户要做出的决定。
+   */
+  const bubble = document.createElement("button");
+  bubble.type = "button";
+  bubble.className = "k-bubble";
+  bubble.textContent = "添加到提问";
+  bubble.hidden = true;
+  root.appendChild(bubble);
+
+  /** 这次是否值得冒出浮标：太短的选区多半是误拖（比如想点链接却拖了两个字）。 */
+  const worthQuoting = (t) => t.length >= 2;
+
+  /* 浮标**当前代表的那段文字**，在浮标出现时就抓下来存着。
+   *
+   * 为什么不能等点击时再读选区：浮标在 shadow DOM 里，点它会把焦点带进 shadow
+   * tree，浏览器随即把**页面**的 selection 清掉——mousedown 上的 preventDefault
+   * 拦不住这一条（它拦的是"按下即开始新选择"，不是焦点迁移带来的清空）。
+   * 于是点击时 currentSelection() 已经是空的，代码在 `if (!text) return` 处
+   * 静默返回：浮标消失、面板维持原样，用户看到的就是"点了但什么都没发生"。
+   * 在浮标出现那一刻就取值，才能让"按钮所指"和"看到它时选的那段"始终一致。 */
+  let bubbleText = "";
+
+  const placeBubble = (rect) => {
+    bubble.hidden = false;
+    /* 先放、再量：浮标的宽度只有它自己在文档里才知道（文案、字号、padding
+       都会变），先设 left/top 再去读 offsetWidth 是最省事的办法。 */
+    const w = bubble.offsetWidth || 96;
+    const h = bubble.offsetHeight || 22;
+    let left = rect.right - w;
+    if (left < 8) left = 8;
+    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    // 选区下方放得下就放下方（更符合"顺着往下看"的习惯），放不下就翻到上方
+    let top = rect.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = rect.top - h - 6;
+    if (top < 8) top = 8;
+    bubble.style.left = left + "px";
+    bubble.style.top = top + "px";
+  };
+
+  const hideBubble = () => { bubble.hidden = true; };
+
+  const showBubble = () => {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount < 1) return hideBubble();
+    /* 输入框 / 文本域里的选区不算：用户在浮球里打字时正常拖选文字会误触发，
+       而且那里的文字本来就已在输入框里，加进引用毫无意义。 */
+    let node = sel.anchorNode;
+    while (node && node.nodeType !== 1) node = node.parentNode;
+    if (node && /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName || "")) return hideBubble();
+    const text = currentSelection();
+    if (!worthQuoting(text)) { bubbleText = ""; return hideBubble(); }
+    let rect = null;
+    try {
+      rect = sel.getRangeAt(0).getBoundingClientRect();
+    } catch (e) { /* 跨影子树等特殊情况下取不到 */ }
+    if (!rect || (!rect.width && !rect.height)) { bubbleText = ""; return hideBubble(); }
+    bubbleText = text;      // 就这一刻抓下来，点击时不再重读（见 bubbleText 的说明）
+    placeBubble(rect);
+  };
+
+  /* 「刚刚按下的是不是浮标本身」。
+   *
+   * 为什么只能用标志、而不能在 document 的监听器里判断事件来源：root 是
+   * **closed** shadow root，事件冒泡到外面时 ——
+   *   · ev.target 被**重定向**成 host，所以 `ev.target === bubble` 恒为 false；
+   *   · composedPath() 也会**省略** shadow tree 内部的节点，一样拿不到。
+   * 两条路都堵死。但在浮标**自己**的 mousedown 里是拿得到的，所以就地记一笔，
+   * 让外面那层来查。
+   *
+   * 这道门不能省：浮标若在自己按下时就被收走（display:none 发生在 mousedown 与
+   * mouseup 之间），浏览器判定"两次落在同一元素"失败，click **根本不会派发**——
+   * 按钮点了毫无反应，而代码里看不出任何异常。 */
+  let onBubble = false;
+
+  /* 用 mouseup 而不是 selectionchange：拖动选择的过程中每多选一个字符都会触发
+     selectionchange，浮标会跟着抖成一片。松手才显示，是"我选完了"的信号。
+     点浮标自己时也会走这里，但 showBubble 会按当前选区重新评估，无害。 */
+  document.addEventListener("mouseup", () => {
+    setTimeout(showBubble, 0);   // 让浏览器先把选区定下来
+  });
+  document.addEventListener("mousedown", () => {
+    if (onBubble) { onBubble = false; return; }   // 放过浮标自己
+    hideBubble();
+  });
+  window.addEventListener("scroll", hideBubble, true);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") hideBubble();
+  });
+
+  /* mousedown 上 preventDefault：挡掉"按下即开始新选择"，免得浮标刚出现就被
+     下一次按下的默认行为收走。（它拦不住焦点迁移带来的选区清空，所以文本仍
+     要在 showBubble 时就抓下来——见 bubbleText。） */
+  bubble.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();   // 挡掉"按下即开始新选择"
+    onBubble = true;       // 告诉外面那层：这次是我自己
+  });
+  bubble.addEventListener("click", () => {
+    /* 用浮标出现时抓的那份，而不是此刻重读：此刻焦点已经进了 shadow tree，
+       页面选区多半已被清掉。 */
+    const text = bubbleText || currentSelection();
+    bubbleText = "";
+    hideBubble();
+    /* 取消页面选区。不做这一步的话，mouseup 时排的那个 setTimeout(showBubble)
+       会在本 handler **之后**执行（click 是同步派发的，宏任务在其后），而选区
+       因为上面的 preventDefault 还在 —— 于是刚收起的浮标立刻又冒出来，看起来
+       就是"点了没反应"。内容已经进了输入框，选区的使命到此为止。 */
+    try {
+      const sel = window.getSelection && window.getSelection();
+      if (sel && sel.removeAllRanges) sel.removeAllRanges();
+    } catch (e) { }
+    if (!text) {
+      /* 走到这里说明连缓存都没有（理论上不会）。给一句可见的话，
+         别默默什么都不做——那正是这次这个 bug 最难看出的地方。 */
+      if (!panel.classList.contains("k-open")) ball.click();
+      setAskOut("⚠ 没拿到选中的文字，重新选一次试试", "k-wait");
+      return;
+    }
+    /* 展开面板。必须判是否已展开：ball 的 click 是 toggle，开着时再点是收起。 */
+    if (!panel.classList.contains("k-open")) ball.click();
+    insertQuote(text);
+  });
 
   /* 会话选择：存扩展自己的 storage，内核不需要知道用户上次选了哪条。
      不存内核是因为这条选择是**浮球这个界面**的偏好，而内核没有"某个浮球"的概念
@@ -675,7 +894,7 @@
     }
   };
 
-  const askAgent = async (q) => {
+  const askAgent = async (q, selection = "") => {
     /* 新对话态：session_id 传空 + new_session=true，让内核**新建**一条。
        只传空是不够的——空在 _resolve_ball_target 里的意思是「用浮球默认会话」，
        那样点了新对话却记进上一条。（NEW_SESS 是内部哨兵，绝不能原样发出去。） */
@@ -691,7 +910,11 @@
         page: {
           url: location.href,
           title: document.title,
-          selection: currentSelection(),
+          /* selection 完全由调用方给出（见 doAsk）。
+             只有**没点过「添加」**时才带当前选区：引用一旦进了输入框，它就已经是
+             问题的一部分了，再在这里带一份，agent 会在同一条消息里看到同一段文字
+             出现两次——一次在「页面选中内容」，一次在「问题」。 */
+          selection: selection || "",
         },
       },
     });
@@ -771,7 +994,30 @@
   let asking = false;
   const doAsk = async () => {
     if (asking) return;
-    const q = qbox.value.trim();
+    /* 引用占位在这一步**展开成完整原文**：输入框里只放了缩略（前 5 个字），
+       那是为了不把用户想说的话挤走；真正发出去的必须是整段。
+       按占位里的序号取对应那条，删掉占位就等于不要那条引用。 */
+    const raw = qbox.value;
+    const hasQuote = QUOTE_RE.test(raw);
+    /* 展示时各段是挤在一行的，但**发出去时每段各占一行**：占位只有几个字所以
+       挤得下，完整原文动辄几百字，黏在一起 agent 分不出边界在哪。
+       所以从第二条起在前面补一个换行（第一条不补，免得开头多一个空行）。 */
+    const q = raw
+      .replace(QUOTE_RE, (m, i) => {
+        const n = parseInt(i, 10);
+        if (n < 1 || n > quotedList.length) return m;
+        /* 每段自占一行，并标成**无序列表项**。
+         *
+         * 光换行还不够：引用和用户的问题在同一段纯文本里时，agent 只能靠位置猜
+         * 哪句是提问——最后一段引用紧挨着问题那次，它就真把两者读成了一句。
+         * 加一个列表标记，材料与提问的边界就是**显式**的，不用猜。 */
+        return "\n- " + quotedList[n - 1] + "\n";
+      })
+      /* 换行前后残留的空格会让 Markdown 把列表项渲染成代码块或续行，
+         先清掉；再把连续空行压成一个——引用之间留空行会把列表断开成两个。 */
+      .replace(/[ \t]*\n[ \t]*/g, "\n")
+      .replace(/\n{2,}/g, "\n")
+      .trim();
     if (!q) { setAskOut("先写点什么。", "k-wait"); return; }
     asking = true;
     goBtn.disabled = true;
@@ -780,12 +1026,20 @@
     setAskOut("正在思考…", "k-wait");
     mark("ask", "waiting");
     try {
-      const res = await askAgent(q);
+      /* 引用已经展开进 q 了，这里就**不再**带选区：否则同一段文字会出现两次。
+         没点过「添加」时才把当前选区带上（浮球一直有的行为）。 */
+      const res = await askAgent(q, hasQuote ? "" : currentSelection());
       setAskOut(res && res.text ? res.text : "（没有返回内容）");
       // 置空而不是记下 id：这条已经被本地消费过，下次开面板补取时不必重画
       shownMsgId = "";
       mark("ask", "done");
       qbox.value = "";         // 只留最新一条，问完清空方便连续问
+      /* 引用跟着清：它属于这一轮提问，留在那里下一轮会被误带上。
+         序号一并归零，下一条又从「引用1」开始——否则用户会看到「引用7」这种
+         莫名其妙的编号。（失败时不清，留着让用户直接重试。） */
+      quotedList = [];
+      syncHighlight();
+      paintSelection();
       if (res && res.session_id && res.session_id !== chosenSess) {
         /* 新建那一轮：把选中项从「新对话」切到刚落地的这条。不切的话用户接着
            追问第二条时仍是新对话态 —— 那就又建一条新会话，一次追问散成好几条，
@@ -811,6 +1065,15 @@
       doAsk();
     }
   });
+  /* 高亮层必须跟着输入框走，否则一打字就和高亮错位。
+     input 覆盖打字 / 粘贴 / 删除；scroll 覆盖内容超出时的滚动；
+     窗口尺寸变化会改变换行位置，也要跟着重排。
+     （高亮层是"输入框内容的影子"，凡是能改变它渲染结果的事都得同步一次。） */
+  qbox.addEventListener("input", syncHighlight);
+  qbox.addEventListener("scroll", () => { qhl.scrollTop = qbox.scrollTop; });
+  window.addEventListener("resize", syncHighlight);
+  syncHighlight();
+
   /* 横向条没有 <select> 的 change：选中变化由各 tab 自己的 click 处理
      （见 applySessions 里的 addTab），那里顺带做清结果 + 拉该会话最新回答。 */
   paintSelection();

@@ -179,7 +179,15 @@ def _ball_prompt(q: str, page: Dict[str, Any]) -> str:
     head = ""
     if title or url:
         where = f"页面「{title}」" if title else "当前页面"
-        head = f"我在{where}（{url}）上提问。\n\n" if url else f"我在{where}上提问。\n\n"
+        # 只给标题，不带 URL。
+        #
+        # URL 对 agent 基本没有信息量：搜索结果页、带会话参数的地址动辄几百字符，
+        # 全是 rsv_bp / rsv_idx 这类与内容无关的参数，token 全花在解析噪音上；
+        # 而它唯一真有用的场景（agent 想再打开这一页）内核本来也做不到——
+        # Playwright 够不到用户 Chrome 的那一页（见 keeper.browser.agent_browser）。
+        # 反过来它的代价是实打实的：这段原文用户看得见，一个撑满两屏的地址会把
+        # "agent 以为我在哪一页"这个有用的确认彻底淹掉。
+        head = f"我在{where}上提问。\n\n"
 
     parts = []
     if head:
@@ -190,7 +198,10 @@ def _ball_prompt(q: str, page: Dict[str, Any]) -> str:
         body = sel[:BALL_SELECTION_LIMIT]
         more = f"…（选区共 {len(sel)} 字，已截断）" if len(sel) > BALL_SELECTION_LIMIT else ""
         parts.append(f"页面选中内容：\n{body}{more}")
-    parts.append(f"问题：{q}")
+    # 「问题：」后面换行：q 里可能带着若干条引用（浮球那边会把它们标成无序
+    # 列表项并各自成行）。标题与内容挤在同一行时，第一行读起来是「问题：- 模型…」，
+    # 既难看也容易让 agent 把标题当成列表的一部分。
+    parts.append(f"问题：\n{q}")
     return "\n\n".join(parts)
 
 

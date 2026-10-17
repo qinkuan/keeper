@@ -145,6 +145,27 @@ type MsgsBySession = Record<string, ChatMessage[]>;
 /** 空桶的占位。必须是模块级常量：每次渲染现造一个数组，会把下游所有引用比较打乱。 */
 const EMPTY_WITH_WELCOME: ChatMessage[] = [welcomeMsg];
 
+/* ══════════════ 临时诊断（KEEPER_DIAG）══════════════
+ * 定位「会话页永久显示『正在思考』」。查完请整体删除：搜索 KEEPER_DIAG。
+ *
+ * 为什么需要它：这个问题已经在同一个会话上复现三次，而清残留的兜底加了三道
+ * 都没打中——说明我对"页面为什么认为在跑"的推断有盲区。靠读代码继续猜只会
+ * 再错，所以改成把每一环的实际取值打出来，让事实说话。
+ *
+ * 用法：打开 DevTools Console，过滤 keeper:diag。只在**值变化时**打印，
+ * 否则 3 秒一次的探测会把控制台刷满。
+ */
+const DIAG_ENABLED = true;
+const _diagSeen: Record<string, string> = {};
+function diag(key: string, value: unknown) {
+  if (!DIAG_ENABLED) return;
+  const s = typeof value === "string" ? value : JSON.stringify(value);
+  if (_diagSeen[key] === s) return;
+  _diagSeen[key] = s;
+  // eslint-disable-next-line no-console
+  console.log(`[keeper:diag] ${key} = ${s}`);
+}
+
 /** 某会话的分页游标（见组件内 paging） */
 type PagingState = {
   /** 这一段前面还有没有更早的消息 → 要不要显示「加载更早的消息」 */
@@ -159,6 +180,12 @@ type StreamRun = {
   assistant: ChatMessage;
   runId: string;
   abort: AbortController | null;
+  /** 这个桶是不是**重连**建起来的（而不是本页自己发起的流）。
+   *
+   * 区分它，是为了让"清残留"能精确下手：重连的桶在服务端那一轮结束后就该拆掉，
+   * 而本页自己发起的流即使此刻服务端还没登记上 run，也是**真的在跑**——
+   * 一刀切会把用户正在进行的那一轮的本地显示直接掐掉。 */
+  resumed?: boolean;
 };
 
 export default function ChatPage({
@@ -274,6 +301,17 @@ export default function ChatPage({
     : streamRuns[PENDING_BUCKET];
   const recoveredRun = !activeRun ? msgs.find((m) => m.streaming) : undefined;
   const sending = !!activeRun?.assistant.streaming || !!recoveredRun;
+  /* ── KEEPER_DIAG ──「页面为什么认为在跑」的直接证据：
+     sending 有两个来源，分别是桶(activeRun) 和 msgs 里的残留气泡(recoveredRun)，
+     打出来就能看出是哪一路，而不必再猜。 */
+  diag("state.sid", (activeSessionId || PENDING_BUCKET).slice(0, 10));
+  diag("state.activeRun", activeRun
+    ? { runId: (activeRun.runId || "").slice(0, 8), resumed: !!activeRun.resumed, streaming: !!activeRun.assistant.streaming }
+    : null);
+  diag("state.recoveredRun", recoveredRun
+    ? { id: String(recoveredRun.id).slice(0, 22), runId: (recoveredRun.runId || "").slice(0, 8) }
+    : null);
+  diag("state.sending", !!sending);
   /**
    * 需要**重连**的 run_id：来自刷新后重建的「进行中」气泡（后端注册表带回来的）。
    *
@@ -546,10 +584,49 @@ export default function ChatPage({
           const r = await apiSessionActivity(agentId, sid);
           if (stop) return;
           const key = `${r.running ? "1" : "0"}:${r.run_id}`;
+          /* ── KEEPER_DIAG ── 每次探测都打（有节流），看内核到底怎么答的 */
+          diag("activity", { running: !!r.running, runId: (r.run_id || "").slice(0, 8), key, lastKey });
           // 第一次拿到也当作变化：那正好覆盖"页面打开时那一轮已经在跑"的情况
           if (key !== lastKey) {
             lastKey = key;
             await loadMessages(sid);
+            /* 内核**明确说**这个会话没有在跑了：任何"进行中"气泡都是过期的，清掉。
+             *
+             * 为什么必须在这里再清一次：`loadMessages` 里那套"按 runId 比对"的
+             * 清除只在**轮询**里跑，而轮询有两个提前退出的条件——
+             *   · activeRun 非空（重连建起了桶）就直接 return；
+             *   · 当前没有任何 streaming 气泡也直接 return。
+             * 于是残留气泡一旦落到这些路径之外，就再也碰不到清除逻辑，页面会一直
+             * 挂着「正在思考」，哪怕内核那一轮早就结束、回答也早已落库。
+             *
+             * 用内核的 run 注册表当判据，比"服务端这次没合成气泡"硬得多：
+             * 后者依赖气泡带着 runId，而它不是每条都有。 */
+            if (!r.running) {
+              /* ── KEEPER_DIAG ── 清之前先记一笔，看当时到底有没有残留 */
+              diag("clear.before", {
+                sid: sid.slice(0, 10),
+                hadStreamingInMsgs: (msgsRef.current || []).some((m) => m.streaming),
+              });
+              updateMsgs(sid, (prev) =>
+                prev.some((m) => m.streaming) ? prev.filter((m) => !m.streaming) : prev
+              );
+              /* 连**重连的桶**一起拆。
+               *
+               * 只清 msgs 是不够的：`visibleMsgs` 优先显示 streamRuns 里的桶，桶
+               * 在的话页面照样挂着「正在思考」，而 msgs 那份清得再干净也没用。
+               *
+               * 只拆 resumed 的桶：本页自己发起的流即便此刻服务端还没登记上 run，
+               * 那也是**真的在跑**，一刀切会把用户正在进行的那一轮的本地显示掐掉。
+               * 重连的桶则相反——它依赖服务端那一轮还活着，服务端说结束了它就是
+               * 过期数据，没有保留的理由。 */
+              setStreamRuns((prev) => {
+                const run = prev[sid];
+                if (!run || !run.resumed) return prev;
+                const next = { ...prev };
+                delete next[sid];
+                return next;
+              });
+            }
           }
         } catch {
           /* 网络抖动：下一轮自然重试 */
@@ -581,9 +658,18 @@ export default function ChatPage({
     if (!sid) return;
     // 已经有活流在喂这个会话（本地流，或重连成功建起的桶）：再轮询就是白白每 3s
     // 全量查库。这一句同时也是「重连成功后自动停掉轮询」的开关。
-    if (activeRun) return;
+    if (activeRun) {
+      /* ── KEEPER_DIAG ── 这一句是「残留清不掉」的头号嫌疑人：
+         桶在就直接 return，轮询整套不跑，而清除逻辑全在轮询里。 */
+      diag("poll.skip.reason", "activeRun");
+      return;
+    }
     // 只有存在「进行中」的气泡才需要轮询
-    if (!msgs.some((m) => m.streaming)) return;
+    if (!msgs.some((m) => m.streaming)) {
+      diag("poll.skip.reason", "no-streaming");
+      return;
+    }
+    diag("poll.skip.reason", "run");
     let stop = false;
     const tick = async () => {
       await new Promise((r) => setTimeout(r, 3000));
@@ -679,6 +765,8 @@ export default function ChatPage({
     let stopped = false;
     let raf = 0;
     const controller = new AbortController();
+    /* ── KEEPER_DIAG ── 重连是否被触发、用的是哪个 run_id */
+    diag("resume.enter", { sid: sid.slice(0, 10), runId: (runId || "").slice(0, 8) });
 
     // 定位这一轮的 user 消息：桶里那条会按 id 覆盖 msgs 里的同名消息，
     // id 拿错的话去重失效，页面上会多出一条空气泡。
@@ -697,6 +785,7 @@ export default function ChatPage({
         assistant: { ...target },
         runId,
         abort: controller,
+        resumed: true,
       },
     }));
 
@@ -734,6 +823,13 @@ export default function ChatPage({
       runId,
       {
         onCatchup: (data) => {
+          /* ── KEEPER_DIAG ── 服务端快照的关键字段：finished/done/error */
+          diag("resume.catchup", {
+            finished: !!data.finished,
+            done: data.done ? { message_id: String(data.done.message_id || "").slice(0, 22), canceled: !!data.done.canceled } : null,
+            error: data.error || null,
+            runId: (data.run_id || "").slice(0, 8),
+          });
           // 回放：直接覆盖。服务端这份是权威，且比「刷新瞬间查库得到的快照」新
           acc = data.text || "";
           setStreamRuns((prev) => {
@@ -796,8 +892,10 @@ export default function ChatPage({
           acc += t;
           if (!raf) raf = requestAnimationFrame(flushDelta);
         },
-        onDone: (d) =>
-          settle({
+        onDone: (d) => {
+          /* ── KEEPER_DIAG ── 走到这里说明轮次收到终态，桶会被拆 */
+          diag("resume.done", { message_id: String(d.message_id || "").slice(0, 22), canceled: !!d.canceled });
+          return settle({
             id: d.message_id || target.id,
             text: d.canceled ? d.answer || acc || "（已停止生成）" : d.answer || "",
             llm: d.llm,
@@ -809,9 +907,17 @@ export default function ChatPage({
             duration_ms: d.duration_ms ?? null,
             options: d.options,
             canceled: d.canceled,
-          }),
-        onError: (msg) => settle({ text: "执行失败。", error: msg }),
+          });
+        },
+        onError: (msg) => {
+          diag("resume.error", String(msg || "").slice(0, 120));
+          return settle({ text: "执行失败。", error: msg });
+        },
         onGone: () => {
+          /* ── KEEPER_DIAG ── **重点嫌疑**：gone 时只拆桶、不 settle，
+             于是 msgs 里那条合成气泡仍带 streaming=true，而 recoverRunId 正是从它
+             取的 —— 这会反复触发 resume，形成「永久正在思考」。 */
+          diag("resume.gone", { sid: bucketKey.slice(0, 10), runId: (runId || "").slice(0, 8) });
           // 服务端无从回放：拆桶退回轮询。**不要 settle**——那一轮还在跑，
           // 只是我们看不到过程而已；标成终态会让用户以为它结束了。
           stopped = true;

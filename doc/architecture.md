@@ -227,6 +227,43 @@ test_planner_parse.py ReAct 文本协议解析
   → observability/       时间线、统计、额度检查
 ```
 
+### 两条入口，一份编排：`run_one_ask`
+
+浏览器页与浏览器浮球是两个入口，但**服务端只有一份编排**——`chat/service.py::run_one_ask`：
+
+```
+浏览器页（SSE）  chat/api.py::chat_stream            ┐
+                                                    ├─→ run_one_ask()
+浏览器浮球（WS）  api/agent_bridge.py::_ball_ask      ┘        │
+                                                             ↓
+                                                    ChatService.ask()
+                                                 （执行层，两条入口共用）
+```
+
+差别只有三处，都由入口性质决定，不是两套逻辑：
+
+| | 浏览器页 SSE | 浏览器浮球 WS |
+|---|---|---|
+| run_id 来源 | 前端生成 | 内核生成 |
+| 会话 kind | `chat` | `browser` |
+| 过程事件 | 推 SSE 队列 | 不推（只回一条最终结果） |
+
+其余全部共用：`ensure_run` → `ensure_session_id` → `register_run` → `ask` →
+`hub_finish` → `finally` 注销 + 清停止标记。
+
+**为什么必须共用**：这份编排曾经被写了两遍，并因此出过事——浮球那侧把
+`chat.hub.finish` 的导入名写错（`from ..chat.hub import hub_finish`，真名是 `finish`），
+ImportError 落在所有 `try` 之外，一直冒到接收循环把用户的 WebSocket 关掉；而 SSE 那侧
+安然无恙。**两份代码只有一份会坏，是最坏的组合**：它不报错，只是那条路不通。
+
+更麻烦的是 `pyflakes` 查不出 `from X import Y` 里的 Y 不存在（它只管"导入了没用到"），
+静态检查全绿、运行时才炸。所以 `keeper/tests/test_ask_paths.py` 会**真的把两个入口各跑一遍**，
+其中一条断言直接比对 `chat.api.run_one_ask is service.run_one_ask`——
+挡住"哪天又有人 copy 一份过去"。
+
+**新增入口时**：不要复制这段编排，调 `run_one_ask` 并传入自己的回调
+（`on_session` / `on_step` / `on_delta`）即可。
+
 ---
 
 ## 六、数据与目录
