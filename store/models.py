@@ -132,6 +132,14 @@ class SessionMessage(Base):
     # 与 llm_calls 的 SUM(duration_ms) 是两个口径——后者只是「算力花了多久」，
     # 不含工具执行、等待与挂起恢复，别混用。
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 用户上传的附件（JSON）：只挂在 **user** 消息上（artifacts 反过来只挂 assistant）。
+    # 形如 [{"id","name","mime","size","provider","model","file_id","expires_at",
+    #        "cache_path"(相对 @tmp/)}]；无附件则为 NULL。
+    #
+    # 为什么不复用 artifacts：那一列的语义是「本轮 agent 通过 fs.write_file 产出的
+    # 文件」，指向用户工作区里的真实文件；附件是「用户塞进来的输入」，指向厂商侧的
+    # file_id。两者生命周期、安全边界、展示意图全不同，混用会让「谁产生的」变含糊。
+    attachments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ReactStep(Base):

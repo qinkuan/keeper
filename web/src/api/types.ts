@@ -100,6 +100,34 @@ export interface Artifact {
   size?: number | null;
 }
 
+/**
+ * 一条用户上传的附件。
+ *
+ * `file_id` 是 **LLM 厂商侧**的凭据（DeepSeek 的 Files API 返回），模型靠它
+ * 看到文件内容；`cache_path` 是本地缓存的相对路径（`@tmp/` 开头），前端靠它
+ * 预览原件。两者服务不同的人，缺一不可：
+ *   - 没有 file_id：agent 看不到图，附件白传
+ *   - 没有 cache_path：前端打不开，用户没法确认自己传的是哪张
+ *
+ * `file_id` 是**厂商特定且会过期/失效**的：换模型（换 provider）后旧附件全部
+ * 作废，这是已知取舍（换模型就重来）。
+ */
+export interface Attachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** 这个 file_id 属于哪个厂商（deepseek / openai…），决定引用格式 */
+  provider: string;
+  /** 上传时用的模型：换模型后这条附件就不再可用，展示时要能看出来 */
+  model: string;
+  file_id: string;
+  /** 过期时间（Unix 秒）；null = 永久 */
+  expires_at: number | null;
+  /** 本地缓存的相对路径（@tmp/ 开头），前端预览用 */
+  cache_path: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -140,6 +168,14 @@ export interface ChatMessage {
   options?: string[];
   /** 本轮产出的文件（agent 写的 HTML / 图片等），供展示 / 下载 */
   artifacts?: Artifact[];
+  /**
+   * 本轮**用户上传**的附件（只挂在 user 消息上）。
+   *
+   * 与 artifacts 是两条相反的链路：artifacts 是 agent 产出的、指向工作区里的
+   * 真实文件；attachments 是用户塞进来的输入、指向 LLM 厂商侧的 file_id，
+   * 外加一份本地缓存的相对路径（cache_path，`@tmp/` 开头）供前端预览。
+   */
+  attachments?: Attachment[];
   /** 生成途中被用户停止：内容是已产出的部分 */
   canceled?: boolean;
 }

@@ -98,8 +98,11 @@ import {
   apiSessionMetrics,
   apiBudget,
   apiGetSettings,
+  apiUploadAttachment,
+  attachmentUrl,
 } from "../api/client";
 import type {
+  Attachment,
   ChatMessage,
   SessionKind,
   SessionWorkspace,
@@ -219,6 +222,18 @@ export default function ChatPage({
   const [msgsBySession, setMsgsBySession] = useState<MsgsBySession>({});
   const [input, setInput] = useState("");
   /**
+   * 已上传、还没发出去的附件。
+   *
+   * 为什么单独一份 state 而不只靠输入框里的「【文件：xxx】」文本：文本是给**人看**
+   * 的，这份是给**请求**用的。真发出去时 body 要带结构化的附件列表（含 file_id），
+   * 从文本里反解析既脆弱又没必要——删掉那段文字也不该影响要发的东西。
+   *
+   * 所以两者是「一个动作的两个投影」：上传时一起加，删除时一起删。
+   */
+  const [pendingFiles, setPendingFiles] = useState<Attachment[]>([]);
+  /** 附件上传中：按钮转圈，并挡住重复点击（同一次会话只让一个在上传） */
+  const [uploading, setUploading] = useState(false);
+  /**
    * 正在流式跑着的会话，**按 sessionId 分桶**。
    *
    * 与 `msgsBySession` 用**同一套桶 key**：气泡在哪、消息在哪，必须始终是同一个会话，
@@ -238,6 +253,28 @@ export default function ChatPage({
   const runIdRef = useRef<string>("");
   /** 正在流式的那条占位消息：停止时要就地收尾（补全文案、去掉光标） */
   const placeholderRef = useRef<string>("");
+  /** 隐藏的文件选择器：点「+」时才 click() 它。
+   *  用 ref 而不是 state 控制显隐：那个 input 从头到尾不可见，没有渲染上的意义，
+   *  而 ref 能在不改渲染的前提下拿到它。 */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /**
+   * 本页是否正有一条**本地流**在跑（send() 期间为 true）。
+   *
+   * 为什么需要它：会话探测（下面那个每 3 秒问 /activity 的 effect）在状态变化时
+   * 会 ``loadMessages``，而那是**替换**语义——它会把 msgs 整个换成服务端版本。
+   * 服务端的 user 消息 id 是后端生成的，与本地 ``activeRun.user``（前端生成的 id）
+   * 必然不同，于是 ``visibleMsgs`` 会把两条 user 同时显示出来：**同一条提问出现
+   * 两个气泡**。
+   *
+   * 正常轮次里这个窗口只有 3 秒、且用户从打开会话到发消息通常早已越过首次探测，
+   * 所以不容易撞上。但**附件轮次会稳定复现**：上传时后端当场建会话，
+   * activeSessionId 从 undefined 变成真实 id → 探测 effect 重新挂载、lastKey
+   * 重置 → 3 秒后首次探测就算「变化」→ 立刻 loadMessages，正好落在流式进行中。
+   *
+   * 用 ref 而不是 state：探测那个 effect 的依赖里刻意不放这些（放了会让它每轮
+   * 重启成风暴），所以只能靠 ref 读到实时值。
+   */
+  const localStreamingRef = useRef(false);
   /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
      只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
   const remembered = () =>
@@ -589,6 +626,11 @@ export default function ChatPage({
           // 第一次拿到也当作变化：那正好覆盖"页面打开时那一轮已经在跑"的情况
           if (key !== lastKey) {
             lastKey = key;
+            /* 本地流在跑时**不拉消息**：loadMessages 是替换语义，会把服务端的
+               user 消息（后端 id）和本地 activeRun.user（前端 id）同时摆上台，
+               变成"同一条提问两个气泡"。流式那几秒不值得为它冒这个险——
+               过程本来就有流式桶在实时喂。 */
+            if (localStreamingRef.current) continue;
             await loadMessages(sid);
             /* 内核**明确说**这个会话没有在跑了：任何"进行中"气泡都是过期的，清掉。
              *
@@ -1114,9 +1156,74 @@ export default function ChatPage({
     [input, sending]
   );
 
+  /**
+   * 选文件 → 上传 → 在输入框留个占位。
+   *
+   * 两步都做，因为它们服务不同的人：上传是为了拿到 file_id（模型要看），
+   * 输入框占位是为了让用户**看见自己加了什么**——后者不能省，否则用户加完
+   * 图不知道加没加上，而这一轮可能跑很久才发现模型没看到。
+   *
+   * 新对话（还没有会话）时后端会当场建一条（session_id 传 "new"），返回的 id
+   * 这里立刻接过来：否则附件挂在一个前端不知道的会话上，用户一发消息又会另建。
+   */
+  const addFiles = async (files: FileList | null) => {
+    if (!files || !files.length || uploading) return;
+    setUploading(true);
+    try {
+      for (const f of Array.from(files)) {
+        const { attachment, session_id } = await apiUploadAttachment(
+          agentId,
+          activeSessionId || "new",
+          f
+        );
+        // 后端新建了会话：接过来，别让附件和消息落到两条不同的会话上
+        if (session_id && session_id !== activeSessionId) {
+          setSessionId(session_id);
+          setChatSessionId(session_id);
+          localStorage.setItem(sessionKey(agentId, sessionKind), session_id);
+          loadWorkspace(session_id);
+        }
+        setPendingFiles((prev) => [...prev, attachment]);
+        // 输入框占位：与引用（浮球那套）同一形制，一眼能认出"这不是我打的字"
+        setInput((prev) =>
+          (prev ? prev.replace(/\s+$/, "") + " " : "") + `【文件：${attachment.name}】`
+        );
+      }
+    } catch (e: any) {
+      // 用 toast 而不是就地红字：上传失败的原因（模型不支持 / 超限 / 类型不对）
+      // 是**一次性说明**，占着一块常驻区域反而碍眼。
+      toast.error(e?.message || "上传失败");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  /**
+   * 移除一个待发送附件：输入框里那段占位一起删掉，两边别各留一半。
+   *
+   * 按**索引**删而不是按名字：同名文件可能出现多次，按名字删会把第一段删掉，
+   * 于是删 B 结果 A 的占位消失了——而 A 还在待发送列表里，用户完全看不出问题。
+   * 索引删则占位的第几段与列表的第几条严格对应。
+   */
+  const removeFile = (index: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+    setInput((prev) => {
+      let seen = -1;
+      const cleaned = prev.replace(/【文件：[^】]*】/g, (m) => {
+        seen += 1;
+        return seen === index ? "" : m;
+      });
+      // 删中间那段时可能留下双空格，顺手收一下；不动末尾以外的换行
+      return cleaned.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "");
+    });
+  };
+
   const send = async (raw?: string, stepId?: string) => {
     const q = (raw ?? input).trim();
     if (!q || sending) return;
+    // 标记本地正在流式：让那条 3 秒一探的 effect 跳过 loadMessages，
+    // 否则它会把刚发上去、还在流式中的这一轮又拉一遍，和服务端回灌的 user 重复显示。
+    localStreamingRef.current = true;
 
     /**
      * 这一轮要发到**哪个会话**：视图当前所在的会话。
@@ -1218,6 +1325,8 @@ export default function ChatPage({
           // 这里就是浏览器页那条会话落库时唯一的类别来源。
           kind: sessionKind,
           runId,
+          // 本轮附件：随消息一起发（只带 file_id 等元信息，文件内容已在上面传完）
+          attachments: pendingFiles,
           signal: controller.signal,
         },
         {
@@ -1360,11 +1469,17 @@ export default function ChatPage({
       updateMsgs(bucket, (prev) =>
         prev.some((m) => m.id === userMsg.id) ? prev : [...prev, userMsg]
       );
+      // 附件跟着清：它们已经随这一轮发出去了，留着会被下一轮误带上。
+      // （失败路径也清——附件是独立上传的，file_id 已经拿到，重发时重新选一次
+      //  比让一个来路不明的旧附件混进下一轮更可预期。）
+      setPendingFiles([]);
       // 本轮产生了新用量：刷新整会话累计
       qc.invalidateQueries({ queryKey: ["session-usage", activeSessionId] });
       // 侧栏会话列表也要刷：**首条用户消息落库后后端会自动派生出标题**，
       // 不刷的话列表里这条会一直显示「新对话」直到手动刷新页面。
       qc.invalidateQueries({ queryKey: ["sessions"] });
+      // 流式彻底收尾：放开探测 effect，让后续（含下一轮）的 loadMessages 正常生效。
+      localStreamingRef.current = false;
     }
   };
 
@@ -1522,6 +1637,7 @@ export default function ChatPage({
               msg={m}
               agentId={agentId}
               agentName={agentName}
+              sessionId={activeSessionId}
               isLocal={isLocal}
               onUsageDetail={openUsageDetail}
               onUsageDump={
@@ -1611,6 +1727,38 @@ export default function ChatPage({
               "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(66,133,244,0.4)]"
             )}
           >
+            {/* 待发送的附件：一排小卡片，缩略图 + 名称 + 删除。
+                放在输入框**里面**（浮块内最上一行）而不是外面：它属于这一轮的
+                输入，跟文字挨着才看得出"我要发的是这些"。放外面会变成另一块
+                常驻 UI，和输入框的关系就断了。 */}
+            {pendingFiles.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {pendingFiles.map((a, i) => (
+                  <div
+                    key={a.id}
+                    className="group relative flex h-[52px] w-[52px] shrink-0 items-center justify-center overflow-hidden rounded-[8px] border border-line-soft bg-black/[0.03] dark:bg-white/[0.06]"
+                    title={`${a.name}（${(a.size / 1024).toFixed(0)} KB）`}
+                  >
+                    {/* 缩略图直接读本地缓存（GET /files/attachment/...）：
+                        上传时已落一份，这里不用再问厂商要——file_id 那条路是
+                        给模型走的，前端取内容走缓存，两条路各司其职。 */}
+                    <img
+                      src={attachmentUrl(agentId, activeSessionId || "", a.id)}
+                      alt={a.name}
+                      className="h-full w-full object-cover"
+                    />
+                    <button
+                      type="button"
+                      title="移除"
+                      onClick={() => removeFile(i)}
+                      className="absolute right-0 top-0 flex h-[16px] w-[16px] items-center justify-center rounded-bl-[6px] bg-black/55 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* 正文输入：无边无底色，融进浮块 */}
             <textarea
               value={input}
@@ -1631,11 +1779,33 @@ export default function ChatPage({
               {/* 附件 / 添加上下文 */}
               <button
                 type="button"
-                title="添加上下文"
-                className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/[0.05] hover:text-ink dark:hover:bg-white/10"
+                title="上传附件（图片）"
+                disabled={uploading}
+                onClick={() => fileInputRef.current?.click()}
+                className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/[0.05] hover:text-ink disabled:opacity-50 dark:hover:bg-white/10"
               >
-                <Plus className="h-4 w-4" />
+                {uploading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus className="h-4 w-4" />
+                )}
               </button>
+              {/* 隐藏的真文件选择器：点了上面那个按钮才触发。
+                  不自己画一个是因为原生的有系统级交互（拖文件进来、键盘可达、
+                  多选），自己实现这些是在重复浏览器已经做好的事。 */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                hidden
+                onChange={(e) => {
+                  void addFiles(e.target.files);
+                  // 清掉 value：否则连续选同一个文件不会触发 change，
+                  // 用户会以为按钮坏了
+                  e.target.value = "";
+                }}
+              />
 
               {/* 权限模式：显示当前模式，点击切换（这里简化为提示） */}
               <span className="hidden items-center gap-1 rounded-full px-1.5 py-0.5 text-[11.5px] text-ink-muted sm:flex">

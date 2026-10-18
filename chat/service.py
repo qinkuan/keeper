@@ -325,6 +325,7 @@ async def run_one_ask(
     step_id: Optional[str] = None,
     user_space_id: Optional[str] = None,
     title_text: Optional[str] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
     on_session: Optional[Callable[[str], Awaitable[None]]] = None,
     on_step: Optional[Callable[[int, Dict[str, Any]], Awaitable[None]]] = None,
     on_delta: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -385,7 +386,8 @@ async def run_one_ask(
         if on_session is not None:
             await on_session(svc.session_id)
         return await svc.ask(
-            text, step_id=step_id or None, user_space_id=user_space_id or None
+            text, step_id=step_id or None, user_space_id=user_space_id or None,
+            attachments=attachments,
         )
 
     ensure_run(run_id, agent_id)
@@ -430,6 +432,7 @@ async def run_one_ask(
             on_step=emit_step,
             on_delta=emit_delta,
             should_stop=should_stop,
+            attachments=attachments,
         )
         # 先封存终态再交给调用方往外推：hub 里的 done 帧是「刷新后重连」时直接拿
         # 结果的依据（那一轮已经跑完的情况）。
@@ -585,12 +588,17 @@ class ChatService:
         should_stop=None,
         on_step=None,
         on_delta=None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """对外入口：**同一会话串行执行**（串行锁见 ``_session_lock``）。
 
         on_step：可选的异步回调 ``async (seq, step)``，每完成一步 ReAct 调用一次，
         供流式输出（SSE）逐步推送过程；不传则行为与之前完全一致。
         on_delta：可选的异步回调 ``async (text)``，最终回答按块推送（打字机）。
+
+        attachments：本轮用户上传的附件（已由上传端点拿到 file_id 的字典列表）。
+        只影响**第一轮**发给模型的消息——附件是这一轮的输入，追问轮不带（那时
+        用户补充的是文字，见 resume 路径）。
 
         上一条还没跑完时，后到的同一会话请求会在锁上排队等待，而不是并发跑两个
         ReAct——避免 seq 撞号、挂起被后到的请求误作废、以及两边互相看不到对方
@@ -622,7 +630,38 @@ class ChatService:
                 should_stop=should_stop,
                 on_step=on_step,
                 on_delta=on_delta,
+                attachments=attachments,
             )
+
+    @staticmethod
+    def _attachment_parts(attachments: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """把落库的附件字典转成模型消息里的 content block 列表。
+
+        按每条附件的 ``provider`` 取对应的 :func:`llm.files.uploader_for`——
+        file_id 的引用格式是厂商特定的，不通用。
+
+        认不出的 provider 跳过该条（而不是抛异常）：附件是补充材料，为它把整轮
+        问题咽下去不合理。这种情况只可能来自「附件是别的模型时期上传的、现在换了
+        模型」——正是用户已知并接受的降级（换模型就重来）。
+        """
+        if not attachments:
+            return []
+        from ..llm.files import uploader_for
+
+        parts: List[Dict[str, Any]] = []
+        for a in attachments:
+            file_id = (a or {}).get("file_id")
+            if not file_id:
+                continue
+            uploader = uploader_for(str((a or {}).get("provider") or ""))
+            if uploader is None:
+                logger.debug(
+                    "附件 %s 的 provider=%s 没有对应的上传器，跳过该条",
+                    (a or {}).get("name"), (a or {}).get("provider"),
+                )
+                continue
+            parts.append(uploader.ref_part(file_id))
+        return parts
 
     async def _ask_locked(
         self,
@@ -634,6 +673,7 @@ class ChatService:
         should_stop=None,
         on_step=None,
         on_delta=None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """真正跑一轮问答（调用方需已持有该会话的串行锁）。
 
@@ -668,7 +708,7 @@ class ChatService:
 
         # 落库本轮的用户消息（生成 message_id，或沿用对端指定的）
         user_message_id = await self._append_message(
-            session_id, "user", text, message_id=message_id
+            session_id, "user", text, message_id=message_id, attachments=attachments
         )
         if anchor_message_id is None:
             anchor_message_id = user_message_id  # 新话轮：锚 = 本轮 user 消息
@@ -727,6 +767,14 @@ class ChatService:
                 on_delta=on_delta,
             )
         else:
+            # 附件 id → content block。格式按**当时用的 provider** 分派
+            # （见 llm/files.py：DeepSeek 扁平、OpenAI 嵌套），所以这一步必须在
+            # chat 层做——它才知道这条会话绑的是哪个模型。
+            #
+            # 认不出的 provider 就**跳过那一条**而不是整轮失败：附件只是补充材料，
+            # 为了一个读不了的图把用户的问题一起咽下去不合理。落库的 attachments
+            # 仍保留原样，前端照样能展示与预览。
+            file_parts = self._attachment_parts(attachments)
             result = await self.executor.chat(
                 text,
                 session_message_id=user_message_id,
@@ -735,6 +783,7 @@ class ChatService:
                 should_stop=should_stop,
                 on_step=on_step,
                 on_delta=on_delta,
+                file_parts=file_parts,
                 # 预算守卫：本轮多步调用也要被拦，而不是只挡在会话开始那一次
                 session_id=session_id,
             )
@@ -1271,10 +1320,15 @@ class ChatService:
         role: str,
         content: str,
         message_id: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """追加一条消息（seq 取当前会话最大值 +1），返回 message_id。
 
         message_id 由调用方给出时沿用——跨端调用时两端存同一条消息需要同 id。
+
+        attachments：只对 user 消息有意义（agent 侧不产生附件）。为空时写 NULL，
+        与 artifacts 的口径一致——别写 "[]"，那一列存 NULL 才能让 SQL 侧的
+        「有没有附件」判断保持简单。
         """
         factory = get_session_factory()
         async with factory() as db:
@@ -1284,6 +1338,9 @@ class ChatService:
                 seq=await self._next_seq(db, session_id),
                 role=role,
                 content=content,
+                attachments=(
+                    json.dumps(attachments, ensure_ascii=False) if attachments else None
+                ),
             )
             db.add(msg)
             await db.commit()
@@ -1691,6 +1748,10 @@ class ChatService:
                 "artifacts": self._public_artifacts(
                     json.loads(m.artifacts) if m.artifacts else []
                 ),
+                # 用户上传的附件。原样下发（含 file_id）——前端要拿 id 拼预览 URL，
+                # 而 file_id 本身不是秘密（它只在持有同一把 api_key 时有意义，
+                # 而那把 key 从不下发前端）。
+                "attachments": json.loads(m.attachments) if m.attachments else [],
                 "steps": final_steps.get(m.id, []),
                 # 可观测：本轮用量 + 端到端墙钟（usage 只含 LLM 耗时）
                 "usage": usage_out.get(m.id),

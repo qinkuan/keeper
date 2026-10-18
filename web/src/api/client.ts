@@ -129,6 +129,8 @@ import type {
 
   AgentBridgeInfo,
 
+  Attachment,
+
   SessionKind,
 
 } from "./types";
@@ -1352,6 +1354,14 @@ export function apiChatStream(
 
     runId?: string;
 
+    /**
+     * 本轮附件：**已上传完成**的附件列表（由 apiUploadAttachment 返回）。
+     *
+     * 文件内容不走这里——那是 multipart，和 SSE 的长连接混在一起很别扭。
+     * 所以是「先上传拿 file_id、后发送带 file_id」两步，这里只传元信息。
+     */
+    attachments?: Attachment[];
+
     signal?: AbortSignal;
 
   },
@@ -1391,6 +1401,9 @@ export function apiChatStream(
       kind: opts.kind || "chat",
 
       run_id: opts.runId || "",
+
+      // 附件：空数组时不发这个键，让后端拿到默认值（与「没传」等价）
+      attachments: opts.attachments?.length ? opts.attachments : undefined,
 
     },
 
@@ -2153,6 +2166,129 @@ export function artifactDiffUrl(
 ): string {
 
   return `${BASE}/agents/${agentId}/files/${messageId}/${artifactId}/diff`;
+
+}
+
+/**
+ * 用户上传附件的 URL。
+ *
+ * 第二个参数是 **sessionId 而不是 messageId**：附件在发出去之前就要能预览
+ * （输入框上方那排缩略图），那一刻它还没挂到任何消息上。按 messageId 查会
+ * 直接 404——而那正是用户第一眼看到附图的时机。
+ *
+ * 与 artifactUrl 分开而不是复用那个：产物取的是「agent 产出的文件」（工作区里的
+ * 真实文件），附件取的是「用户传进来的原件」（会话私有临时区的缓存）。两者数据
+ * 来源与安全边界不同，端点也是两个。
+ */
+export function attachmentUrl(
+
+  agentId: string,
+
+  sessionId: string,
+
+  attachmentId: string,
+
+  dl = false
+
+) {
+
+  return withToken(
+
+    `${BASE}/agents/${agentId}/files/attachment/${sessionId}/${attachmentId}${dl ? "?dl=1" : ""}`
+
+  );
+
+}
+
+/**
+ * 上传一个附件：落本地缓存 + 传 LLM 厂商拿 file_id。
+ *
+ * 用 FormData 而不是 JSON：文件是二进制，JSON 装不下（base64 会让体积涨 1/3）。
+ * 返回的附件字典随后作为 attachments 字段随消息一起发出——**文件内容不走消息**，
+ * 那是「先上传、后发送」两步，好处是 SSE 那条长连接不用背 multipart。
+ */
+export async function apiUploadAttachment(
+
+  agentId: string,
+
+  sessionId: string,
+
+  file: File
+
+) {
+
+  const form = new FormData();
+
+  form.append("file", file);
+
+  const res = await fetch(
+
+    `${BASE}/agents/${agentId}/sessions/${sessionId}/attachments`,
+
+    {
+
+      method: "POST",
+
+      body: form,
+
+      // token 不能塞 FormData（那会变成文件的一部分），只能走请求头
+      headers: authHeaders(),
+
+    }
+
+  );
+
+  if (!res.ok) {
+
+    let detail = `上传失败（${res.status}）`;
+
+    try {
+
+      const body = await res.json();
+
+      if (body && typeof body.detail === "string") detail = body.detail;
+
+    } catch {
+
+      /* 响应不是 JSON 就用默认文案 */
+
+    }
+
+    throw new Error(detail);
+
+  }
+
+  const data = await res.json();
+
+  return {
+
+    attachment: data.attachment as {
+
+      id: string;
+
+      name: string;
+
+      mime: string;
+
+      size: number;
+
+      provider: string;
+
+      model: string;
+
+      file_id: string;
+
+      expires_at: number | null;
+
+      cache_path: string;
+
+    },
+
+    /** 附件归属的会话。传 "new" 时由后端当场建一条，前端据此切过去。 */
+
+    session_id: data.session_id as string,
+
+  };
 
 }
 

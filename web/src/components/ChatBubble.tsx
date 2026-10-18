@@ -12,6 +12,7 @@ import { toast } from "./ui/Toast";
 import { CollapseItem } from "./ui/Collapse";
 import MarkdownView from "./MarkdownView";
 import { cn } from "../lib/utils";
+import { attachmentUrl } from "../api/client";
 
 /**
  * 产物卡片按需加载：它内部用 Monaco 做代码/diff 展示（3.9MB）。
@@ -113,6 +114,7 @@ function ChatBubble({
   msg,
   agentId,
   agentName,
+  sessionId,
   isLocal = true,
   onUsageDetail,
   onUsageDump,
@@ -122,6 +124,8 @@ function ChatBubble({
   agentId: string;
   /** 消息头显示的 agent 名。多 agent 场景下不显示名字，读者分不清是谁答的 */
   agentName?: string;
+  /** 这条消息所属会话：附件预览 URL 要用（附件缓存在会话私有临时区） */
+  sessionId?: string;
   /** 是否本机部署（决定产物卡片能否「打开文件夹」）；未传时按本机处理 */
   isLocal?: boolean;
   /** 点用量里的「查看详情」：打开本轮逐步的时间线可视化（传 messageId 而非闭包） */
@@ -365,6 +369,31 @@ function ChatBubble({
                 />
               ))}
             </Suspense>
+          </div>
+        )}
+
+        {/* 用户上传的附件：只挂在 user 消息上（artifacts 反过来只挂 assistant）。
+            与 ArtifactCard 分开而不是复用它：那个面向「agent 产出的文件」，有
+            diff / reveal / 源码切换这一整套；附件只需要「看清楚我当时传了什么」，
+            一个缩略图 + 一个下载就够了。复用会让卡片上半屏功能全点不动。 */}
+        {isUser && !!msg.attachments?.length && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {msg.attachments.map((a) => (
+              <a
+                key={a.id}
+                href={attachmentUrl(agentId, sessionId || "", a.id, true)}
+                target="_blank"
+                rel="noreferrer"
+                title={`${a.name} · ${(a.size / 1024).toFixed(0)} KB · 点击下载`}
+                className="group block h-[64px] w-[64px] overflow-hidden rounded-lg border border-line-soft bg-surface"
+              >
+                <img
+                  src={attachmentUrl(agentId, sessionId || "", a.id)}
+                  alt={a.name}
+                  className="h-full w-full object-cover transition-transform group-hover:scale-[1.04]"
+                />
+              </a>
+            ))}
           </div>
         )}
 

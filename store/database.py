@@ -289,6 +289,19 @@ async def _migrate_session_message_artifacts(conn) -> None:
         await conn.exec_driver_sql("ALTER TABLE session_messages ADD COLUMN artifacts TEXT")
 
 
+async def _migrate_session_message_attachments(conn) -> None:
+    """session_messages 补 attachments 列：承载用户上传的附件（存量库升级）。
+
+    与 artifacts 分开两列而不是复用：语义不同（见 store/models.py 里
+    SessionMessage.attachments 的注释），混在一列里前端与后端都分不清
+    「这个文件是 agent 产出的还是用户传进来的」。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(session_messages)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "attachments" not in existing:
+        await conn.exec_driver_sql("ALTER TABLE session_messages ADD COLUMN attachments TEXT")
+
+
 async def _migrate_agent_peer_source(conn) -> None:
     """agent_peers 补 source / trust_env 列：区分本进程内 / 外部对端（存量库升级）。"""
     rows = (await conn.exec_driver_sql("PRAGMA table_info(agent_peers)")).fetchall()
@@ -740,6 +753,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_chat_session_context_id(conn)
         await _migrate_chat_session_user_space(conn)
         await _migrate_session_message_artifacts(conn)
+        await _migrate_session_message_attachments(conn)
         await _migrate_agent_peer_source(conn)
         await _migrate_task_item_rounds(conn)
         await _migrate_task_paused(conn)

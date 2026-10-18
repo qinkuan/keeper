@@ -85,6 +85,7 @@ async def fake_ask(
     should_stop=None,
     on_step=None,
     on_delta=None,
+    attachments=None,
 ):
     """替身 ask：真落库、真发回调，只是不调 LLM。"""
     # 真 ask 的第一件事就是确保会话存在并写回 self.session_id——替身必须照做，
@@ -97,6 +98,7 @@ async def fake_ask(
             "text": text,
             "user_space_id": user_space_id,
             "has_should_stop": should_stop is not None,
+            "attachments": attachments,
         }
     )
     async with get_session_factory()() as db:
@@ -325,6 +327,80 @@ async def part_lifecycle() -> None:
 
 
 # ── 2. 两个入口是否汇到同一个函数 ───────────────────────────────────────────
+# ── 3. 附件：run_one_ask → ask 的透传，与附件 → content part 的转换 ───────────
+async def part_attachments() -> None:
+    """附件链路的两个断点，都不需要真连厂商：
+
+    1. ``run_one_ask`` 必须把 attachments 原样透传给 ``ask``——这一层断了，
+       前端上传成功的文件就根本到不了执行层，而且**没有任何报错**（只是模型看不到图）。
+    2. ``_attachment_parts`` 按 provider 转 content block：认得的 provider 转成
+       厂商格式，认不出的跳过（换模型后的旧附件属于这种，不该让整轮问题失败）。
+    """
+    S.ChatService.ask = fake_ask  # type: ignore[method-assign]
+    S.resolve_for_chat = lambda agent_id=None: object()  # type: ignore[assignment]
+    ASK_CALLS.clear()
+
+    atts = [
+        {"id": "01A", "name": "a.png", "mime": "image/png", "size": 100,
+         "provider": "deepseek", "model": "deepseek-flash",
+         "file_id": "file-api-aaa", "cache_path": "@tmp/uploads/01A/a.png"},
+        {"id": "01B", "name": "b.png", "mime": "image/png", "size": 200,
+         "provider": "deepseek", "model": "deepseek-flash",
+         "file_id": "file-api-bbb", "cache_path": "@tmp/uploads/01B/b.png"},
+    ]
+
+    # ① 透传：run_one_ask 的 attachments 必须到达 ask
+    await S.run_one_ask(
+        agent_id=AGENT_ID, session_id="", text="这两张图有什么不同",
+        run_id="RUN-ATT-0001", attachments=atts,
+    )
+    check(
+        ASK_CALLS and ASK_CALLS[-1]["attachments"] == atts,
+        "attachments 从 run_one_ask 透传到 ask",
+        ASK_CALLS[-1]["attachments"] if ASK_CALLS else None,
+    )
+    # 不传时是 None 而不是 []：两条路径都要走通，别让"没传"变成"传了空列表"
+    # 而在某处被误判成"有附件但为空"
+    ASK_CALLS.clear()
+    await S.run_one_ask(
+        agent_id=AGENT_ID, session_id="", text="没问题的一轮",
+        run_id="RUN-ATT-0002",
+    )
+    check(
+        ASK_CALLS and ASK_CALLS[-1]["attachments"] is None,
+        "不传 attachments 时落到 ask 的是 None（不是空列表）",
+        ASK_CALLS[-1]["attachments"] if ASK_CALLS else "无调用",
+    )
+
+    # ② 附件 → content part
+    parts = S.ChatService._attachment_parts(atts)
+    check(
+        parts == [
+            {"type": "file", "file_id": "file-api-aaa"},
+            {"type": "file", "file_id": "file-api-bbb"},
+        ],
+        "deepseek 附件转成扁平的 file block",
+        parts,
+    )
+    # 顺序即传入顺序：模型看到图片的先后要与前端展示一致，别重排
+    mixed = atts + [
+        {"id": "01C", "name": "c.png", "provider": "openai",
+         "file_id": "file-ccc", "mime": "image/png", "size": 1},
+    ]
+    parts2 = S.ChatService._attachment_parts(mixed)
+    check(
+        len(parts2) == 2 and parts2[0]["file_id"] == "file-api-aaa",
+        "认不出的 provider 跳过该条，其余保持顺序",
+        parts2,
+    )
+    check(
+        S.ChatService._attachment_parts(None) == []
+        and S.ChatService._attachment_parts([]) == []
+        and S.ChatService._attachment_parts([{"provider": "deepseek"}]) == [],
+        "None / 空 / 缺 file_id 都不产生 part",
+    )
+
+
 def part_routes() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -461,6 +537,7 @@ async def _async_val(v):
 
 def main() -> None:
     asyncio.run(part_lifecycle())
+    asyncio.run(part_attachments())
     part_routes()
     shutil.rmtree(_TMP, ignore_errors=True)
     print()

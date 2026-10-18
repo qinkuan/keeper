@@ -22,6 +22,9 @@ langchain-core>=1.6
 langchain-openai        # openai / deepseek / siliconflow
 langchain-anthropic     # anthropic / claude
 langchain-ollama        # ollama / vLLM
+openai                  # llm/files.py 的 Files API（上传拿 file_id）。
+                         # 必须显式声明：它目前只是 langchain-openai 的间接依赖，
+                         # 而 llm/files.py 直接用了 AsyncOpenAI.files.create
 
 # ---- MCP 层 ----
 langchain-mcp-adapters>=0.3      # client：mcp/client.py 的 MultiServerMCPClient

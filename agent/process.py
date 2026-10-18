@@ -1240,6 +1240,7 @@ class Process:
         should_stop=None,
         session_id=None,
         task_id=None,
+        file_parts: Optional[List[dict]] = None,
     ) -> ProcessResult:
         """跑一轮 ReAct；无论怎么结束（FINAL / ASK / 暂停 / 调用失败 / 超步数）都打印用量。
 
@@ -1266,6 +1267,7 @@ class Process:
                 history=history,
                 memory_hint=memory_hint,
                 should_stop=should_stop,
+                file_parts=file_parts,
             )
         finally:
             self._log_usage(before)
@@ -1355,6 +1357,7 @@ class Process:
         history: Optional[List[dict]] = None,
         memory_hint: Optional[str] = None,
         should_stop=None,
+        file_parts: Optional[List[dict]] = None,
     ) -> ProcessResult:
         self._refresh_limits()  # 步数上限 / 单条截断：每轮现读配置
         # 每轮重置加载状态：messages 是新建的一批，上轮的「已加载」不再成立。
@@ -1362,9 +1365,19 @@ class Process:
         self._reset_capabilities()
         self.install_capability_loader()
         steps: List[Step] = list(prior_steps or [])
-        messages: List[dict] = list(history or []) + [
-            {"role": "user", "content": "用户问题：" + question}
-        ]
+        # 第一轮 user 消息：有附件时 content 是**块列表**（文本在前、文件在后，
+        # 与厂商文档的示例顺序一致），没有则是纯字符串——后者是绝大多数路径，
+        # 别为了附件把它的形状也改掉。
+        #
+        # 为什么块在这里才拼：附件 id → content block 的格式是**厂商特定**的
+        # （DeepSeek 是扁平的 {"type":"file","file_id":...}，OpenAI 是嵌套的）。
+        # 那层转换在 chat/service.py 做（它知道当时用的哪个 provider），这里只负责
+        # 把已经成形的块塞进 messages——process 不该知道厂商细节。
+        question_text = "用户问题：" + question
+        first: dict = {"role": "user", "content": question_text}
+        if file_parts:
+            first["content"] = [{"type": "text", "text": question_text}] + list(file_parts)
+        messages: List[dict] = list(history or []) + [first]
         # 上下文治理：外部化 + 水位压缩（见 doc/context-design.md）
         compactor = Compactor(self.llm)
 

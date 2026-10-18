@@ -56,6 +56,7 @@ class AgentExecutor:
         on_delta=None,
         session_id=None,
         task_id=None,
+        file_parts: Optional[list] = None,
     ) -> Any:
         """跑一轮 ReAct 并逐步落库，返回 ProcessResult。
 
@@ -96,6 +97,7 @@ class AgentExecutor:
             should_stop=should_stop,
             session_id=sid,
             task_id=tid,
+            file_parts=file_parts,
         )
         if result.ask and session_message_id:
             # 模型要向用户提问：补写一条挂起步骤，等该会话的下一条消息来恢复

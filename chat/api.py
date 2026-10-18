@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -32,7 +32,7 @@ from ..agent.keeper import (
     resolve_core_agent,
     resolve_for_chat,
 )
-from ..store import SessionMessage, get_session_factory
+from ..store import SessionMessage, get_session_factory, new_id
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, resolve_artifact_uri
 from .context import set_agent, set_task_id, set_task_item
@@ -180,6 +180,10 @@ class ChatStreamIn(BaseModel):
     # 本次运行的标识（前端生成）：点「停止生成」时按它精确中止这一次，
     # 而不是按 session 粗粒度停——同一会话可能有别的请求在跑。
     run_id: str = ""
+    # 本轮附件：**已上传完成**的附件字典列表（每个含 file_id / provider 等，
+    # 由 POST .../attachments 返回）。文件内容不走这里——那要走 multipart，
+    # 和 SSE 的长连接混在一起很别扭；所以是「先上传、后发送」两步。
+    attachments: list[Dict[str, Any]] = []
 
 
 class ChatAbortIn(BaseModel):
@@ -363,6 +367,7 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
                 kind=body.kind,
                 step_id=body.step_id or "",
                 user_space_id=body.user_space_id or "",
+                attachments=body.attachments or None,
                 # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
                 # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
                 # 整片消失。
@@ -1609,10 +1614,182 @@ async def _load_artifact(agent, message_id: str, artifact_id: str):
     return art, source
 
 
+async def _agent_llm_config(agent_id: str):
+    """按 agent_id 取它**当前绑定**的模型配置（LLMConfig）；没绑定返回 None。
+
+    走 ``agent.keeper._resolve_llm_by_binding`` 而不是读 agent 实例：那个函数
+    按 agent_id 直查 ``agent_llm_binding`` → ``llm_profiles``，与装配期用的是
+    同一条路（见 agent/keeper.py 的注释）——用实例上的缓存反而可能和库里不一致
+    （用户刚改绑定、还没重装配时）。
+
+    返回 None 表示「这个 agent 没绑模型」，调用方要把它当成「不支持上传」处理，
+    而不是崩掉：纯索引模式的 agent 本来就不调模型，自然也没有文件能力。
+    """
+    from ..agent.keeper import _resolve_llm_by_binding
+    from ..llm.config import LLMConfig
+
+    try:
+        raw = await _resolve_llm_by_binding(agent_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("解析 agent %s 的模型配置失败: %s", agent_id, e)
+        return None
+    if not raw:
+        return None
+    try:
+        return LLMConfig(**raw)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent %s 的模型配置不合法: %s (%s)", agent_id, e, raw)
+        return None
+
+
 @router.get("/{agent_id}/deploy-info")
 async def deploy_info(agent_id: str) -> Dict[str, Any]:
     """返回部署形态，前端据此决定显示「打开文件夹」还是只「下载」。"""
     return {"local": _is_local_deploy()}
+
+
+# ────────────────────────── 用户上传的附件 ──────────────────────────
+#
+# 与产物（artifacts）是**两条相反的链路**：
+#   产物：agent 写文件 → 登记 → 用户看
+#   附件：用户选文件 → 上传厂商拿 file_id → agent 看
+# 所以附件不复用 /files/{message_id}/{artifact_id} 那个端点：那个按
+# message_id + artifact_id 取「agent 产出物」，这里按附件自己的 id 取
+# 「用户传进来的原件」。
+
+
+@router.post("/{agent_id}/sessions/{session_id}/attachments")
+async def upload_attachment(
+    agent_id: str,
+    session_id: str,
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    """上传一个附件：落本地缓存 + 传 LLM 厂商拿 file_id。
+
+    两步都做，因为它们服务不同的人：
+
+    * **本地缓存**（``@tmp/uploads/<id>/<原名>``）：给前端预览、给重新上传用。
+      agent 不读它——它只认 file_id。
+    * **厂商 file_id**：真正进模型上下文的那个凭据。
+
+    为什么缓存路径用**相对** ``@tmp/`` 而不是绝对路径：绝对路径换机器就废，
+      而 ``@tmp/`` 前缀在任何机器上都能通过 ``resolve_path`` 重新解析。
+
+    当前只支持 deepseek + deepseek-flash（见 ``llm/files.py``）。不支持的模型
+    在这里就明确拒绝，而不是等厂商返回一个看不懂的 4xx。
+    """
+    agent = _agent(agent_id)
+
+    # 「新对话」时还没有 session_id，而附件缓存要落到确定的会话临时目录
+    # （@tmp/ → workspace/session/<sid>/<agent_id>）——sid 为空时那个目录会
+    # 退化成没有会话层的一级，多个新对话互相串。
+    #
+    # 所以这里**当场建一条会话**：宁可早建（用户可能最后没发消息，留下一个
+    # 空会话），也不要让附件落进一个说不清归属的目录。建出来的 id 随响应
+    # 返回，前端据此把当前会话切过去。
+    if session_id == "new":
+        svc = ChatService(agent_id=agent_id)
+        session_id = await svc.ensure_session_id()
+
+    cfg = await _agent_llm_config(agent_id)
+    if cfg is None:
+        raise HTTPException(status_code=400, detail="当前 agent 没有绑定模型，无法上传文件")
+
+    from ..llm.files import sniff_image_mime, uploader_for
+
+    uploader = uploader_for(cfg.provider)
+    if uploader is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件上传暂不支持 {cfg.provider}，目前只支持 deepseek",
+        )
+    ok, why = uploader.supports(cfg)
+    if not ok:
+        raise HTTPException(status_code=400, detail=why)
+
+    data = await file.read()
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise HTTPException(status_code=400, detail="只支持 JPEG / PNG / GIF / WebP 图片")
+
+    # 落本地缓存。放在会话私有临时区：不污染用户工作区，也不受 user_space 的
+    # read_only 影响（那个默认是 True，写进去会被拒）。
+    attachment_id = new_id()
+    rel = f"@tmp/uploads/{attachment_id}/{file.filename or 'upload'}"
+    ws = await resolve_workspace(agent, session_id)
+    target = ws.agent_space / "uploads" / attachment_id / (file.filename or "upload")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+    try:
+        up = await uploader.upload(cfg, data, file.filename or "upload")
+    except Exception as e:  # noqa: BLE001
+        # 上传失败要把刚落的缓存清掉：留着就是垃圾，而且用户会以为传成功了。
+        shutil.rmtree(target.parent, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=f"上传到模型厂商失败：{e}")
+
+    return {
+        "attachment": {
+            "id": attachment_id,
+            "name": up.name,
+            "mime": up.mime,
+            "size": up.size,
+            "provider": up.provider,
+            "model": up.model,
+            "file_id": up.file_id,
+            "expires_at": up.expires_at,
+            "cache_path": rel,
+        },
+        # 新对话那一趟：前端拿它把当前会话切过去，否则附件挂在一个前端不知道的
+        # 会话上，用户一发消息又会另建一条。
+        "session_id": session_id,
+    }
+
+
+@router.get("/{agent_id}/files/attachment/{session_id}/{attachment_id}")
+async def get_attachment(
+    agent_id: str,
+    session_id: str,
+    attachment_id: str,
+    dl: bool = Query(False),
+) -> Response:
+    """预览 / 下载**用户上传的附件**（读本地缓存那份）。
+
+    注意这与 ``/files/{message_id}/{artifact_id}`` 的分工：那个取 agent 的产物，
+    这个取用户传进来的原件。两条链路的数据来源、安全边界都不同。
+
+    路径里是 **session_id 而不是 message_id**：附件在**发出去之前**就要能预览
+    （输入框上方那排缩略图），那一刻它还没挂到任何消息上。按 message_id 查会
+    直接 404——而那正是用户第一眼看到附件的时机。
+
+    缓存路径由附件 id 唯一决定（``@tmp/uploads/<id>/<原名>``），所以不需要
+    消息参与定位；session_id 只用来把 ``@tmp/`` 解析成这个会话的临时目录。
+    """
+    agent = _agent(agent_id)
+    ws = await resolve_workspace(agent, session_id)
+    # cache_path 由 attachment_id 推出来，不让前端传路径：传了就能伪造
+    # （"../../etc/passwd"），自己推则只可能落在 uploads/<id>/ 下。
+    cache_path = f"@tmp/uploads/{attachment_id}"
+    from ..tools.builtin.sandbox import resolve_path
+
+    try:
+        base = resolve_path(ws.root, ws.agent_space, cache_path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e))
+    if not base.is_dir():
+        raise HTTPException(status_code=404, detail="附件不存在或缓存已被清理")
+    # 一个附件 id 一个目录，里面只有上传时写的那一个文件
+    files = [p for p in base.iterdir() if p.is_file()]
+    if not files:
+        raise HTTPException(status_code=404, detail="附件缓存已被清理")
+    path = files[0]
+
+    # 名称与 mime 从缓存路径拿（上传时用的就是原名）；拿不到时退回通用值
+    name = path.name
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if dl:
+        return FileResponse(path, media_type=mime, filename=name)
+    return FileResponse(path, media_type=mime)
 
 
 @router.get("/{agent_id}/files/{message_id}/{artifact_id}")

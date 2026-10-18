@@ -300,6 +300,28 @@ class LLM(Protocol):
         ...
 
 
+def _has_file_blocks(msgs: list) -> bool:
+    """这批发给模型的消息里有没有 file 附件块。
+
+    只看 ``HumanMessage`` 且 content 是列表的那种：附件只可能出现在第一轮
+    user 消息上（chat/service.py 注入），后续 ReAct 轮次都是纯文本。
+    """
+    for m in msgs or []:
+        content = getattr(m, "content", None)
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "file":
+                return True
+    return False
+
+
+def _lc_role_to_openai(m: Any) -> str:
+    """langchain 消息类型 → OpenAI role。"""
+    t = getattr(m, "type", None) or m.__class__.__name__.lower()
+    return {"human": "user", "ai": "assistant", "system": "system"}.get(t, t)
+
+
 class LangChainLLM:
     """用 langchain ChatModel 实现的 LLM 封装。"""
 
@@ -311,9 +333,14 @@ class LangChainLLM:
         provider: Optional[str] = None,
         model_name: Optional[str] = None,
         profile_id: Optional[str] = None,
+        cfg: Optional["LLMConfig"] = None,
     ):
         self._model = model
         self._system = system
+        # 原始配置：只在「带附件的轮次绕开 langchain 直连」时用得到（见
+        # _direct_chat）。不从 self._model 反查 api_key/base_url——那些是
+        # langchain-openai 的私有属性，版本一升级就可能改名。
+        self.cfg = cfg
         # 可观测：记录用量时要标明走的哪个模型 / provider / 预设——成本换算靠
         # 它们去 llm_profiles 匹配单价（见 doc/observability-design.md）。
         self.provider = provider
@@ -512,9 +539,94 @@ class LangChainLLM:
                 self._no_output_cap = True
         return await self._model.ainvoke(msgs)
 
+    def _direct_client(self):
+        """附件轮专用的 openai 客户端。cfg 缺失时抛异常（说明装配路径漏传了）。"""
+        if self.cfg is None:
+            raise RuntimeError("带附件的轮次需要原始 LLM 配置（cfg），但构造时没传进来")
+        from openai import AsyncOpenAI
+
+        return AsyncOpenAI(
+            api_key=self.cfg.api_key,
+            base_url=self.cfg.base_url,
+            timeout=self.cfg.timeout,
+            max_retries=self.cfg.max_retries,
+        )
+
+    def _direct_payload(self, msgs: list) -> list:
+        """langchain 消息 → OpenAI messages，content **原样透传**。
+
+        不经过 ``_format_message_content``：那样会把 file 块改写成 DeepSeek 不
+        认识的嵌套形状（见 _direct_chat_stream 的说明）。
+        """
+        return [
+            {"role": _lc_role_to_openai(m), "content": getattr(m, "content", "")}
+            for m in msgs
+        ]
+
+    async def _direct_chat_once(self, msgs: list) -> str:
+        """带附件的轮次：绕开 langchain，一次性拿完整回答。
+
+        为什么必须绕
+        ------------
+        langchain-openai 会把 content 里的 file 块一律标准化成 OpenAI 的**嵌套**
+        格式（``_format_message_content`` → ``convert_to_openai_data_block``）::
+
+            {"type": "file", "file_id": "x"}  →  {"type": "file", "file": {"file_id": "x"}}
+
+        而 DeepSeek 的 Files API 要的是**扁平**格式（见其文档的示例）。它收到
+        嵌套时报::
+
+            .messages[1]: file must have a file_id or file_data
+
+        ——因为它在**顶层**找那两个键，嵌套把它们藏进 ``file`` 里了。这是两家厂商
+        的真实差异（OpenAI 文档嵌套、DeepSeek 扁平），langchain 只实现前者且没有
+        开关能关。改不了它，就只能绕开。
+
+        只在有附件的轮次走这条路：其余调用继续用 langchain（流式降级、usage
+        细分、输出上限那些逻辑都在那边，没必要为附件复制一遍）。
+        """
+        client = self._direct_client()
+        resp = await client.chat.completions.create(
+            model=self.cfg.model_name,
+            messages=self._direct_payload(msgs),
+            **self._output_kwargs(),
+        )
+        u = getattr(resp, "usage", None)
+        if u:
+            self.usage.add(u.prompt_tokens or 0, u.completion_tokens or 0)
+        return (resp.choices[0].message.content or "") if resp.choices else ""
+
+    async def _direct_chat_stream(self, msgs: list):
+        """同上，但流式逐块 yield。与一次性那条分开写，不是为了复用：
+
+        Python 的 async generator 不能 ``return value``，混在一个函数里会直接
+        SyntaxError。拆开是语言层面的必然，不是风格选择。
+        """
+        client = self._direct_client()
+        resp = await client.chat.completions.create(
+            model=self.cfg.model_name,
+            messages=self._direct_payload(msgs),
+            stream=True,
+            **self._output_kwargs(),
+        )
+        async for chunk in resp:
+            # usage 可能落在倒数第二个分片（DeepSeek 的已知行为，见 astream_chat）
+            u = getattr(chunk, "usage", None)
+            if u:
+                self.usage.add(u.prompt_tokens or 0, u.completion_tokens or 0)
+            for choice in chunk.choices or []:
+                delta = getattr(choice, "delta", None)
+                piece = getattr(delta, "content", None) if delta else None
+                if piece:
+                    yield piece
+
     async def chat(self, messages: list[dict], system: str = "") -> str:
         t0 = time.perf_counter()
         msgs = self._build_messages(messages, system)
+        # 带附件的轮次走直连（见 _direct_chat 的理由：langchain 会把 file 块
+        # 改写成 DeepSeek 不认识的形状）。没有附件时一切照旧。
+        if _has_file_blocks(msgs):
+            return await self._direct_chat_once(msgs)
         resp = await self._ainvoke(msgs)
         await self._record_usage(
             resp,
@@ -537,6 +649,11 @@ class LangChainLLM:
         msgs = self._build_messages(messages, system)
         t0 = time.perf_counter()
         ttft_ms: Optional[int] = None
+        # 带附件：绕开 langchain 直连（见 _direct_chat 的说明）
+        if _has_file_blocks(msgs):
+            async for piece in self._direct_chat_stream(msgs):
+                yield piece
+            return
         try:
             last = None
             # 带 usage_metadata 的分片。**不能只取最后一个 chunk**：实测 DeepSeek
@@ -720,6 +837,7 @@ def get_llm(cfg: Optional[Dict[str, Any]] = None) -> Optional[LLM]:
             # agent 走模型预设时由调用方塞进来；内联 llm 配置时为 None，
             # 成本换算会退到按 model_name（+provider）匹配。
             profile_id=cfg.get("profile_id"),
+            cfg=llm_cfg,
         )
     except Exception as e:
         logger.warning("LLM 构建失败，降级为无 LLM: %s", e)
