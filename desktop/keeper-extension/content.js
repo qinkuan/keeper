@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1101m";
+  const BUILD = "1101r";
 
   // ---------- 页面身份（cid）----------
   //
@@ -179,8 +179,7 @@
     ".k-dot.k-wait{background:#fbbc04;box-shadow:0 0 0 2px rgba(251,188,4,.22);",
     "  animation:k-blink 1s ease-in-out infinite}",
     "@keyframes k-blink{0%,100%{opacity:1}50%{opacity:.35}}",
-    ".k-lurl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;",
-    "  white-space:nowrap;color:#9aa0a6;",
+    ".k-lurl{white-space:nowrap;color:#9aa0a6;",
     "  font:10.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}",
     ".k-lb{cursor:pointer;border:1px solid rgba(255,255,255,.16);",
     "  background:transparent;color:#9aa0a6;font-size:10.5px;",
@@ -199,6 +198,10 @@
     ".k-cfgrow{display:flex;gap:6px;margin-top:6px;align-items:center}",
     ".k-save{cursor:pointer;border:0;border-radius:6px;background:" + BRAND + ";",
     "  color:#fff;font-size:11px;padding:5px 10px;flex:0 0 auto}",
+    ".k-cancel{cursor:pointer;border:1px solid rgba(255,255,255,.16);",
+    "  background:transparent;color:#9aa0a6;font-size:11px;padding:5px 10px;",
+    "  border-radius:6px;flex:0 0 auto}",
+    ".k-cancel:hover{border-color:" + BRAND + ";color:#8ab4f8}",
     ".k-cfgtip{margin-top:6px;font-size:10.5px;line-height:1.5;color:#9aa0a6}",
     ".k-cfgtip.k-bad{color:#f28b82}",
     ".k-x{cursor:pointer;border:0;background:transparent;color:#6b7280;",
@@ -312,6 +315,29 @@
     "  border-radius:8px 8px 0 0;background:rgba(255,255,255,.03)}",
     ".k-aoh:hover{color:#c8ccd0}",
     ".k-askout.k-fold{display:none}",
+    // ---- 设置 ----
+    ".k-gear{cursor:pointer;border:0;background:transparent;color:#9aa0a6;",
+    "  font-size:13px;line-height:1;padding:2px 5px;border-radius:5px;flex:0 0 auto;margin-left:auto}",
+    ".k-gear:hover{background:rgba(255,255,255,.1);color:#e8eaed}",
+    /* 设置视图：覆盖整个面板，盖住主界面（含顶部状态条），只留自己的头部。 */
+    ".k-settings{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;",
+    "  background:#1e1f20;}",
+    ".k-settings[hidden]{display:none}",
+    ".k-sethead{display:flex;align-items:center;gap:6px;padding:7px 9px;",
+    "  border-bottom:1px solid rgba(255,255,255,.1)}",
+    ".k-back{cursor:pointer;border:0;background:transparent;color:#9aa0a6;",
+    "  font-size:15px;line-height:1;padding:2px 6px;border-radius:5px;flex:0 0 auto}",
+    ".k-back:hover{background:rgba(255,255,255,.1);color:#e8eaed}",
+    ".k-setbody{flex:1;overflow:auto;padding:4px 0 10px}",
+    ".k-row{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:11.5px}",
+    ".k-row label{color:#c8ccd0;flex:0 0 auto}",
+    ".k-sel2{flex:1;min-width:0;background:rgba(255,255,255,.07);",
+    "  border:1px solid rgba(255,255,255,.16);border-radius:6px;color:#e8eaed;",
+    "  font-size:11.5px;padding:5px 7px;outline:none}",
+    ".k-inp{flex:0 0 auto;width:90px;background:rgba(255,255,255,.07);",
+    "  border:1px solid rgba(255,255,255,.16);border-radius:6px;color:#e8eaed;",
+    "  font-size:11.5px;padding:5px 7px;outline:none}",
+    ".k-sel2:focus,.k-inp:focus{border-color:" + BRAND + "}",
     // ---- 附件（图片）chip ----
     ".k-atts{display:flex;flex-wrap:wrap;gap:5px;padding:0 10px 6px}",
     ".k-atts:empty{display:none}",
@@ -345,6 +371,7 @@
     '    <span class="k-dot" id="ld"></span>',
     '    <span class="k-lurl" id="lu">检测中…</span>',
     '    <button class="k-lb" id="lb" type="button">去配置</button>',
+    '    <button class="k-gear" id="gear" type="button" title="设置">⚙</button>',
     '    <button class="k-x" id="x" title="收起">&times;</button>',
     "  </div>",
     '  <div class="k-cfg" id="cfg" hidden>',
@@ -352,6 +379,7 @@
     '      placeholder="粘贴 keeper「浏览器」页的连接码"></textarea>',
     '    <div class="k-cfgrow">',
     '      <button class="k-save" id="csave" type="button">保存并连接</button>',
+    '      <button class="k-cancel" id="ccancel" type="button">取消</button>',
     '    </div>',
     '    <div class="k-cfgtip" id="ctip">整段粘贴即可，不用拆开填。</div>',
     "  </div>",
@@ -377,6 +405,7 @@
     '  <div class="k-askout" id="ao" hidden></div>',
     '  <div class="k-sec">功能</div>',
     '  <div class="k-bar">',
+    '    <button class="k-b" id="bTrans">翻译</button>',
     '    <button class="k-b" id="bText">抓文字</button>',
     '    <button class="k-b" id="bShot">截图</button>',
     '    <button class="k-b" id="bRegion">框选</button>',
@@ -386,6 +415,18 @@
     '    <span class="k-title" id="t"></span>',
     "  </div>",
     '  <div class="k-out" id="o"></div>',
+    '  <div class="k-settings" id="set" hidden>',
+    '    <div class="k-sethead">',
+    '      <button class="k-back" id="bk" type="button" title="返回">←</button>',
+    '      <b class="k-name">设置</b>',
+    '    </div>',
+    '    <div class="k-setbody">',
+    '      <div class="k-sec">翻译</div>',
+    '      <div class="k-row"><label>目标语言</label><select class="k-sel2" id="lang"></select></div>',
+    '      <div class="k-sec">网页总结</div>',
+    '      <div class="k-row"><label>节点字符数 &gt;</label><input class="k-inp" id="minc" type="number" min="0" step="10"></div>',
+    '    </div>',
+    '  </div>',
     "</div>",
     '    <div class="k-ball" id="b">K</div>',
   ].join("\n");
@@ -542,7 +583,7 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bText = $("bText"), bShot = $("bShot"), bRegion = $("bRegion");
+  const bText = $("bText"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans");
   // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
   // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
   const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
@@ -1422,7 +1463,9 @@
    * 传出去、把结果显示出来。刻意不在 content script 里再实现一份解析：格式以后
    * 若变，改一处就够，两处各写一份迟早会漏改一个。
    */
-  const cfgBox = $("cfg"), cta = $("cta"), csave = $("csave"), ctip = $("ctip");
+  const cfgBox = $("cfg"), cta = $("cta"), csave = $("csave"), ctip = $("ctip"), ccancel = $("ccancel");
+  // 取消：收起连接码输入框并清空，等效于"不保存"。
+  ccancel.addEventListener("click", () => { showCfg(false); cta.value = ""; });
   const showCfg = (open) => {
     cfgBox.hidden = !open;
     mark("cfg", open ? "open" : "closed");
@@ -1575,6 +1618,28 @@
       }
     })
   );
+
+  // ---------- 翻译 ----------
+  // 先确认有可翻译的东西（输入框内容或附件里的截图），都没有就提示；
+  // 否则在内容尾部追加一句「把上述内容翻译成 xx」，xx 用系统语言显示设置里的目标语言。
+  bTrans.addEventListener("click", () => {
+    const hasText = qbox.value.trim().length > 0;
+    const hasFile = pendingAttachments.length > 0;
+    if (!hasText && !hasFile) {
+      idle("请输入内容或截图");
+      return;
+    }
+    const langName = sysLangName(cfg.lang.code);
+    const sentence = "把上述内容翻译成" + langName;
+    let v = qbox.value;
+    // 去掉已存在的同类提示（含旧语言），避免重复累加或语言不一致
+    v = v.replace(/把上述内容翻译成[^\n]*\n?/g, "").replace(/\s+$/, "");
+    v += (v.length ? "\n" : "") + sentence;
+    qbox.value = v;
+    syncHighlight();
+    qbox.focus();
+    doAsk();   // 追加翻译提示后直接发送
+  });
 
   // ---------- 截图 ----------
   bShot.addEventListener("click", () =>
@@ -1750,6 +1815,62 @@
     stopLinkPoll();
   });
 
+  // ---------- 设置 ----------
+  // 配置持久化在扩展自身的 storage（不依赖内核）；后续「翻译」「网页总结」功能直接读这里。
+  const cfgKey = "keeper_cfg";
+  const DEFAULT_CFG = { lang: { code: "en", name: "English" }, minChars: 50 };
+  const cfg = { lang: { ...DEFAULT_CFG.lang }, minChars: DEFAULT_CFG.minChars };
+  const gear = $("gear"), setView = $("set"), back = $("bk");
+  const langSel = $("lang"), mincInp = $("minc");
+  // 20 种常用语言：翻译功能会把它作为「翻译成 XX 语言」的目标语言。
+  const LANGS = [
+    ["zh-CN", "简体中文", "简体中文"], ["zh-TW", "繁體中文", "繁體中文"], ["en", "English", "英语"],
+    ["ja", "日本語", "日语"], ["ko", "한국어", "韩语"], ["fr", "Français", "法语"],
+    ["de", "Deutsch", "德语"], ["es", "Español", "西班牙语"], ["ru", "Русский", "俄语"],
+    ["pt", "Português", "葡萄牙语"], ["it", "Italiano", "意大利语"], ["ar", "العربية", "阿拉伯语"],
+    ["hi", "हिन्दी", "印地语"], ["th", "ไทย", "泰语"], ["vi", "Tiếng Việt", "越南语"],
+    ["id", "Bahasa Indonesia", "印尼语"], ["tr", "Türkçe", "土耳其语"],
+    ["nl", "Nederlands", "荷兰语"], ["pl", "Polski", "波兰语"], ["uk", "Українська", "乌克兰语"]
+  ];
+  // 翻译提示里写的目标语言名，用「系统语言」表达：系统中文→中文名（英语），系统英文→原名（English）。
+  const sysLangName = (code) => {
+    const hit = LANGS.find((l) => l[0] === code);
+    if (!hit) return code;
+    const sysZh = /^(zh|zh-CN|zh-TW|zh-Hans|zh-Hant)/i.test(navigator.language || "zh");
+    return sysZh ? hit[2] : hit[1];
+  };
+  const saveCfg = () => { try { chrome.storage.local.set({ [cfgKey]: cfg }); } catch (e) {} };
+  const loadCfg = (cb) => {
+    try {
+      chrome.storage.local.get(cfgKey, (o) => {
+        const s = o && o[cfgKey];
+        if (s) {
+          if (s.lang && s.lang.code) cfg.lang = { code: s.lang.code, name: s.lang.name || s.lang.code };
+          if (typeof s.minChars === "number") cfg.minChars = s.minChars;
+        }
+        cb && cb();
+      });
+    } catch (e) { cb && cb(); }
+  };
+  LANGS.forEach(([code, name]) => {
+    const op = document.createElement("option");
+    op.value = code; op.textContent = name;
+    langSel.appendChild(op);
+  });
+  const applyCfgUi = () => { langSel.value = cfg.lang.code; mincInp.value = cfg.minChars; };
+  loadCfg(applyCfgUi);
+  gear.addEventListener("click", () => { setView.hidden = false; });
+  back.addEventListener("click", () => { setView.hidden = true; });
+  langSel.addEventListener("change", () => {
+    const hit = LANGS.find((l) => l[0] === langSel.value);
+    if (hit) { cfg.lang = { code: hit[0], name: hit[1] }; saveCfg(); }
+  });
+  mincInp.addEventListener("change", () => {
+    const v = parseInt(mincInp.value, 10);
+    cfg.minChars = (isNaN(v) || v < 0) ? 0 : v;
+    saveCfg();
+  });
+
   // ---------- 拖动 ----------
   // 位置存扩展的 chrome.storage.local（理由见上面 POS_KEY 的注释）：跨导航、
   // 跨标签、跨站点都一致。
@@ -1810,6 +1931,7 @@
     // 因为内核重启而过期），用面板打开那一刻的探测结果，别让用户对着上一次
     // 打开时的旧状态做判断。
     if (panel.classList.contains("k-open")) {
+      setView.hidden = true;   // 每次打开面板重置设置视图
       refreshLink();
       if (!linkTimer) linkTimer = setInterval(refreshLink, 4000);
       /* 会话列表也在这里拉：它在浏览器页那一侧随时会变（新建、删除、改名），
