@@ -413,6 +413,7 @@
     '    <button class="k-b" id="bSum">总结页面</button>',
     '    <button class="k-b" id="bShot">截图</button>',
     '    <button class="k-b" id="bRegion">框选</button>',
+    '    <button class="k-b" id="bExit">退出</button>',
     "  </div>",
     /* 状态提示：紧贴功能下方、右对齐、超长可横向滑动。不放进 .k-bar 是因为
        5 个按钮已占满一行，塞进去会被挤到下一行、看起来不在功能右侧；这里
@@ -457,12 +458,23 @@
   //
   // 不需要等页面样式或内容：host 用 all:initial + position:fixed，不依赖页面任何
   // 样式，也不受页面 CSP 约束（DOM 注入不是脚本注入）。
+  // 退出后留在角落的「重新打开」药丸：点一下把悬浮球唤回（整页刷新也会重新出现）。
+  const launcher = document.createElement("div");
+  launcher.id = "k-launcher";
+  launcher.textContent = "打开网页助手";
+  launcher.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:2147483646;background:#1b74e8;color:#fff;padding:8px 14px;border-radius:20px;cursor:pointer;font:13px/1.2 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.3);display:none;";
+  launcher.addEventListener("click", () => {
+    try { launcher.style.display = "none"; host.style.display = ""; } catch (e) {}
+    killAgent = false;
+  });
+
   const mount = () => {
     const de = document.documentElement;
     if (!de) return false;
     try {
       if (!de.contains(host)) de.appendChild(host);
       if (!de.contains(ovStyle)) de.appendChild(ovStyle);
+      if (!de.contains(launcher)) de.appendChild(launcher);
     } catch (e) {
       return false;
     }
@@ -587,7 +599,7 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans"), bAgent = $("bAgent");
+  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans"), bAgent = $("bAgent"), bExit = $("bExit");
   // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
   // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
   const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
@@ -1341,6 +1353,13 @@
      他指定的地方。 */
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || !msg.type) return;
+    if (msg.type === "keeper:resume-agent") {
+      // 别的标签移交过来的 Agent 任务：在本标签（新页面）继续，保留历史与会话。
+      // 把「来路」标签（点链接前的那一页）记下来，供 close_tab 日后清理掉。
+      if (typeof msg.prevTabId === "number") prevTabId = msg.prevTabId;
+      runAgent(msg.goal, msg.history, msg.sessionId);
+      return;
+    }
     if (msg.type === "keeper:note") {
       if (!msg.note) return;
       const n = msg.note;
@@ -1637,6 +1656,8 @@
   // （复用现有多模态 LLM 通道，开一条独立会话）选出下一步动作，再在**本页面**就地执行
   // （滚动/点击/输入/后退）。无需内核反向通道，动作全在内容脚本里做。
   let agentRunning = false;
+  let killAgent = false;
+  let prevTabId = null;   // 上一次手递交给本标签的那个「来路」标签，close_tab 时关它
   let stepMarks = [];
   const AGENT_MAX = 20;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1702,10 +1723,13 @@
               w: +(w / vw).toFixed(3), h: +(h / vh).toFixed(3),
             };
           });
+          console.log("[keeper] doSom 观测页面:", location.href, "| 标题:", document.title, "| 可交互元素:", els.length);
           resolve({
             data_url: canvas.toDataURL("image/jpeg", 0.85),
             width: vw, height: vh, marks: pctMarks, els,
             url: location.href, title: document.title,
+            senderTabId: shot.senderTabId != null ? shot.senderTabId : null,
+            capturedTabId: shot.capturedTabId != null ? shot.capturedTabId : null,
           });
         };
         img.onerror = () => reject(new Error("截图加载失败"));
@@ -1727,11 +1751,15 @@
 
   const execAction = async (a) => {
     const act = String(a.action || "").toLowerCase();
+    console.log("[keeper] 执行动作:", act, "| 参数:", JSON.stringify(a));
     if (act === "scroll_down") window.scrollBy(0, Number(a.px) || 300);
     else if (act === "scroll_up") window.scrollBy(0, -(Number(a.px) || 300));
-    else if (act === "back") history.back();
+    else if (act === "back") { console.log("[keeper] >>> history.back() 触发，当前页:", location.href); history.back(); }
     else if (act === "click") {
-      if (typeof a.elem === "number" && stepMarks[a.elem - 1]) stepMarks[a.elem - 1].el.click();
+      const m = typeof a.elem === "number" ? stepMarks[a.elem - 1] : null;
+      // 元素可能因页面跳转而脱离文档（detached）：此时强制走坐标点击，避免对失效节点
+      // 静默空点，导致模型以为"点了没反应"而反复重试、最终误判为需回退。
+      if (m && m.el && m.el.isConnected) m.el.click();
       else {
         const px = normCoord(a.x) * window.innerWidth, py = normCoord(a.y) * window.innerHeight;
         const t = document.elementFromPoint(px, py);
@@ -1739,7 +1767,8 @@
       }
     } else if (act === "input") {
       let el = null;
-      if (typeof a.elem === "number" && stepMarks[a.elem - 1]) el = stepMarks[a.elem - 1].el;
+      const m = typeof a.elem === "number" ? stepMarks[a.elem - 1] : null;
+      if (m && m.el && m.el.isConnected) el = m.el;
       else if (typeof a.x === "number") {
         const px = normCoord(a.x) * window.innerWidth, py = normCoord(a.y) * window.innerHeight;
         el = document.elementFromPoint(px, py);
@@ -1756,11 +1785,10 @@
         el.dispatchEvent(new Event("change", { bubbles: true }));
       }
     } else if (act === "close_tab") {
-      // 关掉当前活动但非锚定的 tab（通常是误点开的新标签），焦点回到 Agent 起始页。
-      // content script 关不了 tab（window.close 对非脚本打开的页被浏览器拦截），
-      // 交给 SW 用 chrome.tabs.remove 处理；发消息的就是锚定页，SW 据此绝不关它自己。
+      // 关掉「来路」标签（通常是点链接进官网时留下的上一个搜索/列表页），焦点自然回到当前页。
+      // content script 关不了普通页，交给 SW 用 chrome.tabs.remove 处理。
       await new Promise((res) => {
-        try { chrome.runtime.sendMessage({ type: "keeper:close-tab" }, () => res()); }
+        try { chrome.runtime.sendMessage({ type: "keeper:close-tab", prevTabId }, () => res()); }
         catch (e) { res(); }
       });
     } else {
@@ -1788,22 +1816,37 @@
       `{"action":"close_tab"}   // 页面跳到了与原任务无关的新标签页时，关掉它、焦点回到任务页`,
       `{"action":"done","text":"完成情况摘要"}   // 目标达成时输出`,
       `坐标用 0~1 百分比（相对视口）。优先用 elem 编号点击，更准。`,
-      `若发现当前页面已不是你要操作的任务页（例如误点开了无关的新标签），优先用 close_tab 关掉它，或用 back 返回原任务页；不要在新页面上继续操作。`,
+      `页面因点击而发生正常跳转（如从列表进入详情页、或新开标签页）是预期行为，应继续在新页面上操作；除非你要明确撤销上一步动作，否则不要使用 back。`,
       `已执行历史：\n${histTxt}`,
       `现在请根据用户目标，决定下一步动作（仅输出 JSON）：`,
     ].join("\n");
   };
 
-  const runAgent = async (goal) => {
+  const runAgent = async (goal, resumeHistory, resumeSession) => {
     if (agentRunning) return;
     agentRunning = true;
+    killAgent = false;
     [bAgent, bSum, bShot, bRegion, bTrans].forEach((x) => (x.disabled = true));
-    const history = [];
-    let sessionId = null;
+    const history = (resumeHistory && Array.isArray(resumeHistory)) ? resumeHistory.slice() : [];
+    let sessionId = resumeSession || null;
     try {
       for (let n = 1; n <= AGENT_MAX; n++) {
+        if (killAgent) { idle("已退出"); break; }
         const obs = await doSom();
         stepMarks = obs.els;
+        // 跳新标签检测：若这一拍截图实际来自的 tab 与 Agent 自身 tab 不同，说明点击打开了
+        // 新标签（如从搜索结果进官网）。把 Agent 整体移交给新标签继续，保留历史与会话；
+        // 不再把焦点拽回旧页。tab id 全部由 SW 在截图回包里给出，content script 不碰 chrome.tabs。
+        if (typeof obs.capturedTabId === "number" && typeof obs.senderTabId === "number"
+            && obs.capturedTabId !== obs.senderTabId) {
+          prevTabId = obs.senderTabId; // 旧标签记为「来路」，供 close_tab 关掉
+          console.log("[keeper] 检测到跳到新标签 tabId=", obs.capturedTabId, "→ 移交 Agent 给新标签继续（保留历史）");
+          try {
+            await sleep(600); // 等新标签 content script 注入就绪，确保能收到移交消息
+            chrome.runtime.sendMessage({ type: "keeper:resume-agent", tabId: obs.capturedTabId, goal, history, sessionId, prevTabId: obs.senderTabId });
+          } catch (e) {}
+          return; // 结束本标签的循环（finally 会复位状态）
+        }
         const prompt = buildAgentPrompt(goal, obs, history);
         // 截图附件名：任务名称 + 步数（如「查天气_3.jpg」），便于在记录里辨识。
         // 任务名可能含路径/通配等非法字符，先洗成安全片段再拼步数。
@@ -1819,6 +1862,7 @@
             sessionId ? { sessionId } : { newSession: true });
           if (!sessionId && res && res.session_id) sessionId = res.session_id;
           action = parseAction(res && res.text);
+          console.log("[keeper] 步骤", n, "模型返回:", JSON.stringify(action), "| 观测URL:", obs.url);
           if (action && action.action) break; // 拿到有效动作或 done，跳出重试
         }
         if (!action || !action.action) {
@@ -1834,12 +1878,14 @@
         await execAction(action);
         history.push({ action });
         await sleep(500); // 等页面响应/跳转稳定
+        if (killAgent) { idle("已退出"); break; }
       }
       if (agentRunning) idle("Agent 已达最大步数或结束");
     } catch (e) {
       idle("Agent 出错：" + explain(e));
     } finally {
       agentRunning = false;
+      killAgent = false;
       [bAgent, bSum, bShot, bRegion, bTrans].forEach((x) => (x.disabled = false));
     }
   };
@@ -1848,6 +1894,16 @@
     const goal = qbox.value.trim();
     if (!goal) { idle("请输入操作目标"); return; }
     runAgent(goal);
+  });
+
+  bExit.addEventListener("click", () => {
+    // 退出悬浮球：停掉可能正在跑的 Agent，隐藏主面板、露出「重新打开」药丸。
+    // 不 remove，便于一键唤回；整页刷新也会因 content script 重载而重新出现。
+    killAgent = true;
+    agentRunning = false;
+    try { host.style.display = "none"; } catch (e) {}
+    try { if (ovStyle && ovStyle.parentNode) ovStyle.remove(); } catch (e) {}
+    try { launcher.style.display = ""; } catch (e) {}
   });
 
   // ---------- 翻译 ----------

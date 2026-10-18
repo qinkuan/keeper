@@ -388,25 +388,28 @@ async function attachPageData(tabId, payload) {
        （锚定页），于是出现「新标签的图 + 原页的编号框」错位。所以截图前先把锚定
        tab 设为活动页，并截它所在窗口，保证截图与 collectMarks 同源。 */
     try {
-      // 锚定：截图前把发起请求的那个 tab（即 Agent 起始页）设为活动页，
-      // 这样 captureVisibleTab 截到的就是它，避免新标签抢焦点后截错页、与
-      // collectMarks 扫的 DOM 不同源。普通情况该 tab 本就是活动页，update 为空操作。
-      if (typeof tabId === "number" && tabId >= 0) {
-        try { await chrome.tabs.update(tabId, { active: true }); } catch (e) {}
-      }
+      // 不再强制锚定某个 tab：Agent 现在会【跟随】点击跳过去的新标签继续（见 content.js
+      // 的跳标签移交），截图应抓「当前活动页」即可。否则会出现「点进携程又被拽回百度
+      // 观测页」的怪现象——正是之前那次回退 bug 的成因。
       const fmt = payload.image_format === "png" ? "png" : "jpeg";
       const q = Math.max(10, Math.min(100, Number(payload.quality) || 70));
-      // 不传 windowId：captureVisibleTab 截「当前活动页」，上面已把锚定 tab 设为活动。
       const dataUrl = await chrome.tabs.captureVisibleTab(
         typeof payload.windowId === "number" ? { windowId: payload.windowId } : undefined,
         { format: fmt, quality: fmt === "jpeg" ? q : undefined }
       );
+      // 截图实际来自哪个 tab（captureVisibleTab 截的是当前活动页）：连同发起请求的 tab
+      // （tabId，即 Agent 自身）一起回传，让 content script 判断「点击是否跳到了新标签」。
+      // 这样 content script 完全不碰 chrome.tabs，规避它在内容脚本里可能为 undefined 的问题。
+      let capturedTabId = null;
+      try { const at = await chrome.tabs.query({ active: true, currentWindow: true }); capturedTabId = at && at[0] && at[0].id; } catch (e) {}
       payload.self_served = true;
       payload.page_data = {
         title: "",
         url: payload.url || "",
         data_url: dataUrl,
         full_page: false,
+        senderTabId: typeof tabId === "number" ? tabId : null,
+        capturedTabId,
       };
     } catch (e) {
       /* 窗口不可见 / 没有 activeTab 权限时失败，退回内核老路。 */
@@ -549,16 +552,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // （window.close 对非脚本打开的页被浏览器拦截），只能由 SW 用 chrome.tabs.remove 做。
   // 锚定页就是发这条消息来的那个 tab（sender.tab.id），绝不关它自己。
   if (msg && msg.type === 'keeper:close-tab') {
-    const anchor = sender && sender.tab && sender.tab.id;
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const t = tabs && tabs[0];
-      if (t && typeof anchor === 'number' && t.id !== anchor) {
-        chrome.tabs.remove(t.id).catch(() => {});
-        // 关掉后把锚定页重新设为活动，确保下一拍截图对准它
-        try { chrome.tabs.update(anchor, { active: true }); } catch (e) {}
+    // 关掉「来路」标签（prevTabId）：通常是点链接进官网时留下的上一个搜索/列表页。
+    // content script 关不了普通页，只能由 SW 用 chrome.tabs.remove 处理。
+    const stray = msg.prevTabId;
+    const me = sender && sender.tab && sender.tab.id;
+    chrome.tabs.query({ currentWindow: true }, (tabs) => {
+      let target = null;
+      if (typeof stray === 'number') target = (tabs || []).find((t) => t.id === stray);
+      if (!target) {
+        // 兜底：关掉「非发送方且非活动」的那个
+        target = (tabs || []).find((t) => t.id !== me && !t.active);
       }
+      if (target) chrome.tabs.remove(target.id).catch(() => {});
     });
     sendResponse({ ok: true });
+    return true;
+  }
+
+  // 网页 Agent 的「跳标签移交」：源标签检测到点击打开了新标签，把任务转发给新标签，
+  // 由新标签的 content script 继续跑（保留历史与会话）。带重试，等新标签注入就绪。
+  if (msg && msg.type === 'keeper:resume-agent') {
+    const tid = msg.tabId;
+    if (typeof tid !== 'number') { sendResponse({ ok: false }); return true; }
+    const payload2 = { type: 'keeper:resume-agent', goal: msg.goal, history: msg.history, sessionId: msg.sessionId };
+    const trySend = (attempt) => {
+      chrome.tabs.sendMessage(tid, payload2, () => {
+        if (chrome.runtime.lastError && attempt < 5) {
+          setTimeout(() => trySend(attempt + 1), 400 * (attempt + 1));
+        } else {
+          sendResponse({ ok: !chrome.runtime.lastError });
+        }
+      });
+    };
+    trySend(0);
     return true;
   }
 
