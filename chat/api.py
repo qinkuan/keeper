@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Literal, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -1658,6 +1658,15 @@ async def deploy_info(agent_id: str) -> Dict[str, Any]:
 # 「用户传进来的原件」。
 
 
+# 嗅探到的图片 mime → 文件扩展名：用于给无扩展名的附件名兜底（见 _store_agent_attachment）。
+_IMG_EXT_BY_MIME = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+
 async def _store_agent_attachment(
     agent_id: str,
     session_id: str,
@@ -1694,6 +1703,16 @@ async def _store_agent_attachment(
     mime = sniff_image_mime(data)
     if mime is None:
         raise HTTPException(status_code=400, detail="只支持 JPEG / PNG / GIF / WebP 图片")
+
+    # 缓存文件名必须带正确扩展名：get_attachment 靠 guess_type(文件名) 推 mime，
+    # 没有扩展名会退化成 application/octet-stream，浏览器拿到 inline 的 octet-stream
+    # 仍会当成下载（浮球 agent 每步截图就带着 name="som" 这种无扩展名名字）。
+    # 这里用嗅探到的真实 mime 兜底补扩展名，确保预览能内联打开。
+    ext = _IMG_EXT_BY_MIME.get(mime)
+    if ext:
+        _stem = Path(filename).stem or "image"
+        if Path(filename).suffix.lower().lstrip(".") != ext:
+            filename = f"{_stem}.{ext}"
 
     attachment_id = new_id()
     cache_path = None
@@ -1766,6 +1785,22 @@ async def upload_attachment(
     return {"attachment": attachment, "session_id": session_id}
 
 
+def _inline_disposition(name: str) -> str:
+    """预览响应用 inline（而非 attachment），强制浏览器内联打开而不是下载。
+
+    文件 URL 往往不带扩展名（如 /files/{msg}/{art}），浏览器无法据此判断类型，
+    即使 Content-Type 正确也常把它当附件下载——显式 inline 可纠正。
+
+    legacy 的 ``filename=`` 字段必须 latin-1 安全（仅 ASCII），否则 Starlette
+    编码响应头时会抛 UnicodeEncodeError（CJK 文件名尤其易触发）；真正的 Unicode
+    名字走 ``filename*``（RFC 5987，已 percent 编码、纯 ASCII）。"""
+    safe = "".join(
+        c if (c.isascii() and (c.isalnum() or c in "._-")) else "_" for c in name
+    ) or "file"
+    enc = quote(name)
+    return f'inline; filename="{safe}"; filename*=UTF-8\'\'{enc}'
+
+
 @router.get("/{agent_id}/files/attachment/{session_id}/{attachment_id}")
 async def get_attachment(
     agent_id: str,
@@ -1809,7 +1844,11 @@ async def get_attachment(
     mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
     if dl:
         return FileResponse(path, media_type=mime, filename=name)
-    return FileResponse(path, media_type=mime)
+    # 预览：显式 inline，强制浏览器内联打开（无扩展名的 URL 常被当成下载）
+    return FileResponse(
+        path, media_type=mime,
+        headers={"Content-Disposition": _inline_disposition(name)},
+    )
 
 
 @router.get("/{agent_id}/files/{message_id}/{artifact_id}")
@@ -1870,8 +1909,17 @@ async def get_artifact(
             },
         )
     if source.is_local:
-        return FileResponse(source.path, media_type=mime)
-    return Response(source.data, media_type=mime)
+        return FileResponse(
+            source.path, media_type=mime,
+            headers={"Content-Disposition": _inline_disposition(art["name"])},
+        )
+    return Response(
+        source.data, media_type=mime,
+        headers={
+            "Content-Disposition": _inline_disposition(art["name"]),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/{agent_id}/files/{message_id}/{artifact_id}/reveal")

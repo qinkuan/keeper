@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1101x";
+  const BUILD = "1101y";
 
   // ---------- 页面身份（cid）----------
   //
@@ -212,8 +212,11 @@
     "  padding:8px 10px;flex:0 0 auto}",
     // margin-left:auto 把它推到按钮栏右端；内容为空时不占位（flex 项无内容即无宽度），
     // 所以"没有动作就不显示"是天然成立的，不需要额外切 class。
-    ".k-title{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;",
-    "  white-space:nowrap;font-size:11.5px;color:#9aa0a6}",
+    ".k-title{display:block;text-align:right;overflow-x:auto;white-space:nowrap;",
+    "  padding:0 10px 6px;font-size:11.5px;color:#9aa0a6;",
+    "  scrollbar-width:none;-ms-overflow-style:none}",
+    ".k-title:empty{display:none}",
+    ".k-title::-webkit-scrollbar{display:none}",
     ".k-b{",
     "  display:inline-flex;align-items:center;gap:4px;height:27px;padding:0 10px;",
     "  border-radius:7px;border:1px solid rgba(255,255,255,.16);",
@@ -405,15 +408,16 @@
     '  <div class="k-askout" id="ao" hidden></div>',
     '  <div class="k-sec">功能</div>',
     '  <div class="k-bar">',
+    '    <button class="k-b" id="bAgent">网页Agent</button>',
     '    <button class="k-b" id="bTrans">翻译</button>',
     '    <button class="k-b" id="bSum">总结页面</button>',
     '    <button class="k-b" id="bShot">截图</button>',
     '    <button class="k-b" id="bRegion">框选</button>',
-    /* 状态文字跟着按钮走，空闲时为空。**不要**再单独开一行放它——
-       面板的垂直空间每一像素都在跟按钮抢，而"就绪"这类没有任何信息量的占位
-       会让人以为面板还没准备好。只有真的有动作在进行或刚结束时才显示。 */
-    '    <span class="k-title" id="t"></span>',
     "  </div>",
+    /* 状态提示：紧贴功能下方、右对齐、超长可横向滑动。不放进 .k-bar 是因为
+       5 个按钮已占满一行，塞进去会被挤到下一行、看起来不在功能右侧；这里
+       单独成行、靠右，并用 :empty 在空闲（无文字）时完全折叠，不浪费垂直空间。 */
+    '  <span class="k-title" id="t"></span>',
     '  <div class="k-out" id="o"></div>',
     '  <div class="k-settings" id="set" hidden>',
     '    <div class="k-sethead">',
@@ -583,7 +587,7 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans");
+  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans"), bAgent = $("bAgent");
   // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
   // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
   const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
@@ -1034,19 +1038,21 @@
     }
   };
 
-  const askAgent = async (q, selection = "", attachments) => {
+  const askAgent = async (q, selection = "", attachments, opts = {}) => {
     /* 新对话态：session_id 传空 + new_session=true，让内核**新建**一条。
        只传空是不够的——空在 _resolve_ball_target 里的意思是「用浮球默认会话」，
-       那样点了新对话却记进上一条。（NEW_SESS 是内部哨兵，绝不能原样发出去。） */
-    const fresh = isNewSess();
+       那样点了新对话却记进上一条。（NEW_SESS 是内部哨兵，绝不能原样发出去。）
+       opts.sessionId / opts.newSession 供网页 Agent 复用同一条独立会话。 */
+    const wantNew = opts.newSession != null ? opts.newSession : isNewSess();
+    const sessId = opts.sessionId != null ? opts.sessionId : (wantNew ? "" : chosenSess);
     const r = await chrome.runtime.sendMessage({
       type: "keeper:request",
       payload: {
         cid: ensureCid() || "",
         cmd: "agent:ask",
         q,
-        session_id: fresh ? "" : chosenSess,
-        new_session: fresh,
+        session_id: sessId,
+        new_session: wantNew,
         page: {
           url: location.href,
           title: document.title,
@@ -1625,6 +1631,224 @@
       await doAsk();   // 追加提示后直接发送；结果回来后 busy 自动收起「正在总结中」
     })
   );
+
+  // ---------- 网页 Agent（模型操作浏览器） ----------
+  // 扩展侧自驱动循环：每步截一张带 SoM 标注的图 + 可交互元素清单，交给 askAgent
+  // （复用现有多模态 LLM 通道，开一条独立会话）选出下一步动作，再在**本页面**就地执行
+  // （滚动/点击/输入/后退）。无需内核反向通道，动作全在内容脚本里做。
+  let agentRunning = false;
+  let stepMarks = [];
+  const AGENT_MAX = 20;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const collectMarks = () => {
+    const sel = 'a,button,input,select,textarea,[role="button"],[tabindex],[onclick]';
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const seen = new Set();
+    const list = [];
+    for (const el of document.querySelectorAll(sel)) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+      const cs = getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+      const key = Math.round(r.left) + "," + Math.round(r.top) + "," + el.tagName;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const text = (el.value != null && el.value !== "") ? el.value
+        : (el.innerText || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+      list.push({ el, rect: r, tag: el.tagName.toLowerCase(), text: text.slice(0, 50) });
+    }
+    list.sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
+    return list.slice(0, 60);
+  };
+
+  // 截视口图 → 画 SoM 编号框 → 返回标注图(data_url) + 百分比清单 + 元素引用
+  const doSom = () => new Promise((resolve, reject) => {
+    // 截图前把浮球 UI（球 + 面板）临时藏起来：captureVisibleTab 抓的是整块可见视口，
+    // 面板若开着会被一起截进图里，328px 的面板会盖住右侧大片页面，干扰 Agent 对页面
+    // 内容的判断。截完（拿到图）立刻恢复——这样你仍能在面板右侧实时看到步骤状态，
+    // 又不会把面板拍进截图。（等价于"点击 Agent 后关面板"的诉求，但不丢失状态可见性。）
+    const prevVis = host.style.visibility;
+    host.style.visibility = "hidden";
+    send({ op: "shot", full_page: false, quality: 80 })
+      .then((shot) => {
+        host.style.visibility = prevVis;
+        const img = new Image();
+        img.onload = () => {
+          const W = img.naturalWidth, H = img.naturalHeight;
+          const vw = window.innerWidth, vh = window.innerHeight;
+          // 截图像素尺寸与视口 CSS 尺寸未必同比（HiDPI / 浏览器缩放 /
+          // captureVisibleTab 取整 / 滚动条），x、y 轴分别换算，避免框被拉伸、编号错位。
+          const sx = W / vw, sy = H / vh;
+          const els = collectMarks();
+          const canvas = document.createElement("canvas");
+          canvas.width = W; canvas.height = H;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, W, H);
+          const pctMarks = els.map((m, i) => {
+            const id = i + 1;
+            const x = m.rect.left, y = m.rect.top, w = m.rect.width, h = m.rect.height;
+            ctx.strokeStyle = "#ff3b30";
+            ctx.lineWidth = Math.max(2, 2 * Math.max(sx, sy));
+            ctx.strokeRect(x * sx, y * sy, w * sx, h * sy);
+            ctx.fillStyle = "#ff3b30";
+            ctx.font = Math.max(11, 12 * Math.max(sx, sy)) + "px sans-serif";
+            const ty = y * sy - 3 < 0 ? y * sy + 12 : y * sy - 3;
+            ctx.fillText(String(id), x * sx + 2, ty);
+            return {
+              id, tag: m.tag, text: m.text,
+              x: +(x / vw).toFixed(3), y: +(y / vh).toFixed(3),
+              w: +(w / vw).toFixed(3), h: +(h / vh).toFixed(3),
+            };
+          });
+          resolve({
+            data_url: canvas.toDataURL("image/jpeg", 0.85),
+            width: vw, height: vh, marks: pctMarks, els,
+            url: location.href, title: document.title,
+          });
+        };
+        img.onerror = () => reject(new Error("截图加载失败"));
+        img.src = shot.data_url;
+      })
+      .catch((e) => { host.style.visibility = prevVis; reject(e); });
+  });
+
+  // 尽力解析模型返回的动作 JSON（去 ``` 围栏，截取首个 {...}）
+  const parseAction = (text) => {
+    if (!text) return null;
+    let s = String(text).trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    const a = s.indexOf("{"), b = s.lastIndexOf("}");
+    if (a < 0 || b <= a) return null;
+    try { return JSON.parse(s.slice(a, b + 1)); } catch (e) { return null; }
+  };
+
+  const normCoord = (v) => (typeof v === "number" ? (v > 1 ? v / 100 : v) : 0);
+
+  const execAction = async (a) => {
+    const act = String(a.action || "").toLowerCase();
+    if (act === "scroll_down") window.scrollBy(0, Number(a.px) || 300);
+    else if (act === "scroll_up") window.scrollBy(0, -(Number(a.px) || 300));
+    else if (act === "back") history.back();
+    else if (act === "click") {
+      if (typeof a.elem === "number" && stepMarks[a.elem - 1]) stepMarks[a.elem - 1].el.click();
+      else {
+        const px = normCoord(a.x) * window.innerWidth, py = normCoord(a.y) * window.innerHeight;
+        const t = document.elementFromPoint(px, py);
+        if (t) t.click();
+      }
+    } else if (act === "input") {
+      let el = null;
+      if (typeof a.elem === "number" && stepMarks[a.elem - 1]) el = stepMarks[a.elem - 1].el;
+      else if (typeof a.x === "number") {
+        const px = normCoord(a.x) * window.innerWidth, py = normCoord(a.y) * window.innerHeight;
+        el = document.elementFromPoint(px, py);
+      }
+      if (el && el.focus) {
+        el.focus();
+        try {
+          const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype
+            : el.tagName === "SELECT" ? window.HTMLSelectElement.prototype
+            : window.HTMLInputElement.prototype;
+          Object.getOwnPropertyDescriptor(proto, "value").set.call(el, a.text != null ? String(a.text) : "");
+        } catch (e) { el.value = a.text != null ? String(a.text) : ""; }
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    } else if (act === "close_tab") {
+      // 关掉当前活动但非锚定的 tab（通常是误点开的新标签），焦点回到 Agent 起始页。
+      // content script 关不了 tab（window.close 对非脚本打开的页被浏览器拦截），
+      // 交给 SW 用 chrome.tabs.remove 处理；发消息的就是锚定页，SW 据此绝不关它自己。
+      await new Promise((res) => {
+        try { chrome.runtime.sendMessage({ type: "keeper:close-tab" }, () => res()); }
+        catch (e) { res(); }
+      });
+    } else {
+      throw new Error("未知动作：" + act);
+    }
+  };
+
+  const buildAgentPrompt = (goal, obs, history) => {
+    const marksTxt = obs.marks.map((m) =>
+      `#${m.id} [${m.tag}] ${m.text} @(${(m.x * 100).toFixed(0)}%,${(m.y * 100).toFixed(0)}%)`).join("\n");
+    const histTxt = history.length
+      ? history.map((h, i) => `步骤${i + 1}: ${JSON.stringify(h.action)}`).join("\n")
+      : "（无）";
+    return [
+      `你是一个网页操作智能体。用户目标：${goal}`,
+      `当前页面：${obs.title} (${obs.url})，视口 ${obs.width}x${obs.height}px。`,
+      `页面可交互元素已编号并标注在截图里：`,
+      marksTxt,
+      ``,
+      `每步只选一个动作，严格只输出一个 JSON 对象（不要解释、不要 markdown 围栏）：`,
+      `{"action":"click","elem":N}  或  {"action":"click","x":0.45,"y":0.30}`,
+      `{"action":"scroll_down","px":400}  /  {"action":"scroll_up","px":400}`,
+      `{"action":"input","elem":N,"text":"..."}  或  {"action":"input","x":0.45,"y":0.30,"text":"..."}`,
+      `{"action":"back"}`,
+      `{"action":"close_tab"}   // 页面跳到了与原任务无关的新标签页时，关掉它、焦点回到任务页`,
+      `{"action":"done","text":"完成情况摘要"}   // 目标达成时输出`,
+      `坐标用 0~1 百分比（相对视口）。优先用 elem 编号点击，更准。`,
+      `若发现当前页面已不是你要操作的任务页（例如误点开了无关的新标签），优先用 close_tab 关掉它，或用 back 返回原任务页；不要在新页面上继续操作。`,
+      `已执行历史：\n${histTxt}`,
+      `现在请根据用户目标，决定下一步动作（仅输出 JSON）：`,
+    ].join("\n");
+  };
+
+  const runAgent = async (goal) => {
+    if (agentRunning) return;
+    agentRunning = true;
+    [bAgent, bSum, bShot, bRegion, bTrans].forEach((x) => (x.disabled = true));
+    const history = [];
+    let sessionId = null;
+    try {
+      for (let n = 1; n <= AGENT_MAX; n++) {
+        const obs = await doSom();
+        stepMarks = obs.els;
+        const prompt = buildAgentPrompt(goal, obs, history);
+        // 截图附件名：任务名称 + 步数（如「查天气_3.jpg」），便于在记录里辨识。
+        // 任务名可能含路径/通配等非法字符，先洗成安全片段再拼步数。
+        const safeGoal = goal.replace(/[\\/:*?"<>|\r\n\t]/g, "_").slice(0, 40);
+        // 模型若没返回有效的 action / done，就重发上一条消息重试，最多 3 次；
+        // 重试复用同一张截图与提示，不额外消耗步数，只在同一观察下反复催模型出合规动作。
+        const MAX_RETRY = 3;
+        let action = null, tried = 0;
+        while (tried <= MAX_RETRY) {
+          tried++;
+          idle(`Agent 步骤 ${n}/${AGENT_MAX}：决策中…` + (tried > 1 ? `（重试 ${tried - 1}/${MAX_RETRY}）` : ""));
+          const res = await askAgent(prompt, "", [{ data_url: obs.data_url, name: `${safeGoal}_${n}.jpg` }],
+            sessionId ? { sessionId } : { newSession: true });
+          if (!sessionId && res && res.session_id) sessionId = res.session_id;
+          action = parseAction(res && res.text);
+          if (action && action.action) break; // 拿到有效动作或 done，跳出重试
+        }
+        if (!action || !action.action) {
+          idle(`Agent 步骤 ${n}：模型重试 ${MAX_RETRY} 次仍未返回有效动作，已停止`);
+          break;
+        }
+        if (action.action === "done") {
+          setAskOut(action.text || "目标已完成。", "");
+          idle("Agent 完成");
+          break;
+        }
+        idle(`Agent 步骤 ${n}/${AGENT_MAX}：${action.action}` + (action.elem ? ` #${action.elem}` : ""));
+        await execAction(action);
+        history.push({ action });
+        await sleep(500); // 等页面响应/跳转稳定
+      }
+      if (agentRunning) idle("Agent 已达最大步数或结束");
+    } catch (e) {
+      idle("Agent 出错：" + explain(e));
+    } finally {
+      agentRunning = false;
+      [bAgent, bSum, bShot, bRegion, bTrans].forEach((x) => (x.disabled = false));
+    }
+  };
+
+  bAgent.addEventListener("click", () => {
+    const goal = qbox.value.trim();
+    if (!goal) { idle("请输入操作目标"); return; }
+    runAgent(goal);
+  });
 
   // ---------- 翻译 ----------
   // 先确认有可翻译的东西（输入框内容或附件里的截图），都没有就提示；

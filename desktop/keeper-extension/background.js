@@ -63,10 +63,16 @@ const fmtTimeout = (ms) => {
  * 别把它当成保证，只当成把概率压低。
  */
 const KEEPALIVE_ALARM = "keeper-keepalive";
+// 保活闹钟的触发间隔。必须显著小于 MV3 SW 的空闲回收阈值（约 30 秒），
+// 否则 SW 会在闹钟唤醒前就被杀、长任务（如 Agent 多步执行）必断。
+// 用一次性闹钟（when）而非 periodInMinutes：Chrome 对重复闹钟的最小周期会取整到
+// 约 1 分钟，远超过阈值——原代码的 periodInMinutes:0.5 实际≈60s，等于没有保活。
+// 一次性闹钟每次响完由 refreshKeepalive 再续，把空闲窗口稳稳压在 30 秒阈值以内。
+const KEEPALIVE_MS = 20000;
 
 function ensureKeepalive() {
   try {
-    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+    chrome.alarms.create(KEEPALIVE_ALARM, { when: Date.now() + KEEPALIVE_MS });
   } catch (e) {
     /* 保活失败不该影响请求本身 */
   }
@@ -376,13 +382,21 @@ async function attachPageData(tabId, payload) {
   }
 
   if (op === "shot") {
-    /* captureVisibleTab 不需要注入也不需要调试权限，所以压根没有提示条。代价是
-       只能截**当前可见**的那个标签页（也就是用户正看着的），且没有 full_page。
-       这里把 full_page 标成 false 而不是假装支持——给一张视口图却声称整页，
-       比直接说做不到更糟。 */
+    /* captureVisibleTab 不需要注入也不需要调试权限，代价是只能截**当前可见**的那个
+       标签页。网页 Agent 若点了会开新标签的链接，焦点会跑到新标签上，这一拍截到的
+       就是错误那一页；而 content script 里 collectMarks 扫的是发起请求的那个 tab
+       （锚定页），于是出现「新标签的图 + 原页的编号框」错位。所以截图前先把锚定
+       tab 设为活动页，并截它所在窗口，保证截图与 collectMarks 同源。 */
     try {
+      // 锚定：截图前把发起请求的那个 tab（即 Agent 起始页）设为活动页，
+      // 这样 captureVisibleTab 截到的就是它，避免新标签抢焦点后截错页、与
+      // collectMarks 扫的 DOM 不同源。普通情况该 tab 本就是活动页，update 为空操作。
+      if (typeof tabId === "number" && tabId >= 0) {
+        try { await chrome.tabs.update(tabId, { active: true }); } catch (e) {}
+      }
       const fmt = payload.image_format === "png" ? "png" : "jpeg";
       const q = Math.max(10, Math.min(100, Number(payload.quality) || 70));
+      // 不传 windowId：captureVisibleTab 截「当前活动页」，上面已把锚定 tab 设为活动。
       const dataUrl = await chrome.tabs.captureVisibleTab(
         typeof payload.windowId === "number" ? { windowId: payload.windowId } : undefined,
         { format: fmt, quality: fmt === "jpeg" ? q : undefined }
@@ -527,6 +541,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 没连上基本都是「内核还没下发 config」，退避重试，别就此躺平
       if (!sock) scheduleReconnect();
     });
+    return true;
+  }
+
+  // 网页 Agent 的「关闭当前页」：关掉当前活动、但**不是 Agent 锚定页**的那个 tab
+  // （通常是误点开的新标签页），焦点自动回到锚定页。content script 关不了 tab
+  // （window.close 对非脚本打开的页被浏览器拦截），只能由 SW 用 chrome.tabs.remove 做。
+  // 锚定页就是发这条消息来的那个 tab（sender.tab.id），绝不关它自己。
+  if (msg && msg.type === 'keeper:close-tab') {
+    const anchor = sender && sender.tab && sender.tab.id;
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const t = tabs && tabs[0];
+      if (t && typeof anchor === 'number' && t.id !== anchor) {
+        chrome.tabs.remove(t.id).catch(() => {});
+        // 关掉后把锚定页重新设为活动，确保下一拍截图对准它
+        try { chrome.tabs.update(anchor, { active: true }); } catch (e) {}
+      }
+    });
+    sendResponse({ ok: true });
     return true;
   }
 

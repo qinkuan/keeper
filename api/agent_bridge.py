@@ -367,7 +367,12 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
     # 与 HTTP 上传端点 upload_attachment 的 "new" 处理同一口径——宁可早建一个空会话，
     # 也不要让附件落进归属说不清的目录。accepted 在下面统一发（sid 现已非空）。
     if fresh and not sid:
-        sid = await chat_service.ChatService(agent_id=agent_id).ensure_session_id()
+        # 提前建好的会话必须是「浏览器」类别：浮球会话列表只按 browser 过滤
+        # （见 _list_sessions 的 kind=SESSION_KIND_BROWSER），否则这条新会话
+        # 会从浮球列表里凭空消失。ChatService 默认 session_kind=chat，必须显式改。
+        svc = chat_service.ChatService(agent_id=agent_id)
+        svc.session_kind = chat_service.SESSION_KIND_BROWSER
+        sid = await svc.ensure_session_id()
 
     # 浮球附件（图片）：把 WS 内联的 base64 落成附件，交给 run_one_ask。
     # 走与 HTTP 上传端点同一套落库（_store_agent_attachment），复用厂商上传 +
