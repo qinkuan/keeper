@@ -49,11 +49,13 @@ export default function SessionList({
   onSelect,
   onNew,
   onNewTask,
+  hideCreate,
 }: {
   agentId: string;
   activeId?: string | null;
   /**
-   * 只列这一类会话：「对话」页按当前 tab 传 chat / task，浏览器页传 browser。
+   * 只列这一类会话：「对话」页按当前 tab 传 chat / task，浏览器页传 browser /
+   * browser-automation（由上层 tab 切换决定）。
    *
    * 为什么用类别而不是「要不要任务」这种布尔：三类是**互斥**的，浏览器会话不该
    * 出现在「会话」tab 里。而布尔只能表达二分，`kind !== "task"` 会把 browser
@@ -63,6 +65,8 @@ export default function SessionList({
   onSelect: (sessionId: string) => void;
   onNew: () => void;
   onNewTask?: (sessionId: string) => void;
+  /** 隐藏「新建」入口：自动化会话由网页 Agent 自动创建，不该让用户手动新建 */
+  hideCreate?: boolean;
 }) {
   const taskMode = kind === "task";
   const [items, setItems] = useState<SessionItem[]>([]);
@@ -140,27 +144,29 @@ export default function SessionList({
       : "";
 
   const kw2 = kw.trim().toLowerCase();
-  const shown = kw2
-    ? items.filter((s) => (s.title || "").toLowerCase().includes(kw2))
-    : items;
+  const filterKw = (list: SessionItem[]) =>
+    kw2 ? list.filter((s) => (s.title || "").toLowerCase().includes(kw2)) : list;
+  const shown = filterKw(items);
 
   return (
     <div className="flex h-full flex-col">
-      {/* 顶部：新建入口 */}
-      <div className="p-2">
-        <button
-          type="button"
-          onClick={taskMode ? () => setCreateOpen(true) : onNew}
-          className={cn(
-            "flex w-full items-center justify-center gap-1.5 rounded-[7px] border border-dashed border-line px-2 py-2",
-            "text-[12.5px] font-medium text-ink-muted transition-all duration-150",
-            "hover:border-brand/50 hover:bg-brand/[0.05] hover:text-brand"
-          )}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {taskMode ? "新建任务" : "新对话"}
-        </button>
-      </div>
+      {/* 顶部：新建入口（自动化会话由网页 Agent 自动创建，不在此处手动新建） */}
+      {!hideCreate && (
+        <div className="p-2">
+          <button
+            type="button"
+            onClick={taskMode ? () => setCreateOpen(true) : onNew}
+            className={cn(
+              "flex w-full items-center justify-center gap-1.5 rounded-[7px] border border-dashed border-line px-2 py-2",
+              "text-[12.5px] font-medium text-ink-muted transition-all duration-150",
+              "hover:border-brand/50 hover:bg-brand/[0.05] hover:text-brand"
+            )}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {taskMode ? "新建任务" : "新对话"}
+          </button>
+        </div>
+      )}
 
       {/* 搜索 */}
       <div className="px-2 pb-2">
@@ -460,3 +466,5 @@ function fmtTime(iso?: string | null): string {
     hour12: false,
   });
 }
+
+

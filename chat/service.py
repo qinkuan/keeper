@@ -47,8 +47,10 @@ SESSION_STATUS_DELETED = "deleted"
 #   chat    普通会话，出现在「对话」页
 #   task    任务绑定会话，一个任务一条（见 chat/api.py 的 create_task）
 #   browser 浏览器会话，出现在「浏览器」页
+#   browser-automation 网页 Agent 自动操作产生的会话，独立于浮球「浏览器」会话，
+#       不出现在浮球会话列表中
 #
-# 为什么是三种并列而不是「会话 / 任务」两级下再挂一层：这三者在**列表里互斥**
+# 为什么是并列而不是「会话 / 任务」两级下再挂一层：这几者在**列表里互斥**
 # （浏览器页不该看见普通会话，任务视图也不该看见它），所以按值筛比按层级筛更简单，
 # 也不需要前端维护一棵类别树。
 #
@@ -57,7 +59,8 @@ SESSION_STATUS_DELETED = "deleted"
 SESSION_KIND_CHAT = "chat"
 SESSION_KIND_TASK = "task"
 SESSION_KIND_BROWSER = "browser"
-SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER)
+SESSION_KIND_BROWSER_AUTOMATION = "browser-automation"
+SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER, SESSION_KIND_BROWSER_AUTOMATION)
 
 # 浮球的默认会话标记（chat_sessions.ball_key 的取值）。
 #

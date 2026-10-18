@@ -354,6 +354,14 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
     # 于是点了「新对话」、发出去、却记进了上一条：用户选的是新会话，得到的是旧会话，
     # 而界面上没有任何迹象能让他发现这件事。所以新建必须由扩展显式说一遍。
     fresh = bool(msg.get("new_session"))
+    # 网页 Agent 发起的请求带 browser_automation 标记：这类会话单独归到
+    # browser-automation 类别，不进浮球会话列表（列表只按 SESSION_KIND_BROWSER 过滤），
+    # 与浮球「对这一页提问」的 browser 会话区分开。
+    sess_kind = (
+        chat_service.SESSION_KIND_BROWSER_AUTOMATION
+        if bool(msg.get("browser_automation"))
+        else chat_service.SESSION_KIND_BROWSER
+    )
     try:
         sid = "" if fresh else await _resolve_ball_target(
             agent_id, str(msg.get("session_id") or "").strip()
@@ -370,8 +378,9 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
         # 提前建好的会话必须是「浏览器」类别：浮球会话列表只按 browser 过滤
         # （见 _list_sessions 的 kind=SESSION_KIND_BROWSER），否则这条新会话
         # 会从浮球列表里凭空消失。ChatService 默认 session_kind=chat，必须显式改。
+        # 网页 Agent 走 browser-automation 类别，同样不进浮球列表。
         svc = chat_service.ChatService(agent_id=agent_id)
-        svc.session_kind = chat_service.SESSION_KIND_BROWSER
+        svc.session_kind = sess_kind
         sid = await svc.ensure_session_id()
 
     # 浮球附件（图片）：把 WS 内联的 base64 落成附件，交给 run_one_ask。
@@ -437,7 +446,7 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
                 text=content,
                 attachments=ball_atts if ball_atts else None,
                 run_id=run_id,
-                kind=chat_service.SESSION_KIND_BROWSER,
+                kind=sess_kind,
                 # 工作区：只在**新建**那一次生效（已有会话忽略），但每次都传是安全的
                 # ——与 new_session 同一口径，省得浮球会话的工作区规则和别处不一致。
                 user_space_id=await chat_service._default_space_id(),

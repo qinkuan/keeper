@@ -208,8 +208,11 @@
     // 字号和内边距都比「去配置」小一圈：它是次要动作，不该在状态条里跟地址抢视线
     "  font-size:13px;line-height:1;padding:2px 5px;border-radius:5px;flex:0 0 auto}",
     ".k-x:hover{background:rgba(255,255,255,.1);color:#e8eaed}",
-    ".k-bar{display:flex;flex-wrap:wrap;align-items:center;gap:5px;",
-    "  padding:8px 10px;flex:0 0 auto}",
+    ".k-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:5px;",
+    "  padding:8px 10px;flex:0 0 auto;overflow-x:auto;white-space:nowrap;",
+    "  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}",
+    ".k-bar::-webkit-scrollbar{height:5px}",
+    ".k-bar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:3px}",
     // margin-left:auto 把它推到按钮栏右端；内容为空时不占位（flex 项无内容即无宽度），
     // 所以"没有动作就不显示"是天然成立的，不需要额外切 class。
     ".k-title{display:block;text-align:right;overflow-x:auto;white-space:nowrap;",
@@ -219,6 +222,7 @@
     ".k-title::-webkit-scrollbar{display:none}",
     ".k-b{",
     "  display:inline-flex;align-items:center;gap:4px;height:27px;padding:0 10px;",
+    "  flex:0 0 auto;white-space:nowrap;",
     "  border-radius:7px;border:1px solid rgba(255,255,255,.16);",
     "  background:transparent;color:#e8eaed;font-size:11.5px;cursor:pointer;",
     "}",
@@ -236,6 +240,9 @@
     /* 分区标题：两块能力（提问 / 抓取）用途完全不同，混在一排按钮里会让人以为
        「发送」和「抓文字」是同一件事的两步。 */
     ".k-sec{padding:9px 10px 4px;font-size:10.5px;color:#80868b;flex:0 0 auto}",
+    ".k-sechead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}",
+    ".k-sechead>span:first-child{flex:0 0 auto}",
+    ".k-sechead .k-title{display:block;flex:1;min-width:0;text-align:right;padding:0 10px;overflow-x:auto}",
     ".k-askrow{display:flex;gap:6px;padding:0 10px;align-items:flex-end;flex:0 0 auto}",
     /* 输入框 + 高亮层的共同外框。定位锚点放在这里，两层都相对它铺满。 */
     ".k-qwrap{position:relative;flex:1;min-width:0}",
@@ -318,6 +325,8 @@
     "  border-radius:8px 8px 0 0;background:rgba(255,255,255,.03)}",
     ".k-aoh:hover{color:#c8ccd0}",
     ".k-askout.k-fold{display:none}",
+    ".k-aostat{margin-left:auto;color:#f28b82;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%}",
+    ".k-aostat:empty{display:none}",
     // ---- 设置 ----
     ".k-gear{cursor:pointer;border:0;background:transparent;color:#9aa0a6;",
     "  font-size:13px;line-height:1;padding:2px 5px;border-radius:5px;flex:0 0 auto;margin-left:auto}",
@@ -404,21 +413,21 @@
     '    </div>',
     '    <button class="k-go k-primary" id="go" type="button">发送</button>',
     '  </div>',
-    '  <div class="k-aoh" id="aoh" hidden>响应消息 <span class="k-aot">▾</span></div>',
+    '  <div class="k-aoh" id="aoh" hidden>响应消息 <span class="k-aot">▾</span><span class="k-aostat" id="aostat"></span></div>',
     '  <div class="k-askout" id="ao" hidden></div>',
-    '  <div class="k-sec">功能</div>',
+    '  <div class="k-sec k-sechead"><span>功能</span><span class="k-title" id="t"></span></div>',
     '  <div class="k-bar">',
     '    <button class="k-b" id="bAgent">网页Agent</button>',
     '    <button class="k-b" id="bTrans">翻译</button>',
     '    <button class="k-b" id="bSum">总结页面</button>',
     '    <button class="k-b" id="bShot">截图</button>',
     '    <button class="k-b" id="bRegion">框选</button>',
+    '    <button class="k-b" id="bStop">停止</button>',
+    '    <button class="k-b" id="bResume" hidden>继续</button>',
     '    <button class="k-b" id="bExit">退出</button>',
     "  </div>",
-    /* 状态提示：紧贴功能下方、右对齐、超长可横向滑动。不放进 .k-bar 是因为
-       5 个按钮已占满一行，塞进去会被挤到下一行、看起来不在功能右侧；这里
-       单独成行、靠右，并用 :empty 在空闲（无文字）时完全折叠，不浪费垂直空间。 */
-    '  <span class="k-title" id="t"></span>',
+    /* 状态提示（如 Agent 步骤 N/M：决策中…）移到「功能」标题右边，右对齐、超长可横向滑动：
+       不放进按钮栏是因为按钮已排成一行滚动，挤进去会换行；放标题右侧既不占地又始终可见。 */
     '  <div class="k-out" id="o"></div>',
     '  <div class="k-settings" id="set" hidden>',
     '    <div class="k-sethead">',
@@ -430,6 +439,11 @@
     '      <div class="k-row"><label>目标语言</label><select class="k-sel2" id="lang"></select></div>',
     '      <div class="k-sec">网页总结</div>',
     '      <div class="k-row"><label>节点字符数 &gt;</label><input class="k-inp" id="minc" type="number" min="0" step="10"></div>',
+    '      <div class="k-sec">网页Agent</div>',
+    '      <div class="k-row"><label>手机号</label><input class="k-inp" id="phone" type="text" placeholder="登录时填写用" maxlength="20"></div>',
+    '      <div class="k-row"><label>最大步数</label><input class="k-inp" id="maxSteps" type="number" min="1" step="1" value="20"></div>',
+    '      <div class="k-row"><label>重试次数</label><input class="k-inp" id="maxRetry" type="number" min="0" step="1" value="3"></div>',
+    '      <div class="k-row"><label>重试间隔(秒)</label><input class="k-inp" id="retryDelay" type="number" min="0" step="1" value="2"></div>',
     '    </div>',
     '  </div>',
     "</div>",
@@ -599,7 +613,7 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans"), bAgent = $("bAgent"), bExit = $("bExit");
+  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans"), bAgent = $("bAgent"), bExit = $("bExit"), bStop = $("bStop"), bResume = $("bResume");
   // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
   // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
   const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
@@ -609,6 +623,7 @@
         askOut = $("ao"), qhl = $("qhl");
   // 响应消息区可收缩：面板关闭时自动收起，收到/拉取到新消息时自动展开。
   const aoh = $("aoh");
+  const aostat = $("aostat");
   let aoFold = false;
   const applyAo = () => {
     aoh.hidden = askOut.hidden;
@@ -1065,6 +1080,9 @@
         q,
         session_id: sessId,
         new_session: wantNew,
+        /* 网页 Agent 发起的请求标记 browser_automation，后端据此把会话归到
+           browser-automation 类别、不进浮球会话列表；浮球「对这一页提问」不带此标记。 */
+        browser_automation: !!opts.browserAutomation,
         page: {
           url: location.href,
           title: document.title,
@@ -1399,6 +1417,7 @@
       lbtn.textContent = "去配置";
       lbtn.title = "粘贴 keeper「浏览器」页的连接码";
       mark("link", "unconfigured");
+      if (aostat) aostat.textContent = "未配置内核";
       return;
     }
     /* 正在握手：单独给一个状态，别让它落在「未连接」里。
@@ -1416,6 +1435,7 @@
       lbtn.textContent = "重新连接";
       lbtn.title = "正在与内核建立连接";
       mark("link", "connecting");
+      if (aostat) aostat.textContent = "连接中…";
       return;
     }
     ldot.className = s.ok ? "k-dot k-on" : "k-dot";
@@ -1427,12 +1447,14 @@
       lbtn.textContent = "重新连接";
       lbtn.title = s.denialText;
       mark("link", "denied-" + s.denial);
+      if (aostat) aostat.textContent = (s.denial === "token" ? "连接码已过期" : "内核拒绝了这个扩展");
       return;
     }
     lurl.textContent = shortUrl(s.url) + (s.ok ? "" : " · 未连接");
     lbtn.textContent = "重新连接";
     lbtn.title = "重试一次连接，并可粘贴新的连接码";
     mark("link", s.ok ? "ok" : "configured-notok");
+    if (aostat) aostat.textContent = s.ok ? "" : "与内核未连接";
   };
   /* 本页的浮球是不是已经死了（扩展被更新/重新加载过，MV3 把旧 context 干掉了）。
    *
@@ -1463,6 +1485,7 @@
       lurl.textContent = "扩展已更新 · 请刷新本页";
       lbtn.textContent = "刷新页面";
       lbtn.title = "刷新本页后浮球才会重新工作（⌘⇧R / Ctrl+F5）";
+      if (aostat) aostat.textContent = "扩展已更新 · 请刷新本页";
       mark("link", "dead-context");
       cfgBox.hidden = true;
       return;
@@ -1659,7 +1682,10 @@
   let killAgent = false;
   let prevTabId = null;   // 上一次手递交给本标签的那个「来路」标签，close_tab 时关它
   let stepMarks = [];
-  const AGENT_MAX = 20;
+  let pendingToasts = []; // 动作后短暂出现的 toast 文本，累积到下一步观测里喂给模型
+  let agentPaused = false;   // wait 动作触发：暂停循环，等用户在页面完成操作（如验证码）
+  let resumeInfo = null;     // 暂停时保存 {goal, history, sessionId}，供「继续」恢复
+  let waitTimer = null;      // wait 的自动继续定时器
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const collectMarks = () => {
@@ -1682,6 +1708,27 @@
     }
     list.sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
     return list.slice(0, 60);
+  };
+
+  // 抓取当前可见的「轻提示 / 弹层」文本（toast、aria-live 播报、各类通知组件）。
+  // 这类提示常是短暂的，截图时机容易错过，所以单独把文字抽出来喂给模型。
+  const collectToasts = () => {
+    const out = [];
+    try {
+      const sel = [
+        '[role="alert"]', '[role="status"]', '[aria-live]',
+        '.toast', '.notification', '.alert',
+        '.ant-message', '.ant-notification', '.el-message', '.el-notification',
+        '.Toastify', '[class*="toast" i]', '[class*="notify" i]',
+      ].join(",");
+      document.querySelectorAll(sel).forEach((el) => {
+        const r = el.getClientRects();
+        if (!r || !r.length) return; // 不可见
+        const txt = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        if (txt && txt.length <= 200) out.push(txt);
+      });
+    } catch (e) {}
+    return out;
   };
 
   // 截视口图 → 画 SoM 编号框 → 返回标注图(data_url) + 百分比清单 + 元素引用
@@ -1724,12 +1771,16 @@
             };
           });
           console.log("[keeper] doSom 观测页面:", location.href, "| 标题:", document.title, "| 可交互元素:", els.length);
+          const live = collectToasts();
+          const all = [...new Set([...pendingToasts, ...live].filter(Boolean))];
+          pendingToasts = [];
           resolve({
             data_url: canvas.toDataURL("image/jpeg", 0.85),
             width: vw, height: vh, marks: pctMarks, els,
             url: location.href, title: document.title,
             senderTabId: shot.senderTabId != null ? shot.senderTabId : null,
             capturedTabId: shot.capturedTabId != null ? shot.capturedTabId : null,
+            toasts: all.join(" | "),
           });
         };
         img.onerror = () => reject(new Error("截图加载失败"));
@@ -1796,41 +1847,58 @@
     }
   };
 
-  const buildAgentPrompt = (goal, obs, history) => {
+  const buildAgentPrompt = (goal, obs, phone) => {
     const marksTxt = obs.marks.map((m) =>
       `#${m.id} [${m.tag}] ${m.text} @(${(m.x * 100).toFixed(0)}%,${(m.y * 100).toFixed(0)}%)`).join("\n");
-    const histTxt = history.length
-      ? history.map((h, i) => `步骤${i + 1}: ${JSON.stringify(h.action)}`).join("\n")
-      : "（无）";
+    const toastsTxt = (obs.toasts && obs.toasts.trim()) ? obs.toasts.trim() : "";
     return [
-      `你是一个网页操作智能体。用户目标：${goal}`,
-      `当前页面：${obs.title} (${obs.url})，视口 ${obs.width}x${obs.height}px。`,
-      `页面可交互元素已编号并标注在截图里：`,
+      `# 网页操作智能体`,
+      `**用户目标**：${goal}`,
+      ``,
+      `## 当前页面`,
+      `- **标题**：${obs.title}`,
+      `- **地址**：${obs.url}`,
+      `- **视口**：${obs.width}x${obs.height}px`,
+      (phone ? `> **登录信息**：如需填写手机号，请使用 **${phone}**` : ""),
+      ``,
+      `## 可交互元素（已在截图中标注编号）`,
       marksTxt,
       ``,
-      `每步只选一个动作，严格只输出一个 JSON 对象（不要解释、不要 markdown 围栏）：`,
-      `{"action":"click","elem":N}  或  {"action":"click","x":0.45,"y":0.30}`,
-      `{"action":"scroll_down","px":400}  /  {"action":"scroll_up","px":400}`,
-      `{"action":"input","elem":N,"text":"..."}  或  {"action":"input","x":0.45,"y":0.30,"text":"..."}`,
-      `{"action":"back"}`,
-      `{"action":"close_tab"}   // 页面跳到了与原任务无关的新标签页时，关掉它、焦点回到任务页`,
-      `{"action":"done","text":"完成情况摘要"}   // 目标达成时输出`,
-      `坐标用 0~1 百分比（相对视口）。优先用 elem 编号点击，更准。`,
-      `页面因点击而发生正常跳转（如从列表进入详情页、或新开标签页）是预期行为，应继续在新页面上操作；除非你要明确撤销上一步动作，否则不要使用 back。`,
-      `已执行历史：\n${histTxt}`,
-      `现在请根据用户目标，决定下一步动作（仅输出 JSON）：`,
+      (toastsTxt ? `> **⚠ 页面提示 / 弹层（截图可能未捕捉到，务必参考）**：${toastsTxt}` : ""),
+      ``,
+      `## 输出格式`,
+      `**每步只输出一个 JSON 对象**，不要解释、不要 markdown 围栏：`,
+      `\`\`\`json`,
+      `{"action":"click","elem":N}                // 按编号点击，最准确`,
+      `{"action":"click","x":0.45,"y":0.30}        // 或按坐标(0~1 百分比)点击`,
+      `{"action":"scroll_down","px":400} / {"action":"scroll_up","px":400}`,
+      `{"action":"input","elem":N,"text":"..."}    // 按编号输入`,
+      `{"action":"input","x":0.45,"y":0.30,"text":"..."}`,
+      `{"action":"back"}                           // 返回上一页（谨慎使用）`,
+      `{"action":"close_tab"}   // 跳到无关新标签时关掉它，焦点回到任务页`,
+      `{"action":"done","text":"完成情况摘要"}      // 目标达成时输出`,
+      `{"action":"wait","seconds":30}  // 需要用户输入时等待,并向用户提问`,
+      `\`\`\``,
+      ``,
+      `## 规则`,
+      `- **坐标**一律用 \`0~1\` 百分比（相对视口）；**优先用 elem 编号**点击，更准。`,
+      `- 点击导致正常跳转（进详情页 / 新开标签）是**预期行为**，应在新页面继续；**除非明确撤销上一步，否则不要用 back**。`,
+      `- 遇到**登录页 / 验证码 / 需人工输入**才能继续的情况，使用 **wait** 暂停，等人工处理完再继续，不要自行猜测或提前 done。`,
+      ``,
+      `**现在请根据用户目标，只输出下一步的 JSON：**`,
     ].join("\n");
   };
 
   const runAgent = async (goal, resumeHistory, resumeSession) => {
-    if (agentRunning) return;
+    if (agentRunning || agentPaused) return;
     agentRunning = true;
     killAgent = false;
     [bAgent, bSum, bShot, bRegion, bTrans].forEach((x) => (x.disabled = true));
+    bResume.hidden = true; // 新一轮开始时先藏起「继续」，等 wait 再显示
     const history = (resumeHistory && Array.isArray(resumeHistory)) ? resumeHistory.slice() : [];
     let sessionId = resumeSession || null;
     try {
-      for (let n = 1; n <= AGENT_MAX; n++) {
+      for (let n = 1; n <= cfg.maxSteps; n++) {
         if (killAgent) { idle("已退出"); break; }
         const obs = await doSom();
         stepMarks = obs.els;
@@ -1847,26 +1915,26 @@
           } catch (e) {}
           return; // 结束本标签的循环（finally 会复位状态）
         }
-        const prompt = buildAgentPrompt(goal, obs, history);
+        const prompt = buildAgentPrompt(goal, obs, cfg.phone);
         // 截图附件名：任务名称 + 步数（如「查天气_3.jpg」），便于在记录里辨识。
         // 任务名可能含路径/通配等非法字符，先洗成安全片段再拼步数。
         const safeGoal = goal.replace(/[\\/:*?"<>|\r\n\t]/g, "_").slice(0, 40);
-        // 模型若没返回有效的 action / done，就重发上一条消息重试，最多 3 次；
+        // 模型若没返回有效的 action / done，就重发上一条消息重试，最多 cfg.maxRetry 次；
         // 重试复用同一张截图与提示，不额外消耗步数，只在同一观察下反复催模型出合规动作。
-        const MAX_RETRY = 3;
         let action = null, tried = 0;
-        while (tried <= MAX_RETRY) {
+        while (tried <= cfg.maxRetry) {
           tried++;
-          idle(`Agent 步骤 ${n}/${AGENT_MAX}：决策中…` + (tried > 1 ? `（重试 ${tried - 1}/${MAX_RETRY}）` : ""));
+          if (tried > 1 && cfg.retryDelay > 0) await sleep(cfg.retryDelay * 1000);
+          idle(`Agent 步骤 ${n}/${cfg.maxSteps}：决策中…` + (tried > 1 ? `（重试 ${tried - 1}/${cfg.maxRetry}）` : ""));
           const res = await askAgent(prompt, "", [{ data_url: obs.data_url, name: `${safeGoal}_${n}.jpg` }],
-            sessionId ? { sessionId } : { newSession: true });
+            sessionId ? { sessionId, browserAutomation: true } : { newSession: true, browserAutomation: true });
           if (!sessionId && res && res.session_id) sessionId = res.session_id;
           action = parseAction(res && res.text);
           console.log("[keeper] 步骤", n, "模型返回:", JSON.stringify(action), "| 观测URL:", obs.url);
           if (action && action.action) break; // 拿到有效动作或 done，跳出重试
         }
         if (!action || !action.action) {
-          idle(`Agent 步骤 ${n}：模型重试 ${MAX_RETRY} 次仍未返回有效动作，已停止`);
+          idle(`Agent 步骤 ${n}：模型重试 ${cfg.maxRetry} 次仍未返回有效动作，已停止`);
           break;
         }
         if (action.action === "done") {
@@ -1874,10 +1942,27 @@
           idle("Agent 完成");
           break;
         }
-        idle(`Agent 步骤 ${n}/${AGENT_MAX}：${action.action}` + (action.elem ? ` #${action.elem}` : ""));
+        if (action.action === "wait") {
+          // 页面需要人工操作（登录 / 输入验证码等）：暂停循环，等用户在页面完成后再继续。
+          const secs = Number(action.seconds) || 0;
+          history.push({ action });
+          agentPaused = true;
+          resumeInfo = { goal, history: history.slice(), sessionId };
+          bResume.hidden = false;
+          idle("等待中：请在页面完成人工操作（如登录 / 验证码），然后点【继续】" + (secs ? `（${secs} 秒后自动继续）` : ""));
+          if (secs > 0) {
+            clearTimeout(waitTimer);
+            waitTimer = setTimeout(() => { if (agentPaused) bResume.click(); }, secs * 1000);
+          }
+          return; // 结束本标签循环；finally 复位状态，但保留 agentPaused / resumeInfo 供「继续」
+        }
+        idle(`Agent 步骤 ${n}/${cfg.maxSteps}：${action.action}` + (action.elem ? ` #${action.elem}` : ""));
         await execAction(action);
         history.push({ action });
         await sleep(500); // 等页面响应/跳转稳定
+        // 抓动作后短暂出现的 toast/提示：截图时机容易错过，单独存起来下一步再带给模型。
+        const t = collectToasts();
+        if (t.length) { pendingToasts.push(...t); idle("页面提示：" + t.join(" | ")); }
         if (killAgent) { idle("已退出"); break; }
       }
       if (agentRunning) idle("Agent 已达最大步数或结束");
@@ -1901,9 +1986,27 @@
     // 不 remove，便于一键唤回；整页刷新也会因 content script 重载而重新出现。
     killAgent = true;
     agentRunning = false;
+    agentPaused = false; resumeInfo = null; clearTimeout(waitTimer);
     try { host.style.display = "none"; } catch (e) {}
     try { if (ovStyle && ovStyle.parentNode) ovStyle.remove(); } catch (e) {}
     try { launcher.style.display = ""; } catch (e) {}
+  });
+
+  bStop.addEventListener("click", () => {
+    // 停止任务：中止 Agent 循环（保留浮球），并清除可能的等待 / 暂停状态。
+    killAgent = true;
+    agentPaused = false; resumeInfo = null; clearTimeout(waitTimer);
+    bResume.hidden = true;
+    idle("已停止任务");
+  });
+
+  bResume.addEventListener("click", () => {
+    // 继续：从 wait 暂停处恢复 Agent（沿用同一目标 / 历史 / 会话）。
+    if (!resumeInfo) return;
+    const g = resumeInfo.goal, h = resumeInfo.history, s = resumeInfo.sessionId;
+    agentPaused = false; resumeInfo = null; clearTimeout(waitTimer);
+    bResume.hidden = true;
+    runAgent(g, h, s);
   });
 
   // ---------- 翻译 ----------
@@ -2107,10 +2210,10 @@
   // ---------- 设置 ----------
   // 配置持久化在扩展自身的 storage（不依赖内核）；后续「翻译」「网页总结」功能直接读这里。
   const cfgKey = "keeper_cfg";
-  const DEFAULT_CFG = { lang: { code: "en", name: "English" }, minChars: 50 };
-  const cfg = { lang: { ...DEFAULT_CFG.lang }, minChars: DEFAULT_CFG.minChars };
+  const DEFAULT_CFG = { lang: { code: "en", name: "English" }, minChars: 50, phone: "", maxSteps: 20, maxRetry: 3, retryDelay: 2 };
+  const cfg = { lang: { ...DEFAULT_CFG.lang }, minChars: DEFAULT_CFG.minChars, phone: DEFAULT_CFG.phone, maxSteps: DEFAULT_CFG.maxSteps, maxRetry: DEFAULT_CFG.maxRetry, retryDelay: DEFAULT_CFG.retryDelay };
   const gear = $("gear"), setView = $("set"), back = $("bk");
-  const langSel = $("lang"), mincInp = $("minc");
+  const langSel = $("lang"), mincInp = $("minc"), phoneInp = $("phone"), maxStepsInp = $("maxSteps"), maxRetryInp = $("maxRetry"), retryDelayInp = $("retryDelay");
   // 20 种常用语言：翻译功能会把它作为「翻译成 XX 语言」的目标语言。
   const LANGS = [
     ["zh-CN", "简体中文", "简体中文"], ["zh-TW", "繁體中文", "繁體中文"], ["en", "English", "英语"],
@@ -2136,6 +2239,10 @@
         if (s) {
           if (s.lang && s.lang.code) cfg.lang = { code: s.lang.code, name: s.lang.name || s.lang.code };
           if (typeof s.minChars === "number") cfg.minChars = s.minChars;
+          if (typeof s.phone === "string") cfg.phone = s.phone;
+          if (typeof s.maxSteps === "number" && s.maxSteps > 0) cfg.maxSteps = s.maxSteps;
+          if (typeof s.maxRetry === "number" && s.maxRetry >= 0) cfg.maxRetry = s.maxRetry;
+          if (typeof s.retryDelay === "number" && s.retryDelay >= 0) cfg.retryDelay = s.retryDelay;
         }
         cb && cb();
       });
@@ -2146,7 +2253,7 @@
     op.value = code; op.textContent = name;
     langSel.appendChild(op);
   });
-  const applyCfgUi = () => { langSel.value = cfg.lang.code; mincInp.value = cfg.minChars; };
+  const applyCfgUi = () => { langSel.value = cfg.lang.code; mincInp.value = cfg.minChars; phoneInp.value = cfg.phone; maxStepsInp.value = cfg.maxSteps; maxRetryInp.value = cfg.maxRetry; retryDelayInp.value = cfg.retryDelay; };
   loadCfg(applyCfgUi);
   gear.addEventListener("click", () => { setView.hidden = false; });
   back.addEventListener("click", () => { setView.hidden = true; });
@@ -2157,6 +2264,28 @@
   mincInp.addEventListener("change", () => {
     const v = parseInt(mincInp.value, 10);
     cfg.minChars = (isNaN(v) || v < 0) ? 0 : v;
+    saveCfg();
+  });
+  phoneInp.addEventListener("change", () => {
+    cfg.phone = (phoneInp.value || "").trim();
+    saveCfg();
+  });
+  maxStepsInp.addEventListener("change", () => {
+    const v = parseInt(maxStepsInp.value, 10);
+    cfg.maxSteps = (isNaN(v) || v < 1) ? 1 : v;
+    maxStepsInp.value = cfg.maxSteps;
+    saveCfg();
+  });
+  maxRetryInp.addEventListener("change", () => {
+    const v = parseInt(maxRetryInp.value, 10);
+    cfg.maxRetry = (isNaN(v) || v < 0) ? 0 : v;
+    maxRetryInp.value = cfg.maxRetry;
+    saveCfg();
+  });
+  retryDelayInp.addEventListener("change", () => {
+    const v = parseInt(retryDelayInp.value, 10);
+    cfg.retryDelay = (isNaN(v) || v < 0) ? 0 : v;
+    retryDelayInp.value = cfg.retryDelay;
     saveCfg();
   });
 

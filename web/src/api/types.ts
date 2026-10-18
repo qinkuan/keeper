@@ -1073,11 +1073,14 @@ export interface CapabilityToggle {
  * 会话种类。后端 chat_sessions.kind 的取值集合（见 keeper/chat/service.py
  * 的 SESSION_KINDS）。
  *
- * 收紧成字面量联合而不是 `string`：三个取值**在列表里互斥**，任何一处漏改
+ * 收紧成字面量联合而不是 `string`：四个取值**在列表里互斥**，任何一处漏改
  * （忘了加 browser 的筛选条件）都会表现为「那条会话在哪个列表里都看不见」，
  * 这种 bug 没有任何报错。联合类型让漏改在 tsc 阶段就暴露。
+ *
+ * browser=手动「对这一页提问」产生的浏览器会话；browser-automation=网页 Agent
+ * 自动操作产生的会话，两者都归「浏览器」页，但分两组展示、可分别折叠。
  */
-export type SessionKind = "chat" | "task" | "browser";
+export type SessionKind = "chat" | "task" | "browser" | "browser-automation";
 
 /** 会话列表里的一项（对应后端 chat_sessions 表） */
 export interface SessionItem {

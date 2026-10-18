@@ -284,7 +284,7 @@ export default function ChatPage({
   /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
      只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
   const remembered = () =>
-    localStorage.getItem(sessionKey(agentId, sessionKind)) || undefined;
+    localStorage.getItem(sessionKey(agentId, effKind)) || undefined;
   const [sessionId, setSessionId] = useState<string | undefined>(remembered);
   /** 会话视图选中的会话：与「任务视图」用的任务会话分开保存，避免互相顶掉 */
   const [chatSessionId, setChatSessionId] = useState<string | undefined>(
@@ -396,6 +396,14 @@ export default function ChatPage({
   // 切到 task 会列出一列表不属于这里的任务，而在 send() 里还会把浏览器会话的
   // 历史混进来。所以那边根本不渲染切换控件，mode 恒为 "chat"。
   const [mode, setMode] = useState<"chat" | "task">("chat");
+  /** 浏览器页的两个子类别：手动「对这一页提问」的 browser，与网页 Agent 自动操作的
+      browser-automation。两者各自成 tab（与「对话」页 chat/task 两个 tab 同款样式），
+      各自记住上次看的是哪条会话。 */
+  const [browserTab, setBrowserTab] =
+    useState<"browser" | "browser-automation">("browser");
+  /** 当前生效的会话类别：浏览器页随子 tab 切换，其余页恒为 chat（task 视图走另一条
+      会话通道，不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
+  const effKind: SessionKind = browserOnly ? browserTab : (sessionKind ?? "chat");
   // 工作台：关 / 编码工作台（文件浏览 + 编辑器）/ Agent 浏览器 —— 三选一，可叠加在左侧
   const [workbenchType, setWorkbenchType] = useState<WorkbenchType>("off");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1000,7 +1008,7 @@ export default function ChatPage({
   }, [agentId, activeSessionId, recoverRunId, qc, updateMsgs]);
 
   useEffect(() => {
-    const sid = localStorage.getItem(sessionKey(agentId, sessionKind));
+    const sid = localStorage.getItem(sessionKey(agentId, effKind));
     if (sid) {
       loadMessages(sid);
       loadWorkspace(sid);
@@ -1051,7 +1059,7 @@ export default function ChatPage({
     setSessionId(sid);
     setChatSessionId(sid);
     setUserSpaceId("");
-    localStorage.setItem(sessionKey(agentId, sessionKind), sid);
+    localStorage.setItem(sessionKey(agentId, effKind), sid);
     loadMessages(sid);
     loadWorkspace(sid);
   };
@@ -1061,7 +1069,7 @@ export default function ChatPage({
     setChatSessionId(undefined);
     setUserSpaceId("");
     setWorkspace(null);
-    localStorage.removeItem(sessionKey(agentId, sessionKind));
+    localStorage.removeItem(sessionKey(agentId, effKind));
     // 清掉「还没拿到真实 session_id 时用的那个桶」：里面可能躺着上一段没绑定到
     // 会话上的对话，新建后不该再冒出来。已落库的历史不受影响（各会话自己的桶照旧）。
     //
@@ -1102,27 +1110,29 @@ export default function ChatPage({
     (async () => {
       try {
         if (mode === "chat") {
-          // 关键：任务会话不能顶掉会话视图的会话，回来时按 chatSessionId 恢复
-          const r = await apiSessions(
-            agentId,
-            undefined,
-            50,
-            0,
-            browserOnly ? "browser" : "chat"
-          );
+          // 关键：任务会话不能顶掉会话视图的会话，回来时按 chatSessionId 恢复。
+          // 浏览器页有 browser / browser-automation 两个子 tab，各自记在按 effKind
+          // 分的 localStorage 桶里——切 tab 互不串，下面优先恢复「当前子类」上次看的。
+          const r = await apiSessions(agentId, undefined, 50, 0, effKind);
           if (cancelled) return;
           const ids = new Set((r.sessions || []).map((s) => s.id));
-          if (chatSessionId) {
-            if (ids.has(chatSessionId)) {
-              setSessionId(chatSessionId);
-              await loadMessages(chatSessionId);
-              loadWorkspace(chatSessionId);
-              return;
-            }
-            // 记着的那条已经不属于这一类：清掉，否则刷新一次就被它带进一个空页面
-            localStorage.removeItem(sessionKey(agentId, sessionKind));
-            setChatSessionId(undefined);
+          const remembered = localStorage.getItem(sessionKey(agentId, effKind)) || undefined;
+          if (remembered && ids.has(remembered)) {
+            setChatSessionId(remembered);
+            setSessionId(remembered);
+            await loadMessages(remembered);
+            loadWorkspace(remembered);
+            return;
           }
+          if (chatSessionId && ids.has(chatSessionId)) {
+            setSessionId(chatSessionId);
+            await loadMessages(chatSessionId);
+            loadWorkspace(chatSessionId);
+            return;
+          }
+          // 记着的那条已经不属于这一类：清掉，否则刷新一次就被它带进一个空页面
+          localStorage.removeItem(sessionKey(agentId, effKind));
+          setChatSessionId(undefined);
           const first = r.sessions?.[0];
           if (first?.id) handleSelect(first.id);
         } else {
@@ -1144,7 +1154,7 @@ export default function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // sessionKind 一并列入：这个 effect 会按它拉不同的列表，不列的话 prop 变了
     // 不会重跑（目前靠路由切换时组件整体卸载掩盖住了，但那是个隐式约定）。
-  }, [mode, agentId, sessionKind]);
+  }, [mode, agentId, sessionKind, browserTab]);
 
   /**
    * 重新生成：把上一条用户消息重发一遍。
@@ -1201,7 +1211,7 @@ export default function ChatPage({
         if (session_id && session_id !== activeSessionId) {
           setSessionId(session_id);
           setChatSessionId(session_id);
-          localStorage.setItem(sessionKey(agentId, sessionKind), session_id);
+          localStorage.setItem(sessionKey(agentId, effKind), session_id);
           loadWorkspace(session_id);
         }
         setPendingFiles((prev) => [...prev, attachment]);
@@ -1384,7 +1394,7 @@ export default function ChatPage({
             if (!sid) return;
             rekey(sid);
             setSessionId(sid);
-            localStorage.setItem(sessionKey(agentId, sessionKind), sid);
+            localStorage.setItem(sessionKey(agentId, effKind), sid);
             loadWorkspace(sid);
           },
           // 每完成一步：追加到占位消息的思考过程里
@@ -1412,7 +1422,7 @@ export default function ChatPage({
             if (resp.session_id && resp.session_id !== targetSid) {
               rekey(resp.session_id);
               setSessionId(resp.session_id);
-              localStorage.setItem(sessionKey(agentId, sessionKind), resp.session_id);
+              localStorage.setItem(sessionKey(agentId, effKind), resp.session_id);
               loadWorkspace(resp.session_id); // 会话已建，拉取生效工作空间
             }
             // 收尾：把权威内容写进**这一轮所属会话**的消息列表（用服务端的 message_id），
@@ -1466,7 +1476,7 @@ export default function ChatPage({
         if (resp.session_id && resp.session_id !== targetSid) {
           rekey(resp.session_id);
           setSessionId(resp.session_id);
-          localStorage.setItem(sessionKey(agentId, sessionKind), resp.session_id);
+          localStorage.setItem(sessionKey(agentId, effKind), resp.session_id);
           loadWorkspace(resp.session_id);
         }
         const resolvedId = resp.message_id || placeholderId;
@@ -2270,11 +2280,23 @@ export default function ChatPage({
             <div className="shrink-0 border-b border-line-soft px-3 pb-2.5 pt-2.5">
               <div className="flex items-center gap-2">
                 <span className="text-[13px] font-semibold tracking-[-0.01em] text-ink-strong">
-                  {browserOnly ? "浏览器会话" : "会话"}
+                  会话
                 </span>
-                {/* 浏览器页不提供类别切换：那一页只有浏览器会话一类可列，
-                    摆一个切到「任务」的开关只会让人点进一条不属于这里的会话。 */}
-                {!browserOnly && (
+                {/* 类别切换：对话页在 chat/task 间切；浏览器页在 browser（手动提问）/
+                    browser-automation（网页 Agent 自动操作）两个子类别间切。两种都是同一
+                    款 SegmentedControl，样式与「对话」页一致。 */}
+                {browserOnly ? (
+                  <SegmentedControl
+                    value={browserTab}
+                    onChange={(v) =>
+                      setBrowserTab(v as "browser" | "browser-automation")
+                    }
+                    options={[
+                      { label: "浏览器会话", value: "browser" },
+                      { label: "网页 Agent", value: "browser-automation" },
+                    ]}
+                  />
+                ) : (
                   <SegmentedControl
                     value={mode}
                     onChange={(v) => setMode(v as "chat" | "task")}
@@ -2314,10 +2336,11 @@ export default function ChatPage({
               <SessionList
                 agentId={agentId}
                 activeId={sessionId}
-                /* 类别：对话页按 tab 给 chat/task，浏览器页只列 browser。
-                   必须是显式枚举而不是"非 task 即普通"——那样浏览器会话会混进
-                   「会话」列表，而它在那条会话的消息并不属于这里。 */
-                kind={browserOnly ? "browser" : mode}
+                /* 类别：对话页按 tab 给 chat/task，浏览器页按子 tab 给
+                   browser / browser-automation。必须是显式枚举而不是"非 task 即普通"
+                   ——那样浏览器会话会混进「会话」列表，而它在那条会话的消息并不属于这里。 */
+                kind={effKind}
+                hideCreate={browserOnly && browserTab === "browser-automation"}
                 onSelect={(sid) => {
                   // 任务视图里选的是任务会话，不能顶掉会话视图的选择
                   if (mode === "task") applyTaskSession(sid);
