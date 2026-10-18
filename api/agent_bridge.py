@@ -329,7 +329,8 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
     """
     req_id = msg.get("id")
     q = str(msg.get("q") or "").strip()
-    if not q:
+    # 纯图片提问（q 为空但有附件）也允许：用户拖张图进来直接问"这是什么"。
+    if not q and not (msg.get("attachments") or []):
         await _send(ws, {"event": "result", "id": req_id, "error": "问题不能为空"})
         return
 
@@ -360,6 +361,42 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
     except Exception as e:  # noqa: BLE001
         await _send(ws, {"event": "result", "id": req_id, "error": str(e)})
         return
+
+    # 浮球附件（图片）：把 WS 内联的 base64 落成附件，交给 run_one_ask。
+    # 走与 HTTP 上传端点同一套落库（_store_agent_attachment），复用厂商上传 +
+    # 缓存逻辑，不另写。仅图片、体积上限 ~6MB（与前端 5MB 拦一道双保险）。
+    ball_atts = []
+    raw_atts = msg.get("attachments") or []
+    if raw_atts:
+        try:
+            import base64
+
+            from ..chat.api import _store_agent_attachment
+
+            for a in raw_atts[:8]:
+                a = a or {}
+                du = a.get("data_url") or ""
+                if not du.startswith("data:"):
+                    continue
+                try:
+                    _, b64 = du.split(",", 1)
+                    blob = base64.b64decode(b64)
+                except Exception:
+                    continue
+                if len(blob) > 6 * 1024 * 1024:
+                    continue
+                try:
+                    att = await _store_agent_attachment(
+                        agent_id, sid, a.get("name") or "image", blob
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("浮球附件落库失败，跳过该张: %s", e)
+                    continue
+                ball_atts.append(
+                    {"file_id": att["file_id"], "provider": att["provider"], "name": att["name"]}
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("浮球附件处理异常: %s", e)
 
     # 会话定下来之后才 ack：浮球显示的「已收到」顺便可以带上"记到哪条会话"，
     # 用户点回浏览器页就能直接找到它，不用自己猜。
@@ -393,6 +430,7 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
                 agent_id=agent_id,
                 session_id=sid,
                 text=content,
+                attachments=ball_atts if ball_atts else None,
                 run_id=run_id,
                 kind=chat_service.SESSION_KIND_BROWSER,
                 # 工作区：只在**新建**那一次生效（已有会话忽略），但每次都传是安全的

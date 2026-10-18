@@ -1659,6 +1659,74 @@ async def deploy_info(agent_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{agent_id}/sessions/{session_id}/attachments")
+async def _store_agent_attachment(
+    agent_id: str,
+    session_id: str,
+    filename: str,
+    data: bytes,
+) -> Dict[str, Any]:
+    """把一段图片字节落成附件：校验 → 落本地缓存（有会话时）→ 传厂商拿 file_id。
+
+    抽出来是因为**浮球（WS 桥）**也要走同一套落库逻辑：它拿到的是 base64 图片，
+    没有 HTTP multipart。HTTP 上传端点（:func:`upload_attachment`）和浮球提问
+    （``api/agent_bridge._ball_ask``）都调它，避免两处各写一份厂商上传 + 缓存。
+
+    ``session_id`` 为空时**不写本地缓存**（缓存要落到确定的会话临时区，没会话就没
+    法定位）—— 但这种附件仍会上传到厂商、仍能进模型上下文。本地缓存只服务于前端
+    预览，浮球链路靠自己手上的 base64 预览，不依赖它。
+    """
+    agent = _agent(agent_id)
+    cfg = await _agent_llm_config(agent_id)
+    if cfg is None:
+        raise HTTPException(status_code=400, detail="当前 agent 没有绑定模型，无法上传文件")
+
+    from ..llm.files import sniff_image_mime, uploader_for
+
+    uploader = uploader_for(cfg.provider)
+    if uploader is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件上传暂不支持 {cfg.provider}，目前只支持 deepseek",
+        )
+    ok, why = uploader.supports(cfg)
+    if not ok:
+        raise HTTPException(status_code=400, detail=why)
+
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise HTTPException(status_code=400, detail="只支持 JPEG / PNG / GIF / WebP 图片")
+
+    attachment_id = new_id()
+    cache_path = None
+    if session_id:
+        rel = f"@tmp/uploads/{attachment_id}/{filename}"
+        ws = await resolve_workspace(agent, session_id)
+        target = ws.agent_space / "uploads" / attachment_id / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        cache_path = rel
+
+    try:
+        up = await uploader.upload(cfg, data, filename)
+    except Exception as e:  # noqa: BLE001
+        # 上传失败时把刚落的缓存清掉，别留垃圾
+        if cache_path:
+            shutil.rmtree(target.parent, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=f"上传到模型厂商失败：{e}")
+
+    return {
+        "id": attachment_id,
+        "name": up.name,
+        "mime": up.mime,
+        "size": up.size,
+        "provider": up.provider,
+        "model": up.model,
+        "file_id": up.file_id,
+        "expires_at": up.expires_at,
+        "cache_path": cache_path,
+    }
+
+
 async def upload_attachment(
     agent_id: str,
     session_id: str,
@@ -1678,8 +1746,6 @@ async def upload_attachment(
     当前只支持 deepseek + deepseek-flash（见 ``llm/files.py``）。不支持的模型
     在这里就明确拒绝，而不是等厂商返回一个看不懂的 4xx。
     """
-    agent = _agent(agent_id)
-
     # 「新对话」时还没有 session_id，而附件缓存要落到确定的会话临时目录
     # （@tmp/ → workspace/session/<sid>/<agent_id>）——sid 为空时那个目录会
     # 退化成没有会话层的一级，多个新对话互相串。
@@ -1691,59 +1757,13 @@ async def upload_attachment(
         svc = ChatService(agent_id=agent_id)
         session_id = await svc.ensure_session_id()
 
-    cfg = await _agent_llm_config(agent_id)
-    if cfg is None:
-        raise HTTPException(status_code=400, detail="当前 agent 没有绑定模型，无法上传文件")
-
-    from ..llm.files import sniff_image_mime, uploader_for
-
-    uploader = uploader_for(cfg.provider)
-    if uploader is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"文件上传暂不支持 {cfg.provider}，目前只支持 deepseek",
-        )
-    ok, why = uploader.supports(cfg)
-    if not ok:
-        raise HTTPException(status_code=400, detail=why)
-
     data = await file.read()
-    mime = sniff_image_mime(data)
-    if mime is None:
-        raise HTTPException(status_code=400, detail="只支持 JPEG / PNG / GIF / WebP 图片")
-
-    # 落本地缓存。放在会话私有临时区：不污染用户工作区，也不受 user_space 的
-    # read_only 影响（那个默认是 True，写进去会被拒）。
-    attachment_id = new_id()
-    rel = f"@tmp/uploads/{attachment_id}/{file.filename or 'upload'}"
-    ws = await resolve_workspace(agent, session_id)
-    target = ws.agent_space / "uploads" / attachment_id / (file.filename or "upload")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-
-    try:
-        up = await uploader.upload(cfg, data, file.filename or "upload")
-    except Exception as e:  # noqa: BLE001
-        # 上传失败要把刚落的缓存清掉：留着就是垃圾，而且用户会以为传成功了。
-        shutil.rmtree(target.parent, ignore_errors=True)
-        raise HTTPException(status_code=502, detail=f"上传到模型厂商失败：{e}")
-
-    return {
-        "attachment": {
-            "id": attachment_id,
-            "name": up.name,
-            "mime": up.mime,
-            "size": up.size,
-            "provider": up.provider,
-            "model": up.model,
-            "file_id": up.file_id,
-            "expires_at": up.expires_at,
-            "cache_path": rel,
-        },
-        # 新对话那一趟：前端拿它把当前会话切过去，否则附件挂在一个前端不知道的
-        # 会话上，用户一发消息又会另建一条。
-        "session_id": session_id,
-    }
+    # 落库逻辑抽到 _store_agent_attachment：浮球（WS 桥）拿到的是 base64 图片，
+    # 没有 multipart，但厂商上传 + 本地缓存这两步完全一样，不能各写一份。
+    attachment = await _store_agent_attachment(
+        agent_id, session_id, file.filename or "upload", data
+    )
+    return {"attachment": attachment, "session_id": session_id}
 
 
 @router.get("/{agent_id}/files/attachment/{session_id}/{attachment_id}")

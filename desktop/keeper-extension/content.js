@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1028b";
+  const BUILD = "1101a";
 
   // ---------- 页面身份（cid）----------
   //
@@ -307,6 +307,21 @@
     "  word-break:break-word;user-select:text;max-height:240px;overflow:auto;",
     "  flex:0 0 auto}",
     ".k-askout.k-wait{color:#9aa0a6}",
+    // ---- 附件（图片）chip ----
+    ".k-atts{display:flex;flex-wrap:wrap;gap:5px;padding:0 10px 6px}",
+    ".k-atts:empty{display:none}",
+    ".k-atch{display:inline-flex;align-items:center;gap:5px;max-width:160px;",
+    "  padding:3px 4px 3px 3px;border:1px solid rgba(138,180,248,.35);",
+    "  background:rgba(138,180,248,.14);border-radius:7px;",
+    "  font-size:10.5px;color:#e8eaed;flex:0 0 auto}",
+    ".k-atch img{width:22px;height:22px;border-radius:4px;object-fit:cover;flex:0 0 auto}",
+    ".k-atch .k-n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".k-atch .k-x{border:0;background:rgba(255,255,255,.1);color:#9aa0a6;",
+    "  border-radius:3px;width:14px;height:14px;line-height:1;font-size:11px;",
+    "  cursor:pointer;padding:0;flex:0 0 auto}",
+    ".k-atch .k-x:hover{background:rgba(242,139,130,.3);color:#f28b82}",
+    /* 拖文件悬停在面板上：整块描边高亮，和对话输入框一个味。 */
+    ".k-panel.k-drag{box-shadow:0 0 0 2px rgba(138,180,248,.7),0 12px 40px rgba(0,0,0,.4)}",
     "</style>",
     '<div class="k-panel" id="p">',
     '  <div class="k-link">',
@@ -328,6 +343,7 @@
     /* 会话横条放在**输入框上面**：它决定"这轮记到哪条会话"，是发消息前就该看见
        的事实，压在输入框下面（原来那个 <select> 的位置）会让人发完才知道记哪了。 */
     '  <div class="k-tabs" id="pick" title="这条对话记到哪条会话"></div>',
+    '  <div class="k-atts" id="atts"></div>',
     '  <div class="k-askrow">',
     /* 引用要在输入框里**高亮**，而 textarea 是纯文本、做不到局部着色。
        所以叠一层：底层 qhl 渲染同样内容、文字透明、只给引用那几段上底色；
@@ -537,6 +553,9 @@
    * 挑两段一起问）。输入框里只放缩略占位（见 QUOTE_RE），完整原文按序号存在
    * 这里，发送那一刻才换上去。 */
   let quotedList = [];
+  /* 待发送的图片附件（粘贴 / 拖放而来）。与对话输入框同款设计：不进文本框，
+     独立成 chip；点 ✕ 整块删。每项 {name, dataUrl}。 */
+  let pendingAttachments = [];
 
   /* 输入框里的引用占位，形如「【引用1：这是前五个…】」。
    *
@@ -894,7 +913,7 @@
     }
   };
 
-  const askAgent = async (q, selection = "") => {
+  const askAgent = async (q, selection = "", attachments) => {
     /* 新对话态：session_id 传空 + new_session=true，让内核**新建**一条。
        只传空是不够的——空在 _resolve_ball_target 里的意思是「用浮球默认会话」，
        那样点了新对话却记进上一条。（NEW_SESS 是内部哨兵，绝不能原样发出去。） */
@@ -916,6 +935,8 @@
              出现两次——一次在「页面选中内容」，一次在「问题」。 */
           selection: selection || "",
         },
+        /* 图片附件：WS 内联的 base64 data URL 列表，内核落成附件后交给 agent。 */
+        attachments: attachments && attachments.length ? attachments : undefined,
       },
     });
     if (!r) throw new Error("内核没响应（扩展可能已被禁用）");
@@ -991,6 +1012,91 @@
     }
   };
 
+  /* ---------- 附件（图片）：粘贴 / 拖放 ----------
+   *
+   * 与对话输入框同款：文件不进文本框（否则退格逐字删文件名），独立成 chip 展示，
+   * 点 ✕ 整块删。只收图片（与内核附件上传一致），体积上限 5MB。
+   *
+   * 为什么走 WS 内联 base64 而不是让内核再去拉：浮球本来就连着内核那条 WS，
+   * 鉴权复用 token，没有跨域/CORS 那一摊事——和「截图」那条 data_url 同源。 */
+  const ATT_EXT = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  const ATT_MAX = 5 * 1024 * 1024;
+  const fileToDataUrl = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(r.error || new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+  const renderAttachments = () => {
+    const box = $("atts");
+    if (!box) return;
+    box.textContent = "";
+    pendingAttachments.forEach((a, i) => {
+      const chip = document.createElement("div");
+      chip.className = "k-atch";
+      const img = document.createElement("img");
+      img.src = a.dataUrl; img.alt = a.name;
+      const name = document.createElement("span");
+      name.className = "k-n"; name.textContent = a.name; name.title = a.name;
+      const x = document.createElement("button");
+      x.type = "button"; x.className = "k-x"; x.textContent = "×"; x.title = "移除";
+      x.addEventListener("click", () => { pendingAttachments.splice(i, 1); renderAttachments(); });
+      chip.appendChild(img); chip.appendChild(name); chip.appendChild(x);
+      box.appendChild(chip);
+    });
+  };
+  const addAttachments = async (files) => {
+    for (const f of Array.from(files || [])) {
+      if (!ATT_EXT.includes(f.type)) {
+        setAskOut("⚠ 仅支持图片（png/jpg/gif/webp）：" + (f.name || ""), "k-wait");
+        continue;
+      }
+      if (f.size > ATT_MAX) {
+        setAskOut("⚠ 图片超过 5MB，换张小的：" + (f.name || ""), "k-wait");
+        continue;
+      }
+      try {
+        const dataUrl = await fileToDataUrl(f);
+        pendingAttachments.push({ name: f.name || "image", dataUrl });
+        renderAttachments();
+      } catch (e) {
+        setAskOut("⚠ 读取失败：" + (f.name || ""), "k-wait");
+      }
+    }
+  };
+
+  // 粘贴：截图 / 复制的图片进剪贴板时，拦下默认行为转成附件。文字粘贴照常。
+  qbox.addEventListener("paste", (e) => {
+    const items = e.clipboardData && e.clipboardData.files;
+    if (items && items.length) { e.preventDefault(); addAttachments(items); }
+  });
+
+  // 拖放：把图片拖到浮球面板上即添加。用计数应付子元素引发的 dragenter/leave 抖动。
+  let dragDepth = 0;
+  panel.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
+      e.preventDefault(); dragDepth += 1; panel.classList.add("k-drag");
+    }
+  });
+  panel.addEventListener("dragover", (e) => {
+    if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
+      e.preventDefault();
+    }
+  });
+  panel.addEventListener("dragleave", (e) => {
+    if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
+      if (dragDepth > 0) dragDepth -= 1;
+      if (dragDepth === 0) panel.classList.remove("k-drag");
+    }
+  });
+  panel.addEventListener("drop", (e) => {
+    dragDepth = 0; panel.classList.remove("k-drag");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      e.preventDefault();
+      addAttachments(e.dataTransfer.files);
+    }
+  });
+
   let asking = false;
   const doAsk = async () => {
     if (asking) return;
@@ -1018,7 +1124,7 @@
       .replace(/[ \t]*\n[ \t]*/g, "\n")
       .replace(/\n{2,}/g, "\n")
       .trim();
-    if (!q) { setAskOut("先写点什么。", "k-wait"); return; }
+    if (!q && pendingAttachments.length === 0) { setAskOut("先写点什么，或加张图。", "k-wait"); return; }
     asking = true;
     goBtn.disabled = true;
     qbox.disabled = true;
@@ -1028,7 +1134,8 @@
     try {
       /* 引用已经展开进 q 了，这里就**不再**带选区：否则同一段文字会出现两次。
          没点过「添加」时才把当前选区带上（浮球一直有的行为）。 */
-      const res = await askAgent(q, hasQuote ? "" : currentSelection());
+      const atts = pendingAttachments.map((a) => ({ name: a.name, data_url: a.dataUrl }));
+      const res = await askAgent(q, hasQuote ? "" : currentSelection(), atts);
       setAskOut(res && res.text ? res.text : "（没有返回内容）");
       // 置空而不是记下 id：这条已经被本地消费过，下次开面板补取时不必重画
       shownMsgId = "";
@@ -1038,6 +1145,8 @@
          序号一并归零，下一条又从「引用1」开始——否则用户会看到「引用7」这种
          莫名其妙的编号。（失败时不清，留着让用户直接重试。） */
       quotedList = [];
+      pendingAttachments = [];
+      renderAttachments();
       syncHighlight();
       paintSelection();
       if (res && res.session_id && res.session_id !== chosenSess) {
