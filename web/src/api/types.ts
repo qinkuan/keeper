@@ -1195,6 +1195,9 @@ export interface SessionMessage {
   created_at?: string | null;
   /** 本轮产出的文件引用 */
   artifacts?: Artifact[];
+  /** 用户本轮上传的附件（只挂 user 消息）：后端原样带回（含 file_id / cache_path），
+   *  前端据此在气泡里渲染缩略图。类型与 :ts:Attachment 一致。 */
+  attachments?: Attachment[];
   /** 逐步思考过程（think / 工具调用 / 观察），由后端从 react_steps 还原 */
   steps?: AgentStep[];
   /** 可观测：本轮汇总用量（历史消息由 load_messages 按 message_id 聚合补上） */

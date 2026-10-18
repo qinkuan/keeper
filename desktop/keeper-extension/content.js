@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1101a";
+  const BUILD = "1101b";
 
   // ---------- 页面身份（cid）----------
   //
@@ -1045,7 +1045,10 @@
       box.appendChild(chip);
     });
   };
-  const addAttachments = async (files) => {
+  const addAttachments = async (files, label) => {
+    // label 用于命名：粘贴来的截图没有文件名，统一叫「截图」；拖进来的真文件
+    // 用原文件名。注意要带扩展名——内核按 id 目录列文件预览时靠扩展名猜 mime，
+    // 没有扩展名会被当成 octet-stream，缩略图就裂了。
     for (const f of Array.from(files || [])) {
       if (!ATT_EXT.includes(f.type)) {
         setAskOut("⚠ 仅支持图片（png/jpg/gif/webp）：" + (f.name || ""), "k-wait");
@@ -1055,9 +1058,11 @@
         setAskOut("⚠ 图片超过 5MB，换张小的：" + (f.name || ""), "k-wait");
         continue;
       }
+      const ext = (f.type.split("/")[1] || "png").replace(/^x-/, "");
+      const name = label ? (label + "." + ext) : (f.name || ("image." + ext));
       try {
         const dataUrl = await fileToDataUrl(f);
-        pendingAttachments.push({ name: f.name || "image", dataUrl });
+        pendingAttachments.push({ name, dataUrl });
         renderAttachments();
       } catch (e) {
         setAskOut("⚠ 读取失败：" + (f.name || ""), "k-wait");
@@ -1068,7 +1073,7 @@
   // 粘贴：截图 / 复制的图片进剪贴板时，拦下默认行为转成附件。文字粘贴照常。
   qbox.addEventListener("paste", (e) => {
     const items = e.clipboardData && e.clipboardData.files;
-    if (items && items.length) { e.preventDefault(); addAttachments(items); }
+    if (items && items.length) { e.preventDefault(); addAttachments(items, "截图"); }
   });
 
   // 拖放：把图片拖到浮球面板上即添加。用计数应付子元素引发的 dragenter/leave 抖动。

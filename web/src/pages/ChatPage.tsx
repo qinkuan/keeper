@@ -478,6 +478,9 @@ export default function ChatPage({
           created_at: m.created_at ?? null,
           artifacts: m.artifacts,
           steps: m.steps ?? [],
+          // 用户上传的附件：后端原样带回（含 file_id / cache_path），前端据此
+          // 在气泡里渲染缩略图并支持预览。漏掉这一项，历史里就只能看到文字。
+          attachments: m.attachments ?? [],
           usage: m.usage ?? null,
           duration_ms: m.duration_ms ?? null,
           llm: m.role === "assistant",
@@ -525,6 +528,9 @@ export default function ChatPage({
                   created_at: m.created_at ?? null,
                   artifacts: m.artifacts,
                   steps: m.steps ?? [],
+                  // 用户上传的附件：后端原样带回，气泡据此渲染缩略图。漏掉则历史里
+                  // 只能看到文字（之前就是因为这个，图片始终不进会话记录）。
+                  attachments: m.attachments ?? [],
                   // 可观测：历史消息的用量 / 耗时（刷新后仍要能看到）
                   usage: m.usage ?? null,
                   duration_ms: m.duration_ms ?? null,
@@ -745,6 +751,8 @@ export default function ChatPage({
               created_at: m.created_at ?? null,
               artifacts: m.artifacts,
               steps: m.steps ?? [],
+              // 用户上传的附件：后端原样带回，气泡据此渲染缩略图。
+              attachments: m.attachments ?? [],
               usage: m.usage ?? null,
               duration_ms: m.duration_ms ?? null,
               llm: m.role === "assistant",

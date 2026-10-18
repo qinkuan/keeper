@@ -381,10 +381,10 @@ function ChatBubble({
             {msg.attachments.map((a) => (
               <a
                 key={a.id}
-                href={attachmentUrl(agentId, sessionId || "", a.id, true)}
+                href={attachmentUrl(agentId, sessionId || "", a.id)}
                 target="_blank"
                 rel="noreferrer"
-                title={`${a.name} · ${(a.size / 1024).toFixed(0)} KB · 点击下载`}
+                title={`${a.name} · ${(a.size / 1024).toFixed(0)} KB · 点击打开预览`}
                 className="group block h-[64px] w-[64px] overflow-hidden rounded-lg border border-line-soft bg-surface"
               >
                 <img

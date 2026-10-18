@@ -362,6 +362,13 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
         await _send(ws, {"event": "result", "id": req_id, "error": str(e)})
         return
 
+    # 「新对话」时提前建好会话：附件要落到确定的会话临时目录（_store_agent_attachment
+    # 在 sid 为空时不会写本地缓存），而浏览器页的会话记录靠 cache_path 才能预览这张图。
+    # 与 HTTP 上传端点 upload_attachment 的 "new" 处理同一口径——宁可早建一个空会话，
+    # 也不要让附件落进归属说不清的目录。accepted 在下面统一发（sid 现已非空）。
+    if fresh and not sid:
+        sid = await chat_service.ChatService(agent_id=agent_id).ensure_session_id()
+
     # 浮球附件（图片）：把 WS 内联的 base64 落成附件，交给 run_one_ask。
     # 走与 HTTP 上传端点同一套落库（_store_agent_attachment），复用厂商上传 +
     # 缓存逻辑，不另写。仅图片、体积上限 ~6MB（与前端 5MB 拦一道双保险）。
@@ -392,17 +399,17 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("浮球附件落库失败，跳过该张: %s", e)
                     continue
-                ball_atts.append(
-                    {"file_id": att["file_id"], "provider": att["provider"], "name": att["name"]}
-                )
+                # 存完整字典（含 id / size / name / cache_path）：网页端 ChatBubble
+                # 用 a.id 拼预览 URL、用 a.size 算 KB、用 a.name 显示，缺了就裂图。
+                ball_atts.append(att)
         except Exception as e:  # noqa: BLE001
             logger.warning("浮球附件处理异常: %s", e)
 
     # 会话定下来之后才 ack：浮球显示的「已收到」顺便可以带上"记到哪条会话"，
     # 用户点回浏览器页就能直接找到它，不用自己猜。
     #
-    # 新建时 sid 是空的（会话还没建），真实 id 要等 run_one_ask 里
-    # ensure_session_id() 定下来 —— 那时由 on_session 回调补发一个 accepted。
+    # 「新对话」现在已在上面提前 ensure_session_id，sid 非空，所以这里对新建和已有
+    # 会话一视同仁地发 accepted；不再依赖 run_one_ask 的 on_session 回调补发。
     # 这里**绝不能**改发 result：result 是兑现 promise 的那一个（扩展那边
     # request() 收到它就 resolve 了），提前发等于把整条请求的回答吞掉。
     if sid:
@@ -416,13 +423,6 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
         # 整轮会既不可见也不可停。
         run_id = new_id()
         try:
-            async def note_session(real_sid: str) -> None:
-                """新建时补发 accepted：真实 id 只有 ``run_one_ask`` 里
-                ``ensure_session_id()`` 定下来才知道，而扩展要靠它把这条新会话
-                立刻加进横条——否则用户发完消息，横条上还是那一条旧的，
-                看起来就像"新对话没生效"。"""
-                await _send(ws, {"event": "accepted", "id": req_id, "session_id": real_sid})
-
             # 执行走的是和浏览器页**同一份** run_one_ask（见 chat/service.py）：
             # run 的登记、停止检查、事件缓冲、注销，全在那边。这里的差别只有两处——
             # 不推 SSE 队列（浮球只回一条最终结果），以及工作区取默认值。
@@ -436,7 +436,7 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
                 # 工作区：只在**新建**那一次生效（已有会话忽略），但每次都传是安全的
                 # ——与 new_session 同一口径，省得浮球会话的工作区规则和别处不一致。
                 user_space_id=await chat_service._default_space_id(),
-                on_session=note_session if fresh else None,
+                on_session=None,
                 # 标题用**用户原始的问题**，而不是 content 里拼好的那段 prompt：
                 # 后者开头是「我在页面「X」（URL）上提问。」，而 derive_session_title
                 # 只取首行前 18 字符 —— 用它做标题的结果是每条浮球会话都长一个样，

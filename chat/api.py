@@ -1658,7 +1658,6 @@ async def deploy_info(agent_id: str) -> Dict[str, Any]:
 # 「用户传进来的原件」。
 
 
-@router.post("/{agent_id}/sessions/{session_id}/attachments")
 async def _store_agent_attachment(
     agent_id: str,
     session_id: str,
@@ -1727,6 +1726,7 @@ async def _store_agent_attachment(
     }
 
 
+@router.post("/{agent_id}/sessions/{session_id}/attachments")
 async def upload_attachment(
     agent_id: str,
     session_id: str,
