@@ -572,8 +572,14 @@ class LLMProfile(Base):
     )
 
     def to_llm_dict(self) -> dict:
-        """转成 get_llm 接受的配置 dict（带字段默认值兜底）。"""
+        """转成 get_llm 接受的配置 dict（带字段默认值兜底）。
+
+        必须带上 ``profile_id``：成本换算（observability.pricing）按 profile_id
+        查 ``model_prices``，而 profile 本身就含 model_name / provider，所以这是
+        计价的主键。漏带的话 price 只能退化到按 model_name 查，换模型常常查不到价。
+        """
         return {
+            "profile_id": self.id,
             "provider": self.provider,
             "model_name": self.model_name,
             "api_key": self.api_key,

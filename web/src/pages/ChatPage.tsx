@@ -1184,10 +1184,8 @@ export default function ChatPage({
           loadWorkspace(session_id);
         }
         setPendingFiles((prev) => [...prev, attachment]);
-        // 输入框占位：与引用（浮球那套）同一形制，一眼能认出"这不是我打的字"
-        setInput((prev) =>
-          (prev ? prev.replace(/\s+$/, "") + " " : "") + `【文件：${attachment.name}】`
-        );
+        // 不再往输入框塞「【文件：name】」文本——那会让退格逐字删文件名。
+        // 附件统一用下方高亮 chip 展示，点 ✕ 整块删。
       }
     } catch (e: any) {
       // 用 toast 而不是就地红字：上传失败的原因（模型不支持 / 超限 / 类型不对）
@@ -1206,21 +1204,15 @@ export default function ChatPage({
    * 索引删则占位的第几段与列表的第几条严格对应。
    */
   const removeFile = (index: number) => {
+    // 占位文本已不进输入框，附件只存在于 pendingFiles；整块删即可，无需再清文本。
     setPendingFiles((prev) => prev.filter((_, i) => i !== index));
-    setInput((prev) => {
-      let seen = -1;
-      const cleaned = prev.replace(/【文件：[^】]*】/g, (m) => {
-        seen += 1;
-        return seen === index ? "" : m;
-      });
-      // 删中间那段时可能留下双空格，顺手收一下；不动末尾以外的换行
-      return cleaned.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "");
-    });
   };
 
   const send = async (raw?: string, stepId?: string) => {
     const q = (raw ?? input).trim();
-    if (!q || sending) return;
+    // 仅发附件（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
+    // 这种消息 q 为空，但 pendingFiles 非空，应当照常发出。
+    if ((!q && pendingFiles.length === 0) || sending) return;
     // 标记本地正在流式：让那条 3 秒一探的 effect 跳过 loadMessages，
     // 否则它会把刚发上去、还在流式中的这一轮又拉一遍，和服务端回灌的 user 重复显示。
     localStreamingRef.current = true;
@@ -1750,7 +1742,7 @@ export default function ChatPage({
                 {pendingFiles.map((a, i) => (
                   <div
                     key={a.id}
-                    className="group relative flex h-[52px] w-[52px] shrink-0 items-center justify-center overflow-hidden rounded-[8px] border border-line-soft bg-black/[0.03] dark:bg-white/[0.06]"
+                    className="group flex max-w-[200px] items-center gap-1.5 rounded-full border border-brand/20 bg-brand/10 py-1 pl-1.5 pr-1 text-[12px] text-ink"
                     title={`${a.name}（${(a.size / 1024).toFixed(0)} KB）`}
                   >
                     {/* 缩略图直接读本地缓存（GET /files/attachment/...）：
@@ -1759,15 +1751,16 @@ export default function ChatPage({
                     <img
                       src={attachmentUrl(agentId, activeSessionId || "", a.id)}
                       alt={a.name}
-                      className="h-full w-full object-cover"
+                      className="h-4 w-4 shrink-0 rounded object-cover"
                     />
+                    <span className="truncate">{a.name}</span>
                     <button
                       type="button"
                       title="移除"
                       onClick={() => removeFile(i)}
-                      className="absolute right-0 top-0 flex h-[16px] w-[16px] items-center justify-center rounded-bl-[6px] bg-black/55 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/10 hover:text-ink dark:hover:bg-white/20"
                     >
-                      <X className="h-2.5 w-2.5" />
+                      <X className="h-3 w-3" />
                     </button>
                   </div>
                 ))}

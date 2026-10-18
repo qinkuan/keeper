@@ -78,6 +78,11 @@ async def _price_for(
     # 关键：按**调用发生的时间**取价，而不是"当前价"——模型会调价，
     # 历史调用必须按当时的单价计算，否则回溯出来的成本全是错的。
     when = at or datetime.now(timezone.utc)
+    # SQLite 里 effective_from 存的是 naive（历史数据如此，且下方 datetime.min 兜底
+    # 也是 naive）。把 when 统一成 naive UTC，避免 SQL 的 `effective_from <= when`
+    # 与下方 max 排序在 aware/naive 混用时抛 TypeError。
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc).replace(tzinfo=None)
     try:
         factory = get_session_factory()
         async with factory() as db:
@@ -96,7 +101,7 @@ async def _price_for(
                 cands.append(ModelPrice.model_name == model)
 
             minute = _minute_of_day(when)
-            for cond in cands:
+            for idx, cond in enumerate(cands):
                 stmt = (
                     select(ModelPrice)
                     .where(
@@ -135,8 +140,10 @@ async def _price_for(
                         (2 if r.time_from_minute is not None else 0)
                         + (1 if r.weekdays else 0),
                         # effective_from 理论非空，但脏数据为 None 时会让元组
-                        # 比较抛 TypeError——兜个底，别因此算不出成本
-                        r.effective_from or datetime.min,
+                        # 比较抛 TypeError——兜个底，别因此算不出成本。
+                        # 库里 effective_from 可能是 aware 也可能是 naive（历史数据
+                        # 混用），统一剥掉 tz 再比，避免混用时抛 TypeError。
+                        (r.effective_from or datetime.min).replace(tzinfo=None),
                     ),
                 )
                 if row is not None:
