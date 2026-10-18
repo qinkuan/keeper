@@ -1372,11 +1372,14 @@ export default function ChatPage({
             // 收尾：把权威内容写进**这一轮所属会话**的消息列表（用服务端的 message_id），
             // 随后 finally 删桶。这里写的是 bucket 而不是「当前视图」，所以用户中途
             // 切去别的会话也只会写进正确的那个桶——串会话在结构上就不可能发生了。
+            const resolvedId = resp.message_id || placeholderId;
             updateMsgs(bucket, (prev) => [
-              ...prev.filter((m) => m.id !== placeholderId),
+              // 双键去重：占位 id（本地流式气泡）与服务端 message_id（loadMessages
+              // 偶发抢先把这一轮拉回来时带的那个）都要排掉，否则会留下两条相同助手回复。
+              ...prev.filter((m) => m.id !== placeholderId && m.id !== resolvedId),
               {
                 ...assistantMsg,
-                id: resp.message_id || placeholderId,
+                id: resolvedId,
                 // 被用户叫停时：保留已生成的那部分（后端答案可能为空，用前端累积的补上）
                 text: resp.canceled
                   ? resp.answer || acc || "（已停止生成）"
@@ -1420,11 +1423,12 @@ export default function ChatPage({
           localStorage.setItem(sessionKey(agentId, sessionKind), resp.session_id);
           loadWorkspace(resp.session_id);
         }
+        const resolvedId = resp.message_id || placeholderId;
         updateMsgs(bucket, (prev) => [
-            ...prev.filter((m) => m.id !== placeholderId),
+            ...prev.filter((m) => m.id !== placeholderId && m.id !== resolvedId),
             {
               ...assistantMsg,
-              id: resp.message_id || placeholderId,
+              id: resolvedId,
               text: resp.answer || "没有拿到回答，请换个问法或稍后重试。",
               llm: resp.llm,
               steps: resp.steps,
@@ -1466,9 +1470,19 @@ export default function ChatPage({
       });
       // 补回用户消息：这一轮被 loadMessages 刷掉过（切走过）就得重新放回去，否则用户会
       // 看到自己刚发的那句话凭空消失。写的是 bucket，不会跑到别的会话去。
-      updateMsgs(bucket, (prev) =>
-        prev.some((m) => m.id === userMsg.id) ? prev : [...prev, userMsg]
-      );
+      //
+      // 按「同内容 user」判断而非前端临时 id：loadMessages 已用**后端 id** 把同一条 user
+      // 拉回来时，若只比对前端 id 会判成「缺失」又插一份前端 user，于是同一条提问出现
+      // 两个气泡。按内容判则后端已回灌的那条会被认出来，不再重复插入。
+      updateMsgs(bucket, (prev) => {
+        const hasUser = prev.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === userMsg.id ||
+              (m.text ?? "") === (userMsg.text ?? ""))
+        );
+        return hasUser ? prev : [...prev, userMsg];
+      });
       // 附件跟着清：它们已经随这一轮发出去了，留着会被下一轮误带上。
       // （失败路径也清——附件是独立上传的，file_id 已经拿到，重发时重新选一次
       //  比让一个来路不明的旧附件混进下一轮更可预期。）
