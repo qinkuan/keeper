@@ -320,6 +320,8 @@ async function readPage(tabId, payload) {
     // eval 走 new Function，所以用户可以照旧写 return {...}，不必改成表达式
     script: op === "eval" ? String(payload.script || "") : "",
     selector: op === "text" ? String(payload.selector || "") : "",
+    // 总结场景：让页面侧按块过滤掉小于阈值的碎片（导航/按钮等噪声）
+    minNodeChars: op === "text" ? (Number(payload.min_node_chars) || 0) : 0,
   };
 
   const out = await chrome.scripting.executeScript({
@@ -333,10 +335,16 @@ async function readPage(tabId, payload) {
         }
         const el = a.selector ? document.querySelector(a.selector) : null;
         const node = el || document.body || document.documentElement;
-        return Object.assign(head, {
-          value: (node ? node.innerText : "") || "",
-          ok: true,
-        });
+        let value = (node ? node.innerText : "") || "";
+        // 总结场景：按块切分，丢弃字符数小于阈值的碎片，再拼回。0 表示不过滤。
+        if (a.minNodeChars > 0) {
+          value = value
+            .split(/\n+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length > a.minNodeChars)
+            .join("\n\n");
+        }
+        return Object.assign(head, { value, ok: true });
       } catch (e) {
         // 用户脚本写错不该连累「抓文字」——带上错误原文退回内核，好过静默失败
         return Object.assign(head, { value: null, ok: false,

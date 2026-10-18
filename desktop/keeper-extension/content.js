@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1101r";
+  const BUILD = "1101x";
 
   // ---------- 页面身份（cid）----------
   //
@@ -406,7 +406,7 @@
     '  <div class="k-sec">功能</div>',
     '  <div class="k-bar">',
     '    <button class="k-b" id="bTrans">翻译</button>',
-    '    <button class="k-b" id="bText">抓文字</button>',
+    '    <button class="k-b" id="bSum">总结页面</button>',
     '    <button class="k-b" id="bShot">截图</button>',
     '    <button class="k-b" id="bRegion">框选</button>',
     /* 状态文字跟着按钮走，空闲时为空。**不要**再单独开一行放它——
@@ -583,7 +583,7 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bText = $("bText"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans");
+  const bSum = $("bSum"), bShot = $("bShot"), bRegion = $("bRegion"), bTrans = $("bTrans");
   // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
   // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
   const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
@@ -1575,8 +1575,6 @@
   let linkTimer = null;
   const stopLinkPoll = () => { if (linkTimer) { clearInterval(linkTimer); linkTimer = null; } };
 
-  // 抓到的文字放这里，供「复制」用（放闭包里，不挂 window，免得被页面脚本读到）
-  let lastText = "";
   const idle = (s) => { title.textContent = s; };
 
   const setOut = (node, hint) => {
@@ -1585,9 +1583,10 @@
   };
 
   const busy = async (btn, label, fn) => {
-    const btns = [bText, bShot];
+    const btns = [bSum, bShot, bRegion, bTrans];
     btns.forEach((x) => (x.disabled = true));
     const old = btn.textContent;
+    const oldTitle = title.textContent;
     btn.textContent = "…";
     title.textContent = label;
     try {
@@ -1598,48 +1597,58 @@
     } finally {
       btns.forEach((x) => (x.disabled = false));
       btn.textContent = old;
+      // 处理器若自行改写了状态条（如截图后的「已添加截图」）就保留；
+      // 否则把 busy 占用的「正在…」还原，避免提示符卡住不消失。
+      if (title.textContent === label) title.textContent = oldTitle;
     }
   };
 
-  // ---------- 抓文字 ----------
-  bText.addEventListener("click", () =>
-    busy(bText, "正在抓文字…", async () => {
-      const r = await send({ op: "text", max_chars: 20000 });
-      lastText = r.text || "";
-      idle(r.title ? r.title + " · " + r.full_chars + " 字" : r.full_chars + " 字");
-      const pre = document.createElement("div");
-      pre.textContent = r.text || "（这一页没有可提取的文字）";
-      setOut(pre);
-      if (r.truncated) {
-        const n = document.createElement("div");
-        n.className = "k-hint";
-        n.textContent = "已截断，共 " + r.full_chars + " 字";
-        out.appendChild(n);
+  // ---------- 总结页面 ----------
+  // 抓整页正文，按设置里的「节点字符数 >」阈值过滤掉小碎片（导航/按钮等噪声），
+  // 把过滤后的正文塞进输入框，再追加总结提示并直接发送。
+  bSum.addEventListener("click", () =>
+    busy(bSum, "正在总结中", async () => {
+      const r = await send({ op: "text", max_chars: 200000, min_node_chars: cfg.minChars });
+      const pageText = (r && r.text) || "";
+      if (!pageText.trim()) {
+        idle("这一页没有可提取的正文");
+        return;
       }
+      const sentence = "请简要总结上述网页内容";
+      let v = qbox.value;
+      // 去掉已存在的同类提示，避免重复累加
+      v = v.replace(/请简要总结上述网页内容[^\n]*\n?/g, "").replace(/\s+$/, "");
+      v += (v.length ? "\n\n" : "") + pageText + "\n\n" + sentence;
+      qbox.value = v;
+      syncHighlight();
+      qbox.focus();
+      await doAsk();   // 追加提示后直接发送；结果回来后 busy 自动收起「正在总结中」
     })
   );
 
   // ---------- 翻译 ----------
   // 先确认有可翻译的东西（输入框内容或附件里的截图），都没有就提示；
   // 否则在内容尾部追加一句「把上述内容翻译成 xx」，xx 用系统语言显示设置里的目标语言。
-  bTrans.addEventListener("click", () => {
-    const hasText = qbox.value.trim().length > 0;
-    const hasFile = pendingAttachments.length > 0;
-    if (!hasText && !hasFile) {
-      idle("请输入内容或截图");
-      return;
-    }
-    const langName = sysLangName(cfg.lang.code);
-    const sentence = "把上述内容翻译成" + langName;
-    let v = qbox.value;
-    // 去掉已存在的同类提示（含旧语言），避免重复累加或语言不一致
-    v = v.replace(/把上述内容翻译成[^\n]*\n?/g, "").replace(/\s+$/, "");
-    v += (v.length ? "\n" : "") + sentence;
-    qbox.value = v;
-    syncHighlight();
-    qbox.focus();
-    doAsk();   // 追加翻译提示后直接发送
-  });
+  bTrans.addEventListener("click", () =>
+    busy(bTrans, "正在翻译中", async () => {
+      const hasText = qbox.value.trim().length > 0;
+      const hasFile = pendingAttachments.length > 0;
+      if (!hasText && !hasFile) {
+        idle("请输入内容或截图");
+        return;
+      }
+      const langName = sysLangName(cfg.lang.code);
+      const sentence = "把上述内容翻译成" + langName;
+      let v = qbox.value;
+      // 去掉已存在的同类提示（含旧语言），避免重复累加或语言不一致
+      v = v.replace(/把上述内容翻译成[^\n]*\n?/g, "").replace(/\s+$/, "");
+      v += (v.length ? "\n" : "") + sentence;
+      qbox.value = v;
+      syncHighlight();
+      qbox.focus();
+      await doAsk();   // 追加翻译提示后直接发送；结果回来后 busy 自动收起「正在翻译中」
+    })
+  );
 
   // ---------- 截图 ----------
   bShot.addEventListener("click", () =>
