@@ -425,6 +425,21 @@ function parseCode(raw) {
   return null;
 }
 
+// 快捷键截图：Ctrl+K → 通知当前活动标签页的内容脚本进入框选。
+// 与「截图」按钮（整块可见区）并存：这条是新增的「框选」通道。
+chrome.commands &&
+  chrome.commands.onCommand.addListener((command) => {
+    if (command !== "region-screenshot") return;
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (tab && tab.id != null) {
+        chrome.tabs
+          .sendMessage(tab.id, { type: "keeper:region-shot" })
+          .catch(() => {});
+      }
+    });
+  });
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // 用户在浮球面板粘了连接码：解析 → 存 → 立刻用新配置重连。
   //
@@ -540,11 +555,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   /* 先就地取数再转发：内核拿到 page_data 就不再需要去浏览器里"找"这一页。
      注意 payload 是**拷贝**——直接改 msg.payload 会在 content script 重用同一个
      对象时留下上一次的数据。 */
+  const afterAttach = () => {
+    /* 截图（op:"shot"）是纯客户端行为：data_url 已由 attachPageData 用
+       captureVisibleTab 抓好、塞进 payload.page_data。内核没有截图能力，再把请求
+       转给它只会拿到空/错误响应——而 content script 那边读的是 r.data_url，于是
+       整条截图链路静默失败。所以这里直接把 page_data 回传，不走内核。
+       text / eval 仍需要内核处理，照旧往下转发。 */
+    if (payload.op === "shot" && payload.self_served && payload.page_data && payload.page_data.data_url) {
+      sendResponse({ ok: true, result: payload.page_data });
+      return;
+    }
+    request(payload)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+  };
   attachPageData(tabId, payload)
-    .catch(() => {})// 取不到不是错误，交给内核老路
-    .then(() => request(payload))
-    .then((result) => sendResponse({ ok: true, result }))
-    .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    .catch(() => {})  // 取不到不是错误，交给内核老路
+    .then(afterAttach);
   return true;   // 异步响应
 });
 

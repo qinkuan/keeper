@@ -27,7 +27,7 @@
   /* 改动这个值 → hover 浮球时 title 尾部就变了，用来确认"跑的到底是不是最新
      代码"。改 content.js 后**不重载扩展 + 不刷新网页**的话，这里永远显示旧值——
      MV3 的 content script 只在页面加载时注入，这是最常见的"我明明改了怎么没变"。 */
-  const BUILD = "1101b";
+  const BUILD = "1101m";
 
   // ---------- 页面身份（cid）----------
   //
@@ -307,6 +307,11 @@
     "  word-break:break-word;user-select:text;max-height:240px;overflow:auto;",
     "  flex:0 0 auto}",
     ".k-askout.k-wait{color:#9aa0a6}",
+    ".k-aoh{display:flex;align-items:center;gap:6px;margin:6px 10px 0;padding:4px 8px;",
+    "  font-size:11.5px;color:#9aa0a6;cursor:pointer;user-select:none;",
+    "  border-radius:8px 8px 0 0;background:rgba(255,255,255,.03)}",
+    ".k-aoh:hover{color:#c8ccd0}",
+    ".k-askout.k-fold{display:none}",
     // ---- 附件（图片）chip ----
     ".k-atts{display:flex;flex-wrap:wrap;gap:5px;padding:0 10px 6px}",
     ".k-atts:empty{display:none}",
@@ -322,6 +327,18 @@
     ".k-atch .k-x:hover{background:rgba(242,139,130,.3);color:#f28b82}",
     /* 拖文件悬停在面板上：整块描边高亮，和对话输入框一个味。 */
     ".k-panel.k-drag{box-shadow:0 0 0 2px rgba(138,180,248,.7),0 12px 40px rgba(0,0,0,.4)}",
+    // ---- 区域截图（Ctrl+K）：蒙版 / 选区 / 结果操作条 ----
+    ".k-rshot{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.35);",
+    "  cursor:crosshair;user-select:none}",
+    ".k-rsel{position:absolute;border:1px solid #8ab4f8;",
+    "  background:rgba(138,180,248,.12);box-shadow:0 0 0 1px rgba(0,0,0,.45)}",
+    ".k-rhint{position:fixed;top:14px;left:50%;transform:translateX(-50%);",
+    "  color:#fff;font-size:13px;background:rgba(0,0,0,.6);padding:6px 12px;",
+    "  border-radius:6px;pointer-events:none}",
+    ".k-shotimg{display:block;max-width:100%;max-height:240px;border-radius:8px;",
+    "  border:1px solid rgba(255,255,255,.12);margin:2px 0}",
+    ".k-actbar{display:flex;flex-wrap:wrap;gap:6px;padding:8px 0 2px}",
+    ".k-b.k-sm{font-size:11px;padding:4px 8px}",
     "</style>",
     '<div class="k-panel" id="p">',
     '  <div class="k-link">',
@@ -356,27 +373,36 @@
     '    </div>',
     '    <button class="k-go k-primary" id="go" type="button">发送</button>',
     '  </div>',
-    '  <div class="k-askmeta">',
-    '    <span class="k-sel" id="sel">未选中文字</span>',
-    "  </div>",
+    '  <div class="k-aoh" id="aoh" hidden>响应消息 <span class="k-aot">▾</span></div>',
     '  <div class="k-askout" id="ao" hidden></div>',
-    '  <div class="k-sec">抓取</div>',
+    '  <div class="k-sec">功能</div>',
     '  <div class="k-bar">',
-    '    <button class="k-b k-primary" id="bText">抓文字</button>',
+    '    <button class="k-b" id="bText">抓文字</button>',
     '    <button class="k-b" id="bShot">截图</button>',
-    '    <button class="k-b" id="bEval">取标题/正文</button>',
-    '    <button class="k-b" id="bCopy" disabled>复制</button>',
+    '    <button class="k-b" id="bRegion">框选</button>',
     /* 状态文字跟着按钮走，空闲时为空。**不要**再单独开一行放它——
        面板的垂直空间每一像素都在跟按钮抢，而"就绪"这类没有任何信息量的占位
        会让人以为面板还没准备好。只有真的有动作在进行或刚结束时才显示。 */
     '    <span class="k-title" id="t"></span>',
     "  </div>",
-    '  <div class="k-out" id="o"><span class="k-hint" id="h">',
-    "    点上面的按钮抓这一页；抓到的文字可以直接选中复制。",
-    "  </span></div>",
+    '  <div class="k-out" id="o"></div>',
     "</div>",
     '    <div class="k-ball" id="b">K</div>',
   ].join("\n");
+
+  // 区域截图蒙版是挂到主文档（documentElement）的，不在 shadow 内，而上面那套样式
+  // 写在 shadow 的 <style> 里、够不到主文档元素。这里再往主文档注入一份蒙版样式，
+  // 否则 ov 是个没样式的 0 尺寸 div —— data_url 有值、浮球也藏了，蒙版（十字光标）
+  // 却死活不出现。结果图（#o 里）用的 .k-shotimg/.k-actbar 等仍在 shadow 内，不受影响。
+  const ovStyle = document.createElement("style");
+  ovStyle.textContent =
+    ".k-rshot{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.35);" +
+    "cursor:crosshair;user-select:none}" +
+    ".k-rsel{position:absolute;border:1px solid #8ab4f8;" +
+    "background:rgba(138,180,248,.12);box-shadow:0 0 0 1px rgba(0,0,0,.45)}" +
+    ".k-rhint{position:fixed;top:14px;left:50%;transform:translateX(-50%);" +
+    "color:#fff;font-size:13px;background:rgba(0,0,0,.6);padding:6px 12px;" +
+    "border-radius:6px;pointer-events:none}";
 
   // ---------- 挂载 ----------
   //
@@ -388,13 +414,14 @@
   // 样式，也不受页面 CSP 约束（DOM 注入不是脚本注入）。
   const mount = () => {
     const de = document.documentElement;
-    if (!de || de.contains(host)) return true;
+    if (!de) return false;
     try {
-      de.appendChild(host);
-      return true;
+      if (!de.contains(host)) de.appendChild(host);
+      if (!de.contains(ovStyle)) de.appendChild(ovStyle);
     } catch (e) {
       return false;
     }
+    return true;
   };
 
   if (!mount()) {
@@ -515,10 +542,24 @@
   const panel = $("p"), ball = $("b"), out = $("o"), title = $("t");
   // hover 浮球看 title 尾部就能确认跑的是不是最新代码
   ball.title = "keeper·" + BUILD;
-  const bText = $("bText"), bShot = $("bShot"), bEval = $("bEval"), bCopy = $("bCopy");
+  const bText = $("bText"), bShot = $("bShot"), bRegion = $("bRegion");
+  // 「框选」按钮 hover 时展示快捷键：Mac 上 Chrome 会把 manifest 里的 Ctrl+K 自动
+  // 当成 ⌘K，所以按系统区分显示，免得 Mac 用户看到 Ctrl+K 却得按 ⌘K 的困惑。
+  const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || "");
+  bRegion.title = "区域截图（拖拽框选） · " + (IS_MAC ? "⌘K" : "Ctrl+K");
   const ldot = $("ld"), lurl = $("lu"), lbtn = $("lb");
   const qbox = $("q"), goBtn = $("go"), pickBar = $("pick"),
-        selTip = $("sel"), askOut = $("ao"), qhl = $("qhl");
+        askOut = $("ao"), qhl = $("qhl");
+  // 响应消息区可收缩：面板关闭时自动收起，收到/拉取到新消息时自动展开。
+  const aoh = $("aoh");
+  let aoFold = false;
+  const applyAo = () => {
+    aoh.hidden = askOut.hidden;
+    askOut.classList.toggle("k-fold", aoFold);
+    const ar = aoh.querySelector(".k-aot");
+    if (ar) ar.textContent = aoFold ? "▸" : "▾";
+  };
+  aoh.addEventListener("click", () => { aoFold = !aoFold; applyAo(); });
   mark("ask", "idle");
 
   /* ---------- 对这一页提问 ----------
@@ -598,13 +639,51 @@
     try { qbox.setSelectionRange(qbox.value.length, qbox.value.length); } catch (e) { }
   };
 
+  /** 把输入框里所有引用占位按 quotedList 的顺序重新编号（1,2,3…）。
+   *  删除某条后调用：quotedList 已 splice，重排 token 序号让显示与数据对齐。 */
+  const renderQuotes = () => {
+    const raw = qbox.value;
+    let i = 1;
+    const next = raw.replace(/【引用(\d+)：[^】]*】/g, () => {
+      const t = quotedList[i - 1];
+      if (t === undefined) return "";
+      const brief = t.slice(0, 5) + (t.length > 5 ? "…" : "");
+      return "【引用" + (i++) + "：" + brief + "】";
+    });
+    if (next !== raw) { qbox.value = next; syncHighlight(); }
+  };
+
+  /** 退格/Delete 紧贴某个引用占位时，一次性删掉整块（含 quotedList 里那条），
+   *  而不是逐字符退。光标在 token 末尾按退格、在开头按 Delete、或直接选中
+   *  整个 token 再删，都会触发整块删除。 */
+  const onQuoteKey = (e) => {
+    if (e.key !== "Backspace" && e.key !== "Delete") return;
+    const val = qbox.value;
+    const s = qbox.selectionStart, en = qbox.selectionEnd;
+    let mStart = -1, mEnd = -1, mText = "";
+    if (s !== en) {
+      const mm = val.slice(s, en).match(/^【引用(\d+)：[^】]*】$/);
+      if (mm) { mStart = s; mEnd = en; mText = mm[1]; if (val[mEnd] === " ") mEnd++; }
+    } else if (e.key === "Backspace") {
+      // token 后常带一个空格，一并吃掉
+      const mm = val.slice(0, s).match(/【引用(\d+)：[^】]*】\s*$/);
+      if (mm) { mStart = s - mm[0].length; mEnd = s; mText = mm[1]; }
+    } else {
+      const mm = val.slice(s).match(/^【引用(\d+)：[^】]*】/);
+      if (mm) { mStart = s; mEnd = s + mm[0].length; mText = mm[1]; if (val[mEnd] === " ") mEnd++; }
+    }
+    if (mStart < 0) return;
+    e.preventDefault();
+    const n = parseInt(mText, 10);
+    qbox.value = val.slice(0, mStart) + val.slice(mEnd);
+    if (n >= 1 && n <= quotedList.length) quotedList.splice(n - 1, 1);
+    renderQuotes();
+    try { qbox.setSelectionRange(mStart, mStart); } catch (e2) {}
+    syncHighlight();
+  };
+
   const paintSelection = () => {
     const s = currentSelection();
-    const n = s.length;
-    selTip.textContent = n
-      ? "已选中 " + n + " 字" + (n >= SEL_LIMIT ? "（已截断）" : "")
-      : "未选中文字 · agent 看不到本页";
-    selTip.className = "k-sel" + (n ? " k-has" : "");
     return s;
   };
 
@@ -820,6 +899,7 @@
       shownMsgId = "";
       setAskOut("");
       askOut.hidden = true;
+      applyAo();
       fetchLatest();
     });
     pickBar.appendChild(b);
@@ -948,6 +1028,7 @@
     askOut.textContent = text;
     askOut.className = "k-askout" + (cls ? " " + cls : "");
     askOut.hidden = false;
+    aoFold = false; applyAo();   // 收到/拉取到消息即自动展开响应区
     /* 报错那几行都以「⚠ 」开头，让它们一键可复制。正常回答**不加**：
        那里用户常要的是自己拖选其中一段，整段复制反而抢了他的动作。
        （出错时他要的是"把这个报错发给对方"，所以整段正是他想要的。）
@@ -1184,6 +1265,8 @@
      窗口尺寸变化会改变换行位置，也要跟着重排。
      （高亮层是"输入框内容的影子"，凡是能改变它渲染结果的事都得同步一次。） */
   qbox.addEventListener("input", syncHighlight);
+  // 退格/Delete 紧贴引用占位时整块删（见 onQuoteKey）
+  qbox.addEventListener("keydown", onQuoteKey);
   qbox.addEventListener("scroll", () => { qhl.scrollTop = qbox.scrollTop; });
   window.addEventListener("resize", syncHighlight);
   syncHighlight();
@@ -1210,11 +1293,19 @@
      而选择器还停在那条已不存在的 id 上——不更新的话用户会以为消息进了
      他指定的地方。 */
   chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg || msg.type !== "keeper:note" || !msg.note) return;
-    const n = msg.note;
-    if (n.event === "accepted") {
-      mark("askAccepted", n.session_id || "");
-      if (n.session_id && n.session_id !== chosenSess) loadSessions();
+    if (!msg || !msg.type) return;
+    if (msg.type === "keeper:note") {
+      if (!msg.note) return;
+      const n = msg.note;
+      if (n.event === "accepted") {
+        mark("askAccepted", n.session_id || "");
+        if (n.session_id && n.session_id !== chosenSess) loadSessions();
+      }
+      return;
+    }
+    if (msg.type === "keeper:region-shot") {
+      // 快捷键 Ctrl+K 触发的框选截图
+      void startRegionShot();
     }
   });
 
@@ -1451,7 +1542,7 @@
   };
 
   const busy = async (btn, label, fn) => {
-    const btns = [bText, bShot, bEval];
+    const btns = [bText, bShot];
     btns.forEach((x) => (x.disabled = true));
     const old = btn.textContent;
     btn.textContent = "…";
@@ -1482,7 +1573,6 @@
         n.textContent = "已截断，共 " + r.full_chars + " 字";
         out.appendChild(n);
       }
-      bCopy.disabled = !lastText;
     })
   );
 
@@ -1490,47 +1580,172 @@
   bShot.addEventListener("click", () =>
     busy(bShot, "正在截图…", async () => {
       const r = await send({ op: "shot", full_page: false, quality: 70 });
-      const img = document.createElement("img");
-      img.src = r.data_url;
-      setOut(img);
-      idle(r.title || "截图");
+      // 不再在底部展示截图：直接作为附件加进对话框，避免重复显示。
+      pendingAttachments.push({ name: "截图.png", dataUrl: r.data_url });
+      renderAttachments();
+      qbox.focus();
+      idle(r.title || "已添加截图");
     })
   );
 
-  // ---------- 标题 / 正文（evaluate 通道）----------
-  bEval.addEventListener("click", () =>
-    busy(bEval, "正在读…", async () => {
-      const r = await send({ op: "eval" });
-      lastText = JSON.stringify(r.value, null, 2);
-      const pre = document.createElement("div");
-      pre.textContent = lastText;
-      setOut(pre);
-      bCopy.disabled = false;
-      idle("evaluate");
-    })
-  );
-
-  // ---------- 复制 ----------
-  bCopy.addEventListener("click", async () => {
-    if (!lastText) return;
-    try {
-      await navigator.clipboard.writeText(lastText);
-      idle("已复制");
-    } catch (e) {
-      // 非 https / 无权限时 clipboard API 会失败，退回 execCommand
-      const ta = document.createElement("textarea");
-      ta.value = lastText;
-      ta.style.cssText = "position:fixed;opacity:0";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      ta.remove();
-      idle(ok ? "已复制" : "复制失败，请手动选中");
-    }
+  // ---------- 框选截图（与 Ctrl+K 同一条通道）----------
+  // 不想记快捷键的人点这个也行：直接走 startRegionShot，体验一致。
+  bRegion.addEventListener("click", () => {
+    void startRegionShot();
   });
+
+
+  // ---------- 区域截图（Ctrl+K / 面板「框选」按钮）----------
+  // 与「截图」按钮（整块可见区）并存：这条是**框选**通道，体验和市场截图工具一致。
+  // 流程：captureVisibleTab 抓整块可见区 → 页面蒙版上框选 → 松手裁剪 →
+  // 在面板里显示裁剪结果（默认已加入对话框，无需按钮）。
+
+  // 框选期间临时隐藏浮球，记住原 display 值，确认/取消时恢复。
+  let regionPrev = "";
+
+  const showShotResult = (cropUrl) => {
+    host.style.display = regionPrev;   // 框选结束，恢复浮球/面板
+    // 选区松手后**默认直接把图加进对话框**（复用 pendingAttachments，与拖放/粘贴
+    // 图片同一链路），无需任何按钮；底部不再展示截图，避免重复显示。
+    pendingAttachments.push({ name: "截图.png", dataUrl: cropUrl });
+    renderAttachments();
+    qbox.focus();
+    idle("图片已加入对话框");
+    // 截完把面板亮出来，否则用户看不到结果
+    panel.classList.add("k-open");
+  };
+
+  const showRegionSelector = (fullImg) => {
+    // captureVisibleTab 抓的是「可见视口」，蒙版也只盖视口；坐标系直接用
+    // clientX/Y，无需考虑页面滚动。缩放比把 CSS 像素换算成截图的设备像素。
+    const scaleX = fullImg.naturalWidth / window.innerWidth;
+    const scaleY = fullImg.naturalHeight / window.innerHeight;
+
+    const ov = document.createElement("div");
+    ov.className = "k-rshot";
+    const hint = document.createElement("div");
+    hint.className = "k-rhint";
+    hint.textContent = "拖拽框选区域 · Esc 取消";
+    const sel = document.createElement("div");
+    sel.className = "k-rsel";
+    ov.appendChild(sel);
+    ov.appendChild(hint);
+    // 蒙版挂到 documentElement，跟浮球 host 分开，免得受 host.display 牵连。
+    document.documentElement.appendChild(ov);
+
+    let x0 = 0, y0 = 0, dragging = false;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const cleanup = () => {
+      ov.removeEventListener("mousedown", onDown);
+      ov.removeEventListener("mousemove", onMove);
+      ov.removeEventListener("mouseup", finish);
+      document.removeEventListener("keydown", onKey);
+    };
+    const onDown = (e) => {
+      e.preventDefault();
+      dragging = true;
+      x0 = e.clientX;
+      y0 = e.clientY;
+      sel.style.left = x0 + "px";
+      sel.style.top = y0 + "px";
+      sel.style.width = "0px";
+      sel.style.height = "0px";
+    };
+    const onMove = (e) => {
+      if (!dragging) return;
+      const x1 = clamp(e.clientX, 0, window.innerWidth);
+      const y1 = clamp(e.clientY, 0, window.innerHeight);
+      const left = Math.min(x0, x1);
+      const top = Math.min(y0, y1);
+      sel.style.left = left + "px";
+      sel.style.top = top + "px";
+      sel.style.width = Math.abs(x1 - x0) + "px";
+      sel.style.height = Math.abs(y1 - y0) + "px";
+    };
+    const finish = () => {
+      if (!dragging) return;
+      dragging = false;
+      const r = sel.getBoundingClientRect();
+      cleanup();
+      const w = Math.round(r.width * scaleX);
+      const h = Math.round(r.height * scaleY);
+      if (w < 5 || h < 5) { ov.remove(); host.style.display = regionPrev; return; } // 没框选 = 取消
+      const sx = Math.round(r.left * scaleX);
+      const sy = Math.round(r.top * scaleY);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      c.getContext("2d").drawImage(fullImg, sx, sy, w, h, 0, 0, w, h);
+      ov.remove();
+      showShotResult(c.toDataURL("image/png"));
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        dragging = false;
+        cleanup();
+        ov.remove();
+        host.style.display = regionPrev;
+      }
+    };
+    ov.addEventListener("mousedown", onDown);
+    ov.addEventListener("mousemove", onMove);
+    ov.addEventListener("mouseup", finish);
+    document.addEventListener("keydown", onKey);
+  };
+
+  const startRegionShot = async () => {
+    // 先抓整块可见区（此时浮球还可见）。关键点：不能先藏浮球再抓——
+    // 实测 captureVisibleTab 在浮球被 display:none 之后抓不到图，full 会变成
+    // undefined，于是蒙版永远不出现（控制台会打印「shot 返回 =」后面为空）。
+    // 所以等拿到截图再藏浮球；而框选蒙版 z-index 顶到最高，本就盖在浮球之上，
+    // 框选期间浮球看不见也点不到，藏不藏都不影响体验。
+    let full;
+    try {
+      full = await send({ op: "shot", full_page: false, quality: 80 });
+    } catch (e) {
+      console.warn("[keeper] 区域截图：send 抛错", e);
+      const d = document.createElement("div");
+      d.textContent = "截图失败：" + explain(e);
+      setOut(d);
+      return;
+    }
+    // 诊断：把原始返回打出来，正常应为带 data_url 的对象；若后面为空说明 captureVisibleTab 没返回图。
+    console.warn("[keeper] 区域截图：shot 返回 =", full);
+    if (!full || !full.data_url) {
+      const d = document.createElement("div");
+      d.textContent =
+        "截图返回为空（多半是扩展没重载到新版 background，或当前页受限）。原始返回：" +
+        JSON.stringify(full);
+      setOut(d);
+      return;
+    }
+    // 抓到图了，再藏浮球，避免它出现在裁剪结果里、也避免它浮在蒙版之上。
+    regionPrev = host.style.display;
+    host.style.display = "none";
+    const img = new Image();
+    img.onload = () => {
+      try {
+        showRegionSelector(img);
+      } catch (e) {
+        host.style.display = regionPrev;
+        console.warn("[keeper] 区域截图：showRegionSelector 抛错", e);
+        const d = document.createElement("div");
+        d.textContent = "框选界面出错：" + explain(e);
+        setOut(d);
+      }
+    };
+    img.onerror = () => {
+      host.style.display = regionPrev;
+      const d = document.createElement("div");
+      d.textContent = "截图加载失败";
+      setOut(d);
+    };
+    img.src = full.data_url;
+  };
 
   $("x").addEventListener("click", () => {
     panel.classList.remove("k-open");
+    aoFold = true; applyAo();   // 面板关闭时同步收起响应消息区
     // 收起即停：面板看不见了还每 4 秒问一次，等于白白把 service worker 吊着不睡
     stopLinkPoll();
   });
@@ -1602,9 +1817,25 @@
       loadSessions().then(fetchLatest);
     } else {
       stopLinkPoll();
+      aoFold = true; applyAo();   // 收起时同步收起响应消息区
       // 面板看不见了，"还在跑"的轮询也就没有意义——继续问只是在打扰内核
       if (latestTimer) { clearTimeout(latestTimer); latestTimer = null; }
     }
+  });
+
+  // 点击面板（浮球）之外的页面区域，关闭面板。浮球与面板都挂在 shadow host 内，
+  // 普通 host.contains 对 shadow 内部点击会失效，所以用 composedPath 判断点击
+  // 是否落在 host 里：落在里面（不管面板还是浮球）都不关，落在外面才关。
+  document.addEventListener("click", (e) => {
+    if (!panel.classList.contains("k-open")) return;
+    if (e.composedPath().includes(host)) return;
+    // 正在/刚做完文本选区时不关面板：拖选结束会冒出一个 click，若直接关会让
+    // 「在页面上选一段文字」的体验变成面板凭空消失。有非空选区就放过这次点击。
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+    panel.classList.remove("k-open");
+    aoFold = true; applyAo();   // 同步收起响应消息区
+    stopLinkPoll();
   });
 
   // 这里**刻意没有** pagehide 时把 host 删掉：

@@ -8,6 +8,13 @@
   "permissions": ["storage", "tabs", "scripting", "activeTab", "alarms"],
   "host_permissions": ["<all_urls>"],
 
+  "commands": {
+    "region-screenshot": {
+      "suggested_key": { "default": "Ctrl+K" },
+      "description": "区域截图（框选）"
+    }
+  },
+
   "background": {
     "service_worker": "background.js"
   },
