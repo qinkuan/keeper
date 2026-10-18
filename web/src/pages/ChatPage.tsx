@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { DragEvent } from "react";
 
 import {
   ArrowUp,
@@ -11,6 +12,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  UploadCloud,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { X } from "lucide-react";
@@ -233,6 +235,10 @@ export default function ChatPage({
   const [pendingFiles, setPendingFiles] = useState<Attachment[]>([]);
   /** 附件上传中：按钮转圈，并挡住重复点击（同一次会话只让一个在上传） */
   const [uploading, setUploading] = useState(false);
+  /** 整块聊天面板是否正处于「拖文件悬停」态（用于显示高亮遮罩） */
+  const [isDragging, setIsDragging] = useState(false);
+  /** 拖放计数器：子元素会反复触发 dragenter/leave，用计数归零判断真正离开面板 */
+  const dragCounterRef = useRef(0);
   /**
    * 正在流式跑着的会话，**按 sessionId 分桶**。
    *
@@ -1168,9 +1174,16 @@ export default function ChatPage({
    */
   const addFiles = async (files: FileList | null) => {
     if (!files || !files.length || uploading) return;
+    // 拖放/粘贴会绕过文件选择器的 accept 限制，这里按同一白名单兜底拦截，
+    // 否则用户拖个 .pdf 进来，后端不支持时才会报错，体验差一截。
+    const ACCEPTED = ["image/png", "image/jpeg", "image/gif", "image/webp"];
     setUploading(true);
     try {
       for (const f of Array.from(files)) {
+        if (!ACCEPTED.includes(f.type)) {
+          toast.error(`仅支持图片（png/jpg/gif/webp）：${f.name}`);
+          continue;
+        }
         const { attachment, session_id } = await apiUploadAttachment(
           agentId,
           activeSessionId || "new",
@@ -1203,6 +1216,39 @@ export default function ChatPage({
    * 于是删 B 结果 A 的占位消失了——而 A 还在待发送列表里，用户完全看不出问题。
    * 索引删则占位的第几段与列表的第几条严格对应。
    */
+  // 整块聊天面板都是文件投放区：拖拽悬停时高亮，松手即添加附件。
+  const dragHasFiles = (e: DragEvent) =>
+    Array.from(e.dataTransfer.types).includes("Files");
+
+  const onPanelDragEnter = (e: DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    setIsDragging(true);
+  };
+  const onPanelDragOver = (e: DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onPanelDragLeave = (e: DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+    }
+  };
+  const onPanelDrop = (e: DragEvent) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+    const dropped = e.dataTransfer.files;
+    if (dropped && dropped.length) void addFiles(dropped);
+  };
+
   const removeFile = (index: number) => {
     // 占位文本已不进输入框，附件只存在于 pendingFiles；整块删即可，无需再清文本。
     setPendingFiles((prev) => prev.filter((_, i) => i !== index));
@@ -1609,7 +1655,13 @@ export default function ChatPage({
 
   // 聊天列：消息流 + 输入框（两种模式共用，外层容器不同；工作空间已移到顶栏）
   const chatInner = (
-    <>
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      onDragEnter={onPanelDragEnter}
+      onDragOver={onPanelDragOver}
+      onDragLeave={onPanelDragLeave}
+      onDrop={onPanelDrop}
+    >
       {/*
         消息流：纯白底 + 居中单列。
 
@@ -1777,6 +1829,15 @@ export default function ChatPage({
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   send();
+                }
+              }}
+              onPaste={(e) => {
+                // 粘贴文件 / 截图：拦截掉"图片被塞成 base64 文本"，转为附件上传。
+                // 纯文本粘贴不受影响，照常走 onChange。
+                const pasted = e.clipboardData?.files;
+                if (pasted && pasted.length) {
+                  e.preventDefault();
+                  void addFiles(pasted);
                 }
               }}
             />
@@ -1949,7 +2010,16 @@ export default function ChatPage({
           </p>
         </div>
       </div>
-    </>
+      {/* 拖放文件时的全屏高亮提示：覆盖整块聊天面板 */}
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[18px] border-2 border-dashed border-brand/60 bg-brand/5">
+          <div className="flex items-center gap-2 rounded-full bg-panel/90 px-4 py-2 text-[13px] font-medium text-brand shadow-[0_4px_16px_rgba(0,0,0,0.12)]">
+            <UploadCloud className="h-4 w-4" />
+            松开以添加文件
+          </div>
+        </div>
+      )}
+    </div>
   );
 
   return (
