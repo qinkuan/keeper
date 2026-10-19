@@ -32,7 +32,7 @@ from ..config import (
     load_config,
     save_settings,
 )
-from ..setting import invalidate_caches
+from . import invalidate_caches
 
 router = APIRouter(prefix="/manage/settings", tags=["settings"])
 logger = logging.getLogger(__name__)

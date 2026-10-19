@@ -8,7 +8,7 @@
 
 为什么要有这个脚本
 ------------------
-这份编排曾经被写了两遍（``chat/api.py`` 一份、``api/agent_bridge.py`` 一份），
+这份编排曾经被写了两遍（``chat/api.py`` 一份、``browser/agent_bridge.py`` 一份），
 而且已经因此出过事：浮球那侧把 ``chat.hub.finish`` 的导入名写错，异常在所有
 ``try`` 之外冒到接收循环，把用户的 WebSocket 关掉了——而 SSE 那侧安然无恙。
 **两份代码只有一份会坏，是最坏的组合**：它不报错，只是那条路不通。
@@ -405,7 +405,7 @@ def part_routes() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from keeper.api.agent_bridge import router as bridge_router
+    from keeper.browser.agent_bridge import router as bridge_router
     from keeper.chat import api as capi
     from keeper.agent import keeper as akeeper
 
@@ -436,7 +436,7 @@ def part_routes() -> None:
     capi.resolve_for_chat = lambda agent_id: object()  # type: ignore[assignment]
     akeeper.resolve_core_agent_id = lambda: AGENT_ID  # type: ignore[assignment]
 
-    import keeper.api.agent_bridge as bridge
+    import keeper.browser.agent_bridge as bridge
 
     async def fake_target(agent_id: str, session_id: str) -> str:
         return "SESS-BALL-0001"

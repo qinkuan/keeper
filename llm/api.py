@@ -12,8 +12,8 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from ..llm import build_model
-from ..llm.config import LLMConfig
+from . import build_model
+from .config import LLMConfig
 from datetime import datetime
 
 from ..store import (
@@ -91,7 +91,7 @@ async def _rebuild_agents_using(model_id: str) -> List[Dict[str, Any]]:
     已停用的 agent（本地停用 / 能力被关）跳过——它本来就不在跑，重载它没意义，
     还要重新检查一遍停用状态。``_rebuild_if_enabled`` 已经处理了这种情况。
     """
-    from .agents import _rebuild_if_enabled
+    from ..agent.api import _rebuild_if_enabled
 
     async with get_session_factory()() as session:
         ids = (

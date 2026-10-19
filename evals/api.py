@@ -19,9 +19,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..evals import report as R
-from ..evals.harness import RUNS_ROOT
-from ..evals.spec import CASES_DIR
+from . import report as R
+from .harness import RUNS_ROOT
+from .spec import CASES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ async def list_suites() -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for p in sorted(CASES_DIR.glob("*.yaml")):
         try:
-            from ..evals.spec import load_cases
+            from .spec import load_cases
 
             cases = load_cases(p)
         except Exception as e:  # noqa: BLE001  坏用例集不该让整个列表 500

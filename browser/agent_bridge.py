@@ -48,7 +48,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from ..api import auth as auth_mod
+from ..auth import api as auth_mod
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +483,7 @@ async def _ball_ask(ws: WebSocket, msg: Dict[str, Any]) -> None:
 @router.websocket("/agent-bridge")
 async def agent_bridge(ws: WebSocket) -> None:
     """扩展接入端点。"""
-    from ..browser.agent_browser import submit_extension_job
+    from .agent_browser import submit_extension_job
 
     # 先 accept 再关：直接抛异常的话客户端只看到 "WebSocket connection failed"，
     # 完全看不出是 token 不对。这里至少能带上一句原因。
@@ -618,7 +618,7 @@ async def agent_bridge_info(request: Request) -> Dict[str, Any]:
     ``token`` 为空（命令行形态没配认证）时照常返回，此时内核本身也是裸奔的，
     由 :func:`auth.is_enabled` 告诉界面，可以给出更强的警告文案。
     """
-    from ..browser import extensions as ext_mod
+    from . import extensions as ext_mod
 
     auth_mod.check(request)
 

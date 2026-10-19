@@ -97,15 +97,15 @@ def make_app():
 
     from keeper.chat.api import router as chat_router
     from keeper.chat.api import user_space_router
-    from keeper.api.agents import router as agents_router
-    from keeper.api.models import models_router
-    from keeper.api.metrics import router as metrics_router
-    from keeper.api.auth import check as check_token
+    from keeper.agent.api import router as agents_router
+    from keeper.llm.api import models_router
+    from keeper.observability.api import router as metrics_router
+    from keeper.auth.api import check as check_token
     from keeper.framework.api import router as framework_router
 
     app = FastAPI(title="Keeper")
 
-    # 入站认证：**所有业务路由**都要带 token（理由见 keeper/api/auth.py 的模块文档：
+    # 入站认证：**所有业务路由**都要带 token（理由见 keeper/auth/api.py 的模块文档：
     # CORS 挡不住跨站"发请求"，GET 连预检都不触发，所以裸奔时用户打开的任意网页
     # 就能驱动本机 agent 干活）。
     #
@@ -142,30 +142,30 @@ def make_app():
     # mcp / skill / tool 的定义已统一归 platform 管，keeper 不再提供也不再维护。
     app.include_router(agents_router, dependencies=auth_deps)
     # 插件库（只读：库根路径 + 库里有哪些插件）
-    from keeper.api.plugins import router as plugins_router
+    from keeper.plugin.api import router as plugins_router
 
     app.include_router(plugins_router, dependencies=auth_deps)
     # 模型管理（本地维护的模型预设；agent 通过绑定表引用）
     app.include_router(models_router, dependencies=auth_deps)
     # 会话回收站：已删除会话（软删除）的列表 + 恢复
-    from keeper.api.sessions import router as trash_router
+    from keeper.chat.api import trash_router
 
     app.include_router(trash_router, dependencies=auth_deps)
     # 可观测：用量聚合查询（/metrics/...），数据来自 llm_calls 事实表
     app.include_router(metrics_router, dependencies=auth_deps)
-    # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/api/evals.py）
-    from keeper.api.evals import router as evals_router
+    # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/evals/api.py）
+    from keeper.evals.api import router as evals_router
 
     app.include_router(evals_router, dependencies=auth_deps)
     # 设置：本地可观测 / 调试开关（写回 ~/.keeper/settings.yaml，**不碰**
     # config.yaml —— 元配置只由人手动改，见 keeper/setting/user_settings.py）
-    from keeper.api.settings import router as settings_router
+    from keeper.setting.api import router as settings_router
 
     app.include_router(settings_router, dependencies=auth_deps)
     # framework 环境（~/.keeper/framework 下集中管理的 python / node 运行时）
     app.include_router(framework_router, dependencies=auth_deps)
-    # 内置浏览器抓取（仅桌面形态可用：内核经 CDP 连桌面壳那个浏览器，见 keeper/browser/cdp.py）
-    from keeper.api.browser import router as browser_router
+    # 内置浏览器抓取（仅桌面形态可用：内核经 CDP 连桌面壳那个浏览器，见 keeper/browser/scrape.py）
+    from keeper.browser.scrape import router as browser_router
 
     app.include_router(browser_router, dependencies=auth_deps)
     # A2A 入站：按 agent 路由，每个已装载 agent 各有自己的端点
@@ -175,8 +175,8 @@ def make_app():
     app.include_router(build_a2a_router(), dependencies=auth_deps)
 
     # 扩展 ↔ 内核的桥接（WebSocket）。**不挂 auth_deps**：WebSocket 握手根本不过
-    # HTTP 依赖，它自己校验 Origin + token（见 keeper/api/agent_bridge.py）。
-    from keeper.api.agent_bridge import router as agent_bridge_router
+    # HTTP 依赖，它自己校验 Origin + token（见 keeper/browser/agent_bridge.py）。
+    from keeper.browser.agent_bridge import router as agent_bridge_router
 
     app.include_router(agent_bridge_router)
 
@@ -258,7 +258,7 @@ def main() -> None:
 
     # 入站认证：token 从环境变量（桌面壳每次启动现生成）或 config.yaml 取。
     # 详见 keeper/api/auth.py —— 那里写清了为什么裸奔的本地内核不能接受。
-    from keeper.api import auth as auth_mod
+    from keeper.auth import api as auth_mod
 
     token, source = auth_mod.resolve_token(cfg)
     auth_mod.configure(token, source)

@@ -37,7 +37,7 @@ def extension_id_for_path(path: str | Path) -> str:
     ------------
     扩展装在**用户的日常 Chrome** 里，内核没法再伸手进去替它写配置（那是另一个
     进程、另一个 profile），于是配置改成用户在界面上填。但
-    :func:`~api.agent_bridge._origin_ok` 那道校验会比对浏览器带来的
+    :func:`~browser.agent_bridge._origin_ok` 那道校验会比对浏览器带来的
     ``Origin: chrome-extension://<id>`` —— 所以界面必须把**该装出来的 ID** 告诉用户，
     否则装完连不上时，没有任何线索能看出是"路径选错了、ID 变了"。
 

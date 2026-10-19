@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
-from ..observability import aggregate, check_budget, message_timeline, tool_stats
+from . import aggregate, check_budget, message_timeline, tool_stats
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -146,7 +146,7 @@ async def usage_timeseries_api(
     返回每个桶的 token / 缓存命中 / 成本 / 调用数 / 耗时，桶按 UTC 切分。
     至少给一个归属维度（agent / session / task），否则统计的是全局。
     """
-    from ..observability import usage_timeseries
+    from . import usage_timeseries
 
     return await usage_timeseries(
         agent_id=agent_id,
@@ -168,7 +168,7 @@ async def slowest_calls_api(
     limit: int = Query(10),
 ) -> Dict[str, Any]:
     """最慢的 N 次 LLM 调用（按耗时降序）：定位「这一轮为什么这么久」。"""
-    from ..observability import slowest_calls
+    from . import slowest_calls
 
     items = await slowest_calls(
         agent_id=agent_id,
@@ -191,7 +191,7 @@ async def error_breakdown_api(
     limit: int = Query(20),
 ) -> Dict[str, Any]:
     """错误聚合：LLM / 工具各自的失败率，以及按错误信息归类的 Top N。"""
-    from ..observability import error_breakdown
+    from . import error_breakdown
 
     return await error_breakdown(
         agent_id=agent_id,
@@ -215,7 +215,7 @@ async def ask_rate_api(
     老追问说明 agent 拿到的信息不够——能力不足、工具返回没用，或上下文丢了
     关键信息。返回 rounds / ask_rounds / ask_count / ask_rate。
     """
-    from ..observability import ask_rate
+    from . import ask_rate
 
     return await ask_rate(
         agent_id=agent_id,
@@ -238,7 +238,7 @@ async def duplicate_calls_api(
 
     空转率高说明模型在绕圈子（没理解工具结果 / 规划能力不足），白白烧 token。
     """
-    from ..observability import duplicate_calls
+    from . import duplicate_calls
 
     return await duplicate_calls(
         agent_id=agent_id,
@@ -257,7 +257,7 @@ async def message_dump_api(message_id: str) -> Dict[str, Any]:
     返回该轮每次 LLM 调用的 system、完整 messages、模型响应与 usage。
     未开启落盘时返回 ``enabled=false``，前端据此隐藏入口。
     """
-    from ..observability import read_message_dump
+    from . import read_message_dump
 
     return await read_message_dump(message_id)
 
@@ -268,7 +268,7 @@ async def react_parse_metrics(
     days: int = Query(7, ge=1, le=90),
 ) -> Dict[str, Any]:
     """解析结构统计：模型有多想并行、丢了多少动作（P1-1 的收益依据）。"""
-    from ..observability import react_parse_stats
+    from . import react_parse_stats
 
     return await react_parse_stats(agent_id=agent_id, days=days)
 
@@ -290,7 +290,7 @@ async def capability_metrics(
     ``redundant_loads`` 是**抖动**数：同一轮把同一个能力取两次以上，说明模型自己
     也不确定读过没有——几乎总是 L1 摘要或提示不够清楚。
     """
-    from ..observability import capability_stats
+    from . import capability_stats
 
     return await capability_stats(agent_id=agent_id, days=days, top=top)
 

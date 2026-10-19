@@ -13,7 +13,7 @@ import logging
 
 from fastapi import APIRouter
 
-from ..plugin import plugins_root, scan_library
+from . import plugins_root, scan_library
 
 router = APIRouter(prefix="/manage/plugins", tags=["plugins"])
 logger = logging.getLogger(__name__)

@@ -137,7 +137,7 @@ def submit_extension_job(msg: Dict[str, Any]) -> str:
             "以及刚打开、扩展脚本还没注入进去的那一瞬间。"
         )
 
-    from ..api.agent_bridge import publish
+    from .agent_bridge import publish
 
     publish({"event": "result", "id": msg.get("id"), "result": answered})
     logger.info(

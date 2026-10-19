@@ -25,7 +25,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..browser.cdp import BrowserUnavailable, cdp_endpoint, get_client
+from .cdp import BrowserUnavailable, cdp_endpoint, get_client
 
 router = APIRouter(prefix="/browser", tags=["browser"])
 logger = logging.getLogger(__name__)

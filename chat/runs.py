@@ -41,7 +41,7 @@ _active_runs: Dict[str, str] = {}
 # 被用户要求停止的 run_id 集合。执行循环每步 / 每块都问一次「该停了吗」。
 #
 # 为什么不住在 ``chat/api.py`` 里：这条集合现在**两个模块**要用——流式对话，以及
-# 浮球的「对这一页提问」（见 api/agent_bridge.py::_ball_ask）。私藏在 api.py 里
+# 浮球的「对这一页提问」（见 browser/agent_bridge.py::_ball_ask）。私藏在 api.py 里
 # 就得跨模块 import 一个下划线开头的名字，那是明摆着的「它本来不该在这儿」。
 _stop_runs: set = set()
 

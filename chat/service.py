@@ -336,7 +336,7 @@ async def run_one_ask(
     """跑**一轮**对话，并把这一轮 run 的生命周期完整管好。
 
     这是「发一条消息」唯一的执行入口。浏览器页的 SSE（``chat/api.py::chat_stream``）
-    和浏览器浮球（``api/agent_bridge.py::_ball_ask``）都走它——两者只在**怎么把结果
+    和浏览器浮球（``browser/agent_bridge.py::_ball_ask``）都走它——两者只在**怎么把结果
     送出去**上不同，执行的每一个环节都是同一份代码。
 
     为什么要有这个函数

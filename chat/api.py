@@ -1680,7 +1680,7 @@ async def _store_agent_attachment(
 
     抽出来是因为**浮球（WS 桥）**也要走同一套落库逻辑：它拿到的是 base64 图片，
     没有 HTTP multipart。HTTP 上传端点（:func:`upload_attachment`）和浮球提问
-    （``api/agent_bridge._ball_ask``）都调它，避免两处各写一份厂商上传 + 缓存。
+    （``browser/agent_bridge._ball_ask``）都调它，避免两处各写一份厂商上传 + 缓存。
 
     ``session_id`` 为空时**不写本地缓存**（缓存要落到确定的会话临时区，没会话就没
     法定位）—— 但这种附件仍会上传到厂商、仍能进模型上下文。本地缓存只服务于前端
@@ -3571,3 +3571,142 @@ async def review_task(agent_id: str, task_id: str, body: TaskReviewIn):
             "last_answer": last_answer,
             "waiting_human": waiting_human,
         }
+
+
+# ---------------------------------------------------------------------------
+# 会话回收站（/manage/sessions）：已删除（软删除）会话的列表 + 恢复。
+#
+# 删除会话是**软删除**（见 chat.service.ChatService.delete_session）：行还在库里，
+# 只是 status="deleted"，列表看不到、按 id 拉历史会 404。这里补上「看得见、捞得回」
+# 的那一半。挂在 /manage 而不是 /agents/{id}/sessions 下：回收站是**跨 agent** 的
+# 管理视图（删掉的会话可能属于任何、甚至已卸载的 agent），按 agent 分没有答案。
+# 自 keeper.api.sessions 迁入——它与 chat 会话同源，故合进同一 api 模块。
+# ---------------------------------------------------------------------------
+from sqlalchemy import func  # noqa: E402
+
+from ..store import Agent  # noqa: E402
+from .service import SESSION_STATUS_ACTIVE  # noqa: E402
+
+trash_router = APIRouter(prefix="/manage/sessions", tags=["session-manage"])
+
+# 单页上限。不做无限滚动：回收站是"偶尔找回一条东西"的地方，真有上千条时用户
+# 该做的是批量清理，而不是一页页翻。
+_MAX_LIMIT = 200
+
+
+def _session_out(
+    row: ChatSession, agent_name: Optional[str], message_count: int
+) -> Dict[str, Any]:
+    """回收站一行。``agent_name`` 查不到时退回 ``agent_id``：核心 agent 不在
+    ``agent`` 表里，而"这个会话属于谁"必须始终有答案。"""
+    return {
+        "id": row.id,
+        "title": row.title,
+        "agent_id": row.agent_id,
+        "agent_name": agent_name or row.agent_id,
+        "kind": row.kind,
+        "message_count": message_count,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
+    }
+
+
+@trash_router.get("/trash")
+async def list_trash(
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """已删除的会话列表，按删除时间倒序（``deleted_at`` DESC，NULL 排最后）。
+
+    每行带 ``message_count``：标题常是「新对话」这种占位，消息条数是判断
+    "这是不是我要找的那条"最快的线索。
+    """
+    limit = max(1, min(limit, _MAX_LIMIT))
+    offset = max(0, offset)
+    async with get_session_factory()() as db:
+        base = select(ChatSession).where(
+            ChatSession.status == SESSION_STATUS_DELETED
+        )
+        total = (
+            await db.execute(
+                select(func.count()).select_from(base.subquery())
+            )
+        ).scalar_one()
+        rows = (
+            (
+                await db.execute(
+                    base.order_by(
+                        ChatSession.deleted_at.desc(), ChatSession.id.desc()
+                    )
+                    .limit(limit)
+                    .offset(offset)
+                )
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+        counts: Dict[str, int] = {}
+        if rows:
+            counts = {
+                r[0]: r[1]
+                for r in (
+                    await db.execute(
+                        select(
+                            SessionMessage.chat_session_id,
+                            func.count(SessionMessage.id),
+                        )
+                        .where(
+                            SessionMessage.chat_session_id.in_([r.id for r in rows])
+                        )
+                        .group_by(SessionMessage.chat_session_id)
+                    )
+                ).all()
+            }
+        # agent 名字一次取回（IN 查询），不做 N+1；查不到名字的（核心 agent）留 None
+        names: Dict[str, str] = {}
+        agent_ids = {r.agent_id for r in rows if r.agent_id}
+        if agent_ids:
+            names = {
+                r[0]: r[1]
+                for r in (
+                    await db.execute(
+                        select(Agent.id, Agent.name).where(Agent.id.in_(agent_ids))
+                    )
+                ).all()
+            }
+    return {
+        "sessions": [
+            _session_out(r, names.get(r.agent_id or ""), counts.get(r.id, 0))
+            for r in rows
+        ],
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@trash_router.post("/{session_id}/restore")
+async def restore_session(session_id: str) -> Dict[str, Any]:
+    """把一条已删除的会话恢复回列表。
+
+    只是把 ``status`` 置回 ``active`` 并清空 ``deleted_at``——消息、ReAct 步骤、
+    跨端线程、产物引用都原样还在（软删除时一行都没删），恢复后可接着聊。
+
+    会话**本来就没被删**时报错而不是静默成功：调用方拿到的成功响应应意味着
+    "它刚从回收站里出来"。
+    """
+    async with get_session_factory()() as db:
+        row = await db.get(ChatSession, session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        if row.status != SESSION_STATUS_DELETED:
+            raise HTTPException(
+                status_code=409, detail="该会话不在回收站里（可能已经恢复过了）"
+            )
+        row.status = SESSION_STATUS_ACTIVE
+        row.deleted_at = None
+        await db.commit()
+    logger.info("会话已从回收站恢复: %s（agent=%s）", session_id, row.agent_id)
+    return {"id": session_id, "restored": True, "agent_id": row.agent_id}
