@@ -3,7 +3,7 @@
 这一层只负责「怎么想」：拿到一个问题，多步推理直到给出答案。
 
 分工：**工具怎么收集**归 keeper（``keeper.py`` 的 ``_collect_tools``），
-**怎么把自己装起来**归本模块——``Process.from_agent`` 从 agent 实例吸取
+**怎么把自己装起来**归本模块——``ReactProcess.from_agent`` 从 agent 实例吸取
 llm / persona / skills，产出一份可直接 ``run`` 的可执行体。
 """
 from __future__ import annotations
@@ -219,8 +219,62 @@ class ProcessResult:
     budget: Optional[Dict[str, Any]] = None
 
 
-class Process:
-    """一次问答的执行过程（ReAct 多步循环）。
+# ---- 跨运行模式共用的记账（usage / budget）----
+# 三个 Process（ReactProcess / SimpleProcess / PtcProcess）相互独立、不继承，但
+# 「记用量」和「预算守卫」是**公共契约**：漏了任一条，某个模式的调用就会从成本看板
+# 里消失、或烧穿 token 额度。故提成模块级函数共用——是函数复用，不是继承基类。
+async def check_budget_scope(
+    scope: Tuple[Optional[str], Optional[str]],
+) -> Optional[Dict[str, Any]]:
+    """本轮累计用量离预算上限还有多远；上限未配置 / 查询失败返回 None（不限制）。
+
+    在每步之后（多步模式）或一次性任务开跑前调：一轮里的消耗是逐步累加的，只在
+    会话开始查一次的话，长任务能在单轮内把额度烧穿。查库失败一律放行——配额不该
+    把正常对话挡在门外。
+    """
+    sid, tid = scope
+    if not sid and not tid:
+        return None
+    try:
+        from ..observability import check_budget
+
+        b = await check_budget(session_id=sid, task_id=tid)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("预算检查失败（放行）: %s", e)
+        return None
+    # limit == 0 = 没配上限；scope 为空说明两个维度都没查
+    if not b or not b.get("limit") or not b.get("scope"):
+        return None
+    return b
+
+
+def log_usage(llm, before) -> None:
+    """打印 token 用量：本轮增量 + 本次进程累计。
+
+    provider 不上报用量时（usage.reported == 0）明确说明，只给调用次数，
+    避免把「没统计到」误读成「没消耗」。
+    """
+    u = getattr(llm, "usage", None)
+    if u is None:
+        return
+    cur = u - before if before is not None else u.copy()
+    note = "" if u.reported else "（provider 未返回 token 用量，仅统计调用次数）"
+    logger.info(
+        "【Token 用量】本轮：LLM 调用 %d 次，prompt %d + completion %d = %d；"
+        "累计：调用 %d 次，prompt %d + completion %d = %d%s",
+        cur.calls, cur.prompt_tokens, cur.completion_tokens, cur.total_tokens,
+        u.calls, u.prompt_tokens, u.completion_tokens, u.total_tokens,
+        note,
+    )
+
+
+class ReactProcess:
+    """普通模式：一次问答的 ReAct 多步循环执行过程。
+
+    这是三个运行模式里的「普通模式」——完整 ReAct + 最近历史 + 长期记忆召回 + 全量
+    工具与能力按需加载 + 挂起/恢复。兄弟类：``SimpleProcess``（翻译/OCR/总结等一次性
+    任务，无循环、无记忆、无 planner）、``PtcProcess``（写代码解决问题）。三者相互独立，
+    只共享模块级的 ``Step`` / ``ProcessResult`` 与记账函数（usage / budget），不走继承。
 
     llm / tools 由 keeper 注入；skill 以 skill_desc + system_extra 两段文本注入，
     本类不理解 skill 的结构。
@@ -298,26 +352,8 @@ class Process:
             logger.debug("刷新上下文上限失败（沿用旧值）: %s", e)
 
     async def _check_budget(self) -> Optional[Dict[str, Any]]:
-        """本轮累计用量离预算上限还有多远；上限未配置时返回 None（不限制）。
-
-        只在**每步之后**调一次：一轮里的消耗是逐步累加的，只在会话开始查一次
-        的话，长任务能在单轮内把额度烧穿（这就是「预算没真正拦截」的漏洞）。
-        查库失败一律放行——配额不该把正常对话挡在门外。
-        """
-        sid, tid = self._budget_scope
-        if not sid and not tid:
-            return None
-        try:
-            from ..observability import check_budget
-
-            b = await check_budget(session_id=sid, task_id=tid)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("预算检查失败（放行）: %s", e)
-            return None
-        # limit == 0 = 没配上限；scope 为空说明两个维度都没查
-        if not b or not b.get("limit") or not b.get("scope"):
-            return None
-        return b
+        """（薄包装）转发模块级 check_budget_scope——逻辑三模式共用，见其文档。"""
+        return await check_budget_scope(self._budget_scope)
 
     def _budget_stop_answer(
         self, steps: List[Step], budget: Dict[str, Any]
@@ -353,7 +389,7 @@ class Process:
         return "\n".join(lines)
 
     @classmethod
-    def from_agent(cls, agent: "KeeperAgent", tools) -> "Process":
+    def from_agent(cls, agent: "KeeperAgent", tools) -> "ReactProcess":
         """从 agent 实例装配一份可执行体：替代外界的 ``build_process``。
 
         llm / persona / skill 在这一刻从 agent 现取并固化到本实例——此后
@@ -398,7 +434,7 @@ class Process:
             "不确定可以先读，读错了没有代价。标「已常驻」的已在上下文里，不用再读。"
         )
         return "\n".join(lines)
-
+ 
     @staticmethod
     def _skill_system(skills) -> str:
         """**行为型**技能的正文合集（追加到 system 末尾）——只有 ``always`` 的常驻。
@@ -1191,7 +1227,7 @@ class Process:
 
         工具变更必须以**整张表**为单位（而不是逐个增删），否则中途会露出
         「只加未减 / 只减未加」的半成品能力集；``ToolRegistry.replace_all``
-        正是原子换表。换完后无需重建 Process——它读的就是这个 registry。
+        正是原子换表。换完后无需重建 ReactProcess——它读的就是这个 registry。
 
         Args:
             tools: ``ToolRegistry`` 或 ``ProcessorTool`` 的可迭代对象。
@@ -1211,23 +1247,8 @@ class Process:
             pass
 
     def _log_usage(self, before) -> None:
-        """打印 token 用量：本轮增量 + 本次进程累计。
-
-        provider 不上报用量时（usage.reported == 0）明确说明，只给调用次数，
-        避免把「没统计到」误读成「没消耗」。
-        """
-        u = getattr(self.llm, "usage", None)
-        if u is None:
-            return
-        cur = u - before if before is not None else u.copy()
-        note = "" if u.reported else "（provider 未返回 token 用量，仅统计调用次数）"
-        logger.info(
-            "【Token 用量】本轮：LLM 调用 %d 次，prompt %d + completion %d = %d；"
-            "累计：调用 %d 次，prompt %d + completion %d = %d%s",
-            cur.calls, cur.prompt_tokens, cur.completion_tokens, cur.total_tokens,
-            u.calls, u.prompt_tokens, u.completion_tokens, u.total_tokens,
-            note,
-        )
+        """（薄包装）转发模块级 log_usage——逻辑三模式共用，见其文档。"""
+        log_usage(self.llm, before)
 
     async def run(
         self,

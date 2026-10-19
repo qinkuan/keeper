@@ -42,6 +42,7 @@ import {
 } from "../components/WorkbenchPicker";
 import { WorkspacePicker } from "../components/WorkspacePicker";
 import { ThinkingPicker } from "../components/ThinkingPicker";
+import { ModePicker } from "../components/ModePicker";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import type { UsageSummary } from "../api/types";
@@ -111,6 +112,7 @@ import type {
   SessionWorkspace,
   UserSpace,
   ReasoningEffort,
+  RunMode,
 } from "../api/types";
 
 /*
@@ -406,6 +408,8 @@ export default function ChatPage({
   // workspace 读回（见 loadWorkspace），这里只承载"还没建会话时"的待选状态。
   const [thinkingMode, setThinkingMode] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("low");
+  // 运行模式（新会话待选值）：普通/快捷/程序化。已有会话从 workspace.mode 读回。
+  const [runMode, setRunMode] = useState<RunMode>("normal");
   const listRef = useRef<HTMLDivElement>(null);
 
   // 工作模式：会话视图 / 任务视图（合并原「会话模式」「任务模式」）
@@ -1082,6 +1086,7 @@ export default function ChatPage({
     // 思考待选值也回到出厂（关 + 低），别让上一条会话的选择粘到新会话上
     setThinkingMode(false);
     setReasoningEffort("low");
+    setRunMode("normal");
     localStorage.removeItem(sessionKey(agentId, effKind));
     // 清掉「还没拿到真实 session_id 时用的那个桶」：里面可能躺着上一段没绑定到
     // 会话上的对话，新建后不该再冒出来。已落库的历史不受影响（各会话自己的桶照旧）。
@@ -1393,6 +1398,8 @@ export default function ChatPage({
           // 思考模式/强度：同理，仅新建会话传；已有会话沿用库里绑定（后端读行）
           thinking: targetSid ? undefined : thinkingMode,
           reasoningEffort: targetSid ? undefined : reasoningEffort,
+          // 运行模式：同理，仅新建会话传；已有会话沿用库里绑定（后端据此选 Process）
+          mode: targetSid ? undefined : runMode,
           // 同样只对**新建**的那一次生效，但必须传：会话是发第一条消息才建的，
           // 这里就是浏览器页那条会话落库时唯一的类别来源。
           kind: sessionKind,
@@ -1673,6 +1680,10 @@ export default function ChatPage({
       toast.error(e?.message || "思考模式切换失败");
     }
   };
+
+  // 运行模式：仅在「新会话」（无 sessionId）时可选——选中即存本地 pending，发第一条
+  // 消息时落库；会话一旦创建，模式即固定，选择器置灰不可改（见下方 ModePicker 的
+  // disabled={!!sessionId}）。后端 PUT 的 mode 能力保留，但前端不再暴露切换入口。
 
   // 原生 select 的 option 只能放纯文本，所以把「只读 / 可写」并进文案
   const usOptions = userSpaces.map((u) => ({
@@ -2046,6 +2057,13 @@ export default function ChatPage({
           {/* 思考模式选择器：输入框下方。开 → 显示强度（低/高/最高）；
               新会话用本地 pending 值，已有会话改即写库（applyThinking）。 */}
           <div className="mt-2 flex items-center gap-2 px-1">
+            <ModePicker
+              disabled={!!sessionId}
+              value={
+                ((sessionId ? workspace?.mode : runMode) as RunMode) || "normal"
+              }
+              onChange={setRunMode}
+            />
             <ThinkingPicker
               thinking={sessionId ? !!workspace?.thinking : thinkingMode}
               effort={

@@ -542,6 +542,22 @@ async def _migrate_chat_session_thinking(conn) -> None:
     )
 
 
+async def _migrate_chat_session_mode(conn) -> None:
+    """chat_sessions 补 mode 列：运行模式（普通/快捷/程序化）。存量行回填 normal。
+
+    回填 normal = 与改造前完全一致（普通模式就是原逻辑），老会话行为不变。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "mode" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN mode TEXT DEFAULT 'normal'"
+        )
+    await conn.exec_driver_sql(
+        "UPDATE chat_sessions SET mode = 'normal' WHERE mode IS NULL"
+    )
+
+
 async def _seed_default_user_space(conn) -> None:
     """播种系统默认用户空间 ``~/.keeper/workspace/user/default``（幂等）。
 
@@ -782,6 +798,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_chat_session_ball_key(conn)
         await _migrate_chat_session_deleted_at(conn)
         await _migrate_chat_session_thinking(conn)
+        await _migrate_chat_session_mode(conn)
         await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)
         await _migrate_strip_tmp_artifacts(conn)

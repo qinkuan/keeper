@@ -114,8 +114,9 @@ class KeeperAgent:
 
 
 
-        # 可执行体（懒建：prepare() 时装配，随实例复用）；工具表归它自己持有
-        self._process: Any = None
+        # 可执行体：按运行模式各建一份、缓存复用（normal→ReactProcess /
+        # simple→SimpleProcess / ptc→PtcProcess）。工具表归各 Process 自己持有。
+        self._processes: dict = {}
         # 后台重连的占位标记：同一时刻只跑一个重连任务，避免每个请求都起一个
         self._recovering = False
         self._recovering_peers = False
@@ -316,8 +317,12 @@ class KeeperAgent:
                 logger.warning("LLM 重连失败: %s", e)
 
     # ---- 装配：能力来源 -> 可执行体 ----
-    async def prepare(self) -> Any:
-        """装配当轮能力集，返回可执行体。
+    async def prepare(self, mode: str = "normal") -> Any:
+        """装配当轮能力集，返回该**运行模式**对应的可执行体。
+
+        不同模式是不同的 Process 类（普通 ReactProcess / 快捷 SimpleProcess /
+        程序化 PtcProcess），按 mode 各建一份、缓存复用——与原来单例同理：工具表
+        整体替换，不重建实例。mode 缺省 ``normal``，行为与改造前完全一致。
 
         用「全量重建 + 整体替换」而不是增量追加：配置里拿掉的 MCP server / 对端，
         它的工具必须随之消失——否则页面上取消勾选了，LLM 还能继续调它。
@@ -328,15 +333,19 @@ class KeeperAgent:
         # 组摘要跟着工具表一起重建：折叠后的分组行靠它告诉模型「这一组是干嘛的」
         for group, summary in (self.config.group_summaries or {}).items():
             tools.set_group_summary(group, summary)
-        if self._process is None:
-            from .process import Process
+        from .process import ReactProcess
+        from .simple_process import SimpleProcess
 
+        cls = {"normal": ReactProcess, "simple": SimpleProcess}.get(mode, ReactProcess)
+        p = self._processes.get(mode)
+        if p is None:
             # Process 自己知道该从 agent 上取什么（llm / persona / skill 注入）
-            self._process = Process.from_agent(self, tools)
-        else:
-            # 工具表归 Process 所有：就地整体替换即可，不必重建实例
-            self._process.replace_tools(tools)
-        return self._process
+            p = self._processes[mode] = cls.from_agent(self, tools)
+        elif hasattr(p, "replace_tools"):
+            # 工具表归 Process 所有：就地整体替换即可，不必重建实例。
+            # 快捷模式不持有工具（无 replace_tools），跳过即可。
+            p.replace_tools(tools)
+        return p
 
     async def _collect_tools(self) -> Any:
         """按**当前**配置收集全部可用工具，返回一张全新的工具表。
@@ -372,11 +381,12 @@ class KeeperAgent:
 
         与 ``build()`` 的区别：``build()`` 会重建 llm 并**重连 MCP**（重且有副作用:
         新建 session、可能停掉旧的），这里只按当前配置重收工具（含新加入的
-        peer 工具）后替换 ``Process`` 持有的工具表，不动 llm / MCP 连接。
+        peer 工具）后替换 ``ReactProcess`` 持有的工具表，不动 llm / MCP 连接。
         """
         tools = await self._collect_tools()
-        if self._process is not None:
-            self._process.replace_tools(tools)
+        for p in self._processes.values():
+            if hasattr(p, "replace_tools"):
+                p.replace_tools(tools)
 
 
 # ---- 当前进程内已装载的 agent 实例：agent_id -> KeeperAgent（供 HTTP 接口按 id 取用）----

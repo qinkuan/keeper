@@ -176,6 +176,9 @@ class ChatStreamIn(BaseModel):
     thinking: bool = False
     # 思考强度：low / high / max。仅 thinking 开启时有意义。
     reasoning_effort: Literal["low", "high", "max"] = "low"
+    # 运行模式：normal=普通 ReAct / simple=快捷一次性（翻译/OCR/总结）/ ptc=写代码。
+    # **仅新建会话时生效**，之后沿用库里绑定（同 user_space_id）。
+    mode: Literal["normal", "simple", "ptc"] = "normal"
     # 本次运行要建的会话属于哪一类。「对话」页发 chat，浏览器页发 browser。
     #
     # 为什么发消息这条路也要带：会话是**发第一条消息时**才建的（侧栏「新对话」只清
@@ -375,6 +378,7 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
                 user_space_id=body.user_space_id or "",
                 thinking=body.thinking,
                 reasoning_effort=body.reasoning_effort or None,
+                mode=body.mode or "normal",
                 attachments=body.attachments or None,
                 # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
                 # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
@@ -498,6 +502,8 @@ class NewSessionIn(BaseModel):
     # 思考模式与强度（新建时定，之后沿用库里绑定，同 user_space_id 套路）。
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] = "low"
+    # 运行模式（新建时定，之后沿用库里绑定）：normal / simple / ptc。
+    mode: Literal["normal", "simple", "ptc"] = "normal"
     # 会话类别。缺省 chat（普通会话）；浏览器页传 browser。
     #
     # 用 Literal 而不是 str：数据库这列是无 CHECK 的 TEXT，写错一个字母不会报错，
@@ -529,6 +535,8 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
     # 思考模式：同工作区，只在建会话那一刻定，之后沿用库里绑定。
     svc.thinking = body.thinking
     svc.reasoning_effort = body.reasoning_effort or "low"
+    # 运行模式：同工作区/思考，只在建会话那一刻定。
+    svc.mode = body.mode or "normal"
     sid = await svc.ensure_session_id()
     return {"session_id": sid, "kind": body.kind}
 
@@ -1551,9 +1559,10 @@ async def session_workspace(agent_id: str, session_id: str) -> Dict[str, Any]:
         "agent_space": str(ctx.agent_space),
         "effective_root": str(ctx.root),
         "read_only": ctx.read_only,
-        # 会话级思考模式（前端据此回填选择器；新会话的待选值由前端自己管）
+        # 会话级思考模式 / 运行模式（前端据此回填选择器；新会话的待选值由前端自己管）
         "thinking": bool(getattr(sess, "thinking", False)) if sess else False,
         "reasoning_effort": (getattr(sess, "reasoning_effort", None) or "low") if sess else "low",
+        "mode": (getattr(sess, "mode", None) or "normal") if sess else "normal",
     }
 
 
@@ -1562,6 +1571,8 @@ class SessionWorkspacePatch(BaseModel):
     # 思考模式 / 强度：不传（缺省）= 不改；传了就地更新这条会话的绑定。
     thinking: Optional[bool] = None
     reasoning_effort: Optional[Literal["low", "high", "max"]] = None
+    # 运行模式：不传 = 不改；传了就地切换（切到 simple/ptc 下一轮起生效）。
+    mode: Optional[Literal["normal", "simple", "ptc"]] = None
 
 
 @router.put("/{agent_id}/sessions/{session_id}")
@@ -1606,12 +1617,15 @@ async def update_session_workspace(
             sess.thinking = bool(fields["thinking"])
         if fields.get("reasoning_effort") is not None:
             sess.reasoning_effort = fields["reasoning_effort"]
+        if fields.get("mode") is not None:
+            sess.mode = fields["mode"]
         await db.commit()
         return {
             "session_id": session_id,
             "user_space_id": sess.user_space_id,
             "thinking": bool(sess.thinking),
             "reasoning_effort": sess.reasoning_effort or "low",
+            "mode": sess.mode or "normal",
             "ok": True,
         }
 

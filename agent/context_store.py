@@ -347,7 +347,7 @@ def externalize(tool: str, raw: str, min_chars: Optional[int] = None) -> str:
 
     两条调用路径：
 
-    1. **单条超长**（``Process._fit_observation``）：结果超过
+    1. **单条超长**（``ReactProcess._fit_observation``）：结果超过
        ``observation_limit`` 就先走这里——原文落盘、给 ``block_id``，模型能
        ``read`` 展开全文。外部化不触发时才退回硬截断。这条路径用自己的阈值
        （调用方传入 ``min_chars=observation_limit``），**不复用**
@@ -483,7 +483,7 @@ class Compactor:
             if m.get("_cap"):
                 # 按需加载的能力正文（load_capabilities 的结果）：它是「接下来几步
                 # 照着做」的说明书，**不是**一次性的工具结果，换成引用等于把说明书
-                # 抽走。什么时候清它归 Process 的容量管理（FIFO + 换出告知），
+                # 抽走。什么时候清它归 ReactProcess 的容量管理（FIFO + 换出告知），
                 # 这里不碰——两边职责分开，互不猜对方的心思。
                 out.append(m)
                 continue

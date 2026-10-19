@@ -18,7 +18,7 @@ from . import aggregate, check_budget, message_timeline, tool_stats
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-# ReAct 一轮的步数上限（与 Process 的 max_steps 默认值一致）；达到即强制总结
+# ReAct 一轮的步数上限（与 ReactProcess 的 max_steps 默认值一致）；达到即强制总结
 _MAX_STEPS = 30
 
 

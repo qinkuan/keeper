@@ -2,7 +2,10 @@
 
 - ``keeper.py``  ：**装配**——配置 → 实例 → 可执行体（Process），以及资源生命周期
 - ``executor.py``：**执行**——一轮对话怎么跑完（就绪守卫、逐步落库、挂起恢复）
-- ``process.py`` ：``Process`` 多步循环（及 ``Step`` / ``ProcessResult`` 数据类）
+- ``process.py`` ：``ReactProcess``（普通模式）及**三模式共享**的 ``Step`` /
+  ``ProcessResult`` 与记账函数（``check_budget_scope`` / ``log_usage``）
+- ``simple_process.py`` ：``SimpleProcess``（快捷模式，一次性任务）；（``PtcProcess``
+  程序化模式待加，届时同样独立成文件）
 - ``planner.py`` ：``ReActPlanner``，把工具清单+问题喂给 LLM 并解析其决策
 
 会话/落库/页面相关逻辑在 ``keeper.chat`` 包，不在本包。
@@ -18,7 +21,8 @@ from .keeper import (
     shutdown_all,
 )
 from .planner import Decision, ReActPlanner
-from .process import Process, ProcessResult, Step
+from .process import ReactProcess, ProcessResult, Step
+from .simple_process import SimpleProcess
 
 __all__ = [
     "KeeperAgent",
@@ -29,7 +33,8 @@ __all__ = [
     "list_keepers",
     "build_all_agents",
     "shutdown_all",
-    "Process",
+    "ReactProcess",
+    "SimpleProcess",
     "ProcessResult",
     "Step",
     "Decision",

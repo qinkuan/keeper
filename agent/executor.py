@@ -57,6 +57,7 @@ class AgentExecutor:
         session_id=None,
         task_id=None,
         file_parts: Optional[list] = None,
+        mode: str = "normal",
     ) -> Any:
         """跑一轮 ReAct 并逐步落库，返回 ProcessResult。
 
@@ -73,6 +74,8 @@ class AgentExecutor:
         on_step：可选的异步观察回调 ``async (seq, step)``，每跑完一步调用一次。
             流式输出（SSE）用它把思考 / 工具调用逐步推给前端；不影响落库逻辑。
         on_delta：可选的异步回调 ``async (text)``，最终回答按块推送（打字机效果）。
+        mode：运行模式（normal=普通 ReAct / simple=快捷一次性 / ptc=程序化）。据此在
+            ``agent.prepare(mode)`` 里选对应 Process；缺省 normal，与改造前一致。
         """
         from .process import ProcessResult
 
@@ -87,7 +90,7 @@ class AgentExecutor:
         self.agent.recover_peers_in_background()
 
         sid, tid = self._budget_scope(session_id, task_id)
-        process = await self.agent.prepare()
+        process = await self.agent.prepare(mode)
         result = await process.run(
             text,
             on_step=self._step_writer(session_message_id, on_step=on_step),

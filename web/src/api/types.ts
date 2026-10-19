@@ -1096,6 +1096,9 @@ export type SessionKind = "chat" | "task" | "browser" | "browser-automation";
 /** 思考强度：low / high / max（仅思考模式开启时有意义） */
 export type ReasoningEffort = "low" | "high" | "max";
 
+/** 运行模式：normal=普通 ReAct / simple=快捷一次性（翻译/OCR/总结）/ ptc=写代码解决问题 */
+export type RunMode = "normal" | "simple" | "ptc";
+
 /** 会话列表里的一项（对应后端 chat_sessions 表） */
 export interface SessionItem {
   id: string;
@@ -1110,6 +1113,8 @@ export interface SessionItem {
   thinking?: boolean;
   /** 思考强度 */
   reasoning_effort?: ReasoningEffort | string | null;
+  /** 本会话的运行模式 */
+  mode?: RunMode | string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1173,6 +1178,8 @@ export interface SessionWorkspace {
   thinking: boolean;
   /** 思考强度 */
   reasoning_effort: ReasoningEffort | string;
+  /** 本会话的运行模式（新会话待选值由前端管；已有会话从这里回填） */
+  mode: RunMode | string;
 }
 
 /** GET /sessions 返回 */

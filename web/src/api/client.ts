@@ -92,6 +92,8 @@ import type {
 
   ReasoningEffort,
 
+  RunMode,
+
   PromptDumpSettings,
 
   AskRate,
@@ -965,7 +967,9 @@ export function apiNewSession(
 
   thinking?: boolean,
 
-  reasoningEffort?: ReasoningEffort
+  reasoningEffort?: ReasoningEffort,
+
+  mode?: RunMode
 
 ) {
 
@@ -980,6 +984,8 @@ export function apiNewSession(
       thinking: thinking ?? false,
 
       reasoning_effort: reasoningEffort ?? "low",
+
+      mode: mode ?? "normal",
 
       kind,
 
@@ -1386,6 +1392,10 @@ export function apiChatStream(
 
     reasoningEffort?: ReasoningEffort;
 
+    /** 运行模式（仅新建会话时生效；已有会话沿用库里绑定） */
+
+    mode?: RunMode;
+
     /** 新建会话时写进 kind 的类别；已有会话忽略这个值 */
 
     kind?: SessionKind;
@@ -1441,6 +1451,9 @@ export function apiChatStream(
       thinking: opts.thinking,
 
       reasoning_effort: opts.reasoningEffort,
+
+      // 运行模式：同理，仅新会话传
+      mode: opts.mode,
 
       kind: opts.kind || "chat",
 
@@ -2130,7 +2143,9 @@ export function apiUpdateSessionWorkspace(
 
   userSpaceId?: string | null,
 
-  thinking?: { enabled: boolean; reasoning_effort?: ReasoningEffort }
+  thinking?: { enabled: boolean; reasoning_effort?: ReasoningEffort },
+
+  mode?: RunMode
 
 ) {
 
@@ -2144,6 +2159,8 @@ export function apiUpdateSessionWorkspace(
 
     reasoning_effort?: ReasoningEffort;
 
+    mode?: RunMode;
+
     ok?: boolean;
 
   }>(
@@ -2152,7 +2169,7 @@ export function apiUpdateSessionWorkspace(
 
     {
 
-      // 只带显式给的字段：思考可单独改而不动工作空间（后端用 exclude_unset 区分）
+      // 只带显式给的字段：思考/模式可单独改而不动工作空间（后端用 exclude_unset 区分）
 
       ...(userSpaceId !== undefined ? { user_space_id: userSpaceId ?? null } : {}),
 
@@ -2161,6 +2178,8 @@ export function apiUpdateSessionWorkspace(
         ? { thinking: thinking.enabled, reasoning_effort: thinking.reasoning_effort }
 
         : {}),
+
+      ...(mode !== undefined ? { mode } : {}),
 
     }
 

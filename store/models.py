@@ -109,6 +109,10 @@ class ChatSession(Base):
     reasoning_effort: Mapped[Optional[str]] = mapped_column(
         String(16), nullable=True, default="low"
     )
+    # 运行模式：normal=普通 ReAct（默认，现状）/ simple=快捷一次性（翻译/OCR/总结，
+    # 无循环、无记忆、无 planner）/ ptc=写代码解决问题。会话级、建会话时定，之后沿用
+    # （同 user_space_id：新建取前端传入，已有会话读库里绑定）。无 DB CHECK，校验在接口层。
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="normal")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow

@@ -122,7 +122,7 @@ def detect_hallucination(text: str) -> str:
 def _tool_parallel_mode() -> int:
     """工具并行档位：0=关闭（默认）/ 1=只读 / 2=只读 + 显式声明。
 
-    与 :meth:`Process` 里那份同名函数读的是同一个配置项（``context.tool_parallel``）。
+    与 :meth:`ReactProcess` 里那份同名函数读的是同一个配置项（``context.tool_parallel``）。
     提示词必须跟着它走，否则会出现"提示词让模型只写一个、引擎却在等多个"的错位。
     """
     try:
