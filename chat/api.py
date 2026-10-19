@@ -176,7 +176,8 @@ class ChatStreamIn(BaseModel):
     # 为什么发消息这条路也要带：会话是**发第一条消息时**才建的（侧栏「新对话」只清
     # 状态、不预建），所以对「点新对话后发第一条」这个最常见的路径，这里就是它落库
     # 时唯一的类别来源。已有会话一律沿用库里的值，不因为这里传了什么而改写。
-    kind: Literal["chat", "task", "browser"] = "chat"
+    # browser-automation：网页 Agent 自动操作产生的会话（「浏览器」页的「网页 Agent」tab）。
+    kind: Literal["chat", "task", "browser", "browser-automation"] = "chat"
     # 本次运行的标识（前端生成）：点「停止生成」时按它精确中止这一次，
     # 而不是按 session 粗粒度停——同一会话可能有别的请求在跑。
     run_id: str = ""
@@ -492,7 +493,7 @@ class NewSessionIn(BaseModel):
     # 用 Literal 而不是 str：数据库这列是无 CHECK 的 TEXT，写错一个字母不会报错，
     # 只会让那条会话在所有列表里都消失（哪个类别都不匹配）。在入口挡成 422，
     # 比让人对着一个空列表猜强得多。
-    kind: Literal["chat", "task", "browser"] = "chat"
+    kind: Literal["chat", "task", "browser", "browser-automation"] = "chat"
 
 
 @router.post("/{agent_id}/sessions")
@@ -560,7 +561,9 @@ async def sessions(
     initiator_id: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
-    kind: Optional[Literal["chat", "task", "browser"]] = None,
+    # browser-automation：网页 Agent 会话（「浏览器」页的「网页 Agent」tab 按它过滤）。
+    # 不列进来，前端传 kind=browser-automation 会被 FastAPI 挡成 422，列表永远空。
+    kind: Optional[Literal["chat", "task", "browser", "browser-automation"]] = None,
 ) -> Dict[str, Any]:
     """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。
 

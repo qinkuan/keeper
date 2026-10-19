@@ -281,6 +281,18 @@ export default function ChatPage({
    * 重启成风暴），所以只能靠 ref 读到实时值。
    */
   const localStreamingRef = useRef(false);
+  /* 浏览器页的两个子类别：手动「对这一页提问」的 browser，与网页 Agent 自动操作的
+     browser-automation。两者各自成 tab（与「对话」页 chat/task 两个 tab 同款样式），
+     各自记住上次看的是哪条会话。
+     ⚠ 这两个声明必须放在下面的 remembered 之前：remembered 会在 useState 惰性初始化
+     时读 effKind，而 const 有暂时性死区（TDZ）——声明在后面，首屏渲染调用 remembered()
+     就会抛 "Cannot access 'effKind' before initialization"，整个 React 树崩掉变白屏
+     （tsc/madge 都查不出这种错，只有运行时首屏才暴露）。 */
+  const [browserTab, setBrowserTab] =
+    useState<"browser" | "browser-automation">("browser");
+  /* 当前生效的会话类别：浏览器页随子 tab 切换，其余页恒为 chat（task 视图走另一条
+     会话通道，不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
+  const effKind: SessionKind = browserOnly ? browserTab : (sessionKind ?? "chat");
   /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
      只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
   const remembered = () =>
@@ -396,14 +408,6 @@ export default function ChatPage({
   // 切到 task 会列出一列表不属于这里的任务，而在 send() 里还会把浏览器会话的
   // 历史混进来。所以那边根本不渲染切换控件，mode 恒为 "chat"。
   const [mode, setMode] = useState<"chat" | "task">("chat");
-  /** 浏览器页的两个子类别：手动「对这一页提问」的 browser，与网页 Agent 自动操作的
-      browser-automation。两者各自成 tab（与「对话」页 chat/task 两个 tab 同款样式），
-      各自记住上次看的是哪条会话。 */
-  const [browserTab, setBrowserTab] =
-    useState<"browser" | "browser-automation">("browser");
-  /** 当前生效的会话类别：浏览器页随子 tab 切换，其余页恒为 chat（task 视图走另一条
-      会话通道，不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
-  const effKind: SessionKind = browserOnly ? browserTab : (sessionKind ?? "chat");
   // 工作台：关 / 编码工作台（文件浏览 + 编辑器）/ Agent 浏览器 —— 三选一，可叠加在左侧
   const [workbenchType, setWorkbenchType] = useState<WorkbenchType>("off");
   const [drawerOpen, setDrawerOpen] = useState(false);
