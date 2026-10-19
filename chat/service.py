@@ -142,6 +142,7 @@ from ..peer import PeerService
 from ..agent.executor import AgentExecutor
 from ..agent.keeper import resolve_for_chat
 from .context import (
+    ThinkingCtx,
     WorkspaceCtx,
     current_memory_day,
     current_task_id,
@@ -149,6 +150,7 @@ from .context import (
     set_memory_day,
     set_message_id,
     set_session_id,
+    set_thinking,
     set_workspace,
 )
 from .runs import (
@@ -213,6 +215,27 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
     return WorkspaceCtx(root=root, read_only=read_only, agent_space=agent_space)
+
+
+async def resolve_thinking(session_id: Optional[str]) -> ThinkingCtx:
+    """读会话绑定的思考模式与强度（新/旧会话都从行里读，口径统一）。
+
+    行取不到（不该发生，_ensure_session 已保证存在）→ 回落"关 + low"。
+    与 resolve_workspace 同一思路：生效值以库里为准，不在调用链里透传——由
+    _ask_locked 注入 context，llm/client.py 每次调用时现读。
+    """
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            row = await db.get(ChatSession, session_id) if session_id else None
+            if row is not None:
+                return ThinkingCtx(
+                    enabled=bool(getattr(row, "thinking", False)),
+                    effort=str(getattr(row, "reasoning_effort", None) or "low"),
+                )
+    except Exception as e:  # noqa: BLE001 取不到不该挡住本轮对话
+        logger.debug("解析会话 %s 的思考模式失败，按关闭处理: %s", session_id, e)
+    return ThinkingCtx(enabled=False, effort="low")
 
 
 async def resolve_memory_day(session_id: Optional[str]) -> str:
@@ -327,6 +350,8 @@ async def run_one_ask(
     kind: str = SESSION_KIND_CHAT,
     step_id: Optional[str] = None,
     user_space_id: Optional[str] = None,
+    thinking: bool = False,
+    reasoning_effort: Optional[str] = None,
     title_text: Optional[str] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
     on_session: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -373,6 +398,8 @@ async def run_one_ask(
     异常一律**向外抛**，由调用方决定怎么告诉用户（本项目里两种入口的报错通道不同：
     SSE 的 ``error`` 帧 vs WebSocket 的 ``result`` 帧）。这里只负责把 hub 的终态封存好。
     """
+
+
     if not run_id:
         # 没有 run_id：登记不了、停不了、也刷新不回来。hub 的 publish 系列和
         # runs.py 的 register/unregister 对空 run_id 本来就全是 no-op（各自第一行
@@ -385,11 +412,15 @@ async def run_one_ask(
         svc = ChatService(agent_id=agent_id, session_id=session_id or None)
         svc.session_kind = kind
         svc.title_text = title_text
+        # 思考模式必须在 ensure_session_id（建行）之前设上，新会话才写得进库
+        svc.thinking = thinking
+        svc.reasoning_effort = reasoning_effort or "low"
         await svc.ensure_session_id()
         if on_session is not None:
             await on_session(svc.session_id)
         return await svc.ask(
             text, step_id=step_id or None, user_space_id=user_space_id or None,
+            thinking=thinking, reasoning_effort=reasoning_effort or None,
             attachments=attachments,
         )
 
@@ -397,6 +428,9 @@ async def run_one_ask(
     svc = ChatService(agent_id=agent_id, session_id=session_id or None)
     svc.session_kind = kind
     svc.title_text = title_text
+    # 思考模式必须在 ensure_session_id（建行）之前设上，新会话才写得进库
+    svc.thinking = thinking
+    svc.reasoning_effort = reasoning_effort or "low"
 
     async def should_stop() -> bool:
         return is_stopped(run_id)
@@ -432,6 +466,8 @@ async def run_one_ask(
             text,
             step_id=step_id or None,
             user_space_id=user_space_id or None,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort or None,
             on_step=emit_step,
             on_delta=emit_delta,
             should_stop=should_stop,
@@ -579,6 +615,10 @@ class ChatService:
         # 新建会话时写进 kind 的类别。**已有会话沿用库里的值**，不因为这里改了而改写——
         # 会话一旦建出来是哪一类就定了，否则它会从浏览器页的列表里凭空消失。
         self.session_kind: str = SESSION_KIND_CHAT
+        # 思考模式与强度：新建会话时由 ask/run_one_ask 设入并写库；已有会话沿用库里
+        # 绑定（生效值在 _ask_locked 里从行读回，见 resolve_thinking）。
+        self.thinking: bool = False
+        self.reasoning_effort: str = "low"
 
         # 本会话要绑定的模型预设（新建会话时由 ask 传入；已有会话沿用库里的绑定）。
 
@@ -588,6 +628,8 @@ class ChatService:
         step_id: Optional[str] = None,
         message_id: Optional[str] = None,
         user_space_id: Optional[str] = None,
+        thinking: bool = False,
+        reasoning_effort: Optional[str] = None,
         should_stop=None,
         on_step=None,
         on_delta=None,
@@ -617,6 +659,12 @@ class ChatService:
         # **仅对新建会话生效**：已有会话的绑定按约定中途不可换。
         if not self.session_id and not self.user_space_id:
             self.user_space_id = await _default_space_id()
+
+        # 思考模式：新建会话时记录（_ensure_session 写库）；已有会话沿用库里绑定。
+        # 与 user_space_id 同一套路——这里只存"新建要用"的值，真正生效以 _ask_locked
+        # 从会话行读回的为准（新/旧会话统一从行读，避免两条路径口径不一致）。
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort or "low"
 
         if not text.strip():
             return {"answer": "", "llm": self.agent.llm is not None}
@@ -699,6 +747,9 @@ class ChatService:
         # 注入本 (会话, agent) 的工作空间：后续 fs/git 工具与插件执行时从 context 取
         # 文件根与只读标志，使「同一 agent 在不同会话指向不同用户空间」生效。
         set_workspace(await resolve_workspace(self.agent, session_id))
+        # 思考模式：从会话行读回（新/旧会话统一从行读，口径一致），注入 context；
+        # llm/client.py 每次调用时现读，决定带不带 thinking / reasoning_effort。
+        set_thinking(await resolve_thinking(session_id))
 
         # 计算记忆锚点（原始问题消息）：新话轮用本轮 user 消息；恢复用挂起步骤所属消息
         if step_id:
@@ -920,6 +971,8 @@ class ChatService:
         set_memory_day(await resolve_memory_day(session_id))
         set_agent(self.agent_id, getattr(self.agent, "name", None))
         set_workspace(await resolve_workspace(self.agent, session_id))
+        # 续跑同样按会话的思考模式跑（恢复的是已有会话，thinking 早已绑在库里）
+        set_thinking(await resolve_thinking(session_id))
         # 模型跟随会话：会话定了才知道该用哪个模型
 
         # 与 ask 同理：同一会话串行执行，避免续跑与新一轮（或另一次续跑）并发写坏
@@ -1220,6 +1273,8 @@ class ChatService:
                     user_space_id=self.user_space_id,
                     title=DEFAULT_SESSION_TITLE,
                     kind=self.session_kind,
+                    thinking=self.thinking,
+                    reasoning_effort=self.reasoning_effort,
                 )
                 db.add(row)
                 await db.commit()
@@ -1248,6 +1303,8 @@ class ChatService:
                     user_space_id=self.user_space_id,
                     title=DEFAULT_SESSION_TITLE,
                     kind=self.session_kind,
+                    thinking=self.thinking,
+                    reasoning_effort=self.reasoning_effort,
                 )
                 db.add(row)
                 await db.commit()
@@ -1261,6 +1318,8 @@ class ChatService:
                 user_space_id=self.user_space_id,
                 title=DEFAULT_SESSION_TITLE,
                 kind=self.session_kind,
+                thinking=self.thinking,
+                reasoning_effort=self.reasoning_effort,
             )
             db.add(row)
             await db.commit()
@@ -1486,6 +1545,8 @@ class ChatService:
                 "user_space_id": s.user_space_id,
                 "status": s.status,
                 "kind": s.kind,
+                "thinking": bool(s.thinking),
+                "reasoning_effort": s.reasoning_effort or "low",
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "updated_at": s.updated_at.isoformat() if s.updated_at else None,
             }

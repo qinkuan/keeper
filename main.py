@@ -256,12 +256,23 @@ def main() -> None:
     if rest:
         port = int(rest[0])   # 命令行位置参数优先级最高
 
-    # 入站认证：token 从环境变量（桌面壳每次启动现生成）或 config.yaml 取。
-    # 详见 keeper/api/auth.py —— 那里写清了为什么裸奔的本地内核不能接受。
+    # 入站认证：token 从环境变量（桌面壳每次启动现生成）或 config.yaml 取；
+    # 两者都没有时，再退回 settings.yaml 里由设置页生成/保存的那个。
+    # 详见 keeper/auth/api.py —— 那里写清了为什么裸奔的本地内核不能接受。
     from keeper.auth import api as auth_mod
+    from keeper.setting import section as settings_section
 
     token, source = auth_mod.resolve_token(cfg)
+    if not token:
+        saved_token = (settings_section("auth").get("token") or "").strip()
+        if saved_token:
+            token, source = saved_token, "settings.yaml"
     auth_mod.configure(token, source)
+    # 应用设置页里用户显式的开/关：存了才覆盖，没存就沿用「有无 token」的默认。
+    # 这样「设置页关掉认证」能跨重启生效，而不只是当次运行有效。
+    auth_cfg = settings_section("auth")
+    if "enabled" in auth_cfg:
+        auth_mod.set_enabled(bool(auth_cfg.get("enabled")))
 
     logger.info("监听地址: %s:%d", host, port)
     logger.info("入站认证: %s", auth_mod.describe())

@@ -33,6 +33,7 @@ from ..config import (
     save_settings,
 )
 from . import invalidate_caches
+from ..auth import api as auth_api
 
 router = APIRouter(prefix="/manage/settings", tags=["settings"])
 logger = logging.getLogger(__name__)
@@ -204,12 +205,25 @@ class ContextIn(BaseModel):
 
 
 
+class AuthIn(BaseModel):
+    """入站认证开关（见 keeper/auth/api.py）。
+
+    关掉后内核不再校验 token——本机上图方便可用，但要知道代价：任何能访问这个
+    端口的进程 / 网页都能驱动内核（含能执行命令的对话接口）。开启时若没有任何
+    token，内核会现生成一个并通过保存响应回传，前端自动 adopt。
+    """
+
+    enabled: bool
+
+
 class SettingsIn(BaseModel):
     """设置页整体提交：各段都在（缺哪段就只改哪段）。"""
 
     prompt_dump: PromptDumpIn
     a2a: A2AIn
     context: ContextIn = Field(default_factory=ContextIn)
+    # 兼容旧前端：不传就不动认证开关
+    auth: Optional[AuthIn] = None
 
 
 def _load_cfg() -> Any:
@@ -232,15 +246,19 @@ def _dump() -> Dict[str, Any]:
     """
     cfg, err = _load_cfg()
     if cfg is not None:
-        return _dump_cfg(cfg)
-    logger.warning("读取设置失败，返回默认值（真实配置未读到）: %s", err)
-    return {
-        "prompt_dump": asdict(PromptDumpSection()),
-        "a2a": asdict(A2ASection()),
-        "context": asdict(ContextSection()),
-        "a2a_breakers": [],
-        "error": err,
-    }
+        out = _dump_cfg(cfg)
+    else:
+        logger.warning("读取设置失败，返回默认值（真实配置未读到）: %s", err)
+        out = {
+            "prompt_dump": asdict(PromptDumpSection()),
+            "a2a": asdict(A2ASection()),
+            "context": asdict(ContextSection()),
+            "a2a_breakers": [],
+            "error": err,
+        }
+    # 认证是**运行时状态**（内存里的 _enabled），不来自 cfg，单独补上。
+    out["auth"] = {"enabled": auth_api.is_enabled()}
+    return out
 
 
 
@@ -334,10 +352,19 @@ async def update_settings(body: SettingsIn) -> Dict[str, Any]:
             status_code=409,
             detail=f"配置读取失败，已拒绝保存（避免用默认值覆盖真实配置）：{err}",
         )
+    # 认证开关：先应用到运行时（可能现生成 token），再连同三段一起落盘。
+    auth_saved: Optional[Dict[str, Any]] = None
+    auth_generated_token = ""
+    if body.auth is not None:
+        res = auth_api.set_enabled(bool(body.auth.enabled))
+        auth_saved = {"enabled": res["enabled"], "token": res["token"]}
+        if res.get("generated"):
+            auth_generated_token = res["token"]
     save_settings(
         prompt_dump=body.prompt_dump.model_dump(),
         a2a=body.a2a.model_dump(),
         context=body.context.model_dump(),
+        auth=auth_saved,
     )
     # 保存即生效：清配置缓存（prompt dump / A2A / 上下文），并把新阈值同步到熔断器
     invalidate_caches()
@@ -348,7 +375,12 @@ async def update_settings(body: SettingsIn) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     a2a_settings.sync_from_config()
-    return _dump()
+    out = _dump()
+    # 仅当「这次开启才新生成」token 时回传它，让前端 adopt（存 sessionStorage）——
+    # 否则只有内核知道这个新 token，前端接着就 401。复用旧 token 时前端早已持有。
+    if auth_generated_token:
+        out.setdefault("auth", {})["token"] = auth_generated_token
+    return out
 
 
 @router.post("/reload", response_model=Dict[str, Any])

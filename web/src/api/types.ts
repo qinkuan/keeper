@@ -907,14 +907,23 @@ export interface CoreAgentSettings {
   agents?: { id: string | null; name: string }[];
 }
 
+/** 入站认证开关（见 keeper/auth/api.py）。``token`` 仅在「开启时新生成」那一次才回传，
+    前端拿到后 adopt（存 sessionStorage）；平时不回传，避免把 token 撒进响应体。 */
+export interface AuthSettings {
+  enabled: boolean;
+  token?: string;
+}
+
 /** 本地设置（写回 config.yaml）：按管理的内容分段。
 
-    注意**没有**核心 agent 段：核心 agent 由本地目录构建（agent.yaml / soul.md），
-    有自己独立的读写接口（see apiGetCoreAgent），不属于"本机设置"。 */
+   注意**没有**核心 agent 段：核心 agent 由本地目录构建（agent.yaml / soul.md），
+   有自己独立的读写接口（see apiGetCoreAgent），不属于"本机设置"。 */
 export interface SettingsResp {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
+  /** 入站认证开关（运行时状态，来自 keeper.auth） */
+  auth: AuthSettings;
   /** 各对端当前的熔断状态（只读） */
   a2a_breakers: BreakerState[];
   /** 手动重置熔断后返回：重置了几个对端 */
@@ -928,6 +937,8 @@ export interface SettingsInput {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
+  /** 入站认证开关；不传则不动（兼容旧调用） */
+  auth?: AuthSettings;
 }
 
 /** 趋势图上的一个点（一个时间桶） */
@@ -1082,6 +1093,9 @@ export interface CapabilityToggle {
  */
 export type SessionKind = "chat" | "task" | "browser" | "browser-automation";
 
+/** 思考强度：low / high / max（仅思考模式开启时有意义） */
+export type ReasoningEffort = "low" | "high" | "max";
+
 /** 会话列表里的一项（对应后端 chat_sessions 表） */
 export interface SessionItem {
   id: string;
@@ -1092,6 +1106,10 @@ export interface SessionItem {
   status?: string | null;
   /** chat=普通会话（「对话」页）／task=任务绑定会话／browser=浏览器会话（「浏览器」页） */
   kind?: SessionKind | null;
+  /** 本会话的思考模式（模型"先想再答"） */
+  thinking?: boolean;
+  /** 思考强度 */
+  reasoning_effort?: ReasoningEffort | string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1151,6 +1169,10 @@ export interface SessionWorkspace {
   effective_root: string;
   /** 是否只读 */
   read_only: boolean;
+  /** 本会话的思考模式（新会话的待选值由前端管；已有会话从这里回填） */
+  thinking: boolean;
+  /** 思考强度 */
+  reasoning_effort: ReasoningEffort | string;
 }
 
 /** GET /sessions 返回 */

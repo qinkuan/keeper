@@ -34,7 +34,7 @@ SETTINGS_FILENAME = "settings.yaml"
 # 允许出现在 settings.yaml 里的段：只有「设置页会改」的东西才准进，
 # 免得这个文件慢慢变成第二个 config.yaml。
 #
-KNOWN_SECTIONS = ("observability", "a2a", "context")
+KNOWN_SECTIONS = ("observability", "a2a", "context", "auth")
 
 
 def settings_path() -> Path:
@@ -176,6 +176,7 @@ def save_sections(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    auth: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """按段保存：只改传入的那几段，其余原样保留。返回保存后的完整内容。"""
     data = load_raw()
@@ -189,6 +190,8 @@ def save_sections(
         data["a2a"] = a2a
     if context is not None:
         data["context"] = context
+    if auth is not None:
+        data["auth"] = auth
     # 只保留已知段，避免写进杂项后没人认识
     data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
     save_raw(data)

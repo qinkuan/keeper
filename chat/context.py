@@ -249,6 +249,31 @@ def current_workspace() -> WorkspaceCtx | None:
     return _current_workspace.get()
 
 
+# 本次请求的思考模式（会话级）：是否"先想再答"，以及思考强度（low/high/max）。
+# 用 ContextVar 而不是层层透参——调用链很深（process → llm），透参会污染一堆签名
+# （同 workspace 的理由）。由 ChatService 在确定 session 后从库里读出并注入；
+# llm/client.py 每次调用时现读，决定要不要给模型带 thinking / reasoning_effort。
+@dataclass
+class ThinkingCtx:
+    enabled: bool
+    effort: str = "low"
+
+
+_current_thinking: ContextVar[Optional[ThinkingCtx]] = ContextVar(
+    "keeper_thinking", default=None
+)
+
+
+def set_thinking(t: ThinkingCtx | None) -> None:
+    """注入本次请求的思考模式（请求入口、确定 session 后调用一次）。"""
+    _current_thinking.set(t)
+
+
+def current_thinking() -> ThinkingCtx | None:
+    """取当前思考模式；无上下文（构建期 / 未注入）返回 None。"""
+    return _current_thinking.get()
+
+
 # 任务模式下「当前正在执行哪个计划点」：由执行器在发一轮对话前设置，
 # ``task.mark_item_done`` 工具执行时取它，才知道该把哪个点勾掉。
 # 同样用 ContextVar 而不是闭包：工具注册表是多会话共享的，闭包会串台。

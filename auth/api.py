@@ -43,7 +43,8 @@ from __future__ import annotations
 import hmac
 import logging
 import os
-from typing import Optional
+import secrets
+from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
 
@@ -58,14 +59,21 @@ TOKEN_QUERY = "keepertoken"
 
 _token: Optional[str] = None
 _token_source: str = ""
+# 是否**强制执行** token。默认跟随「有没有 token」（configure 时定）；设置页的开关
+# 会在运行时改它（见 set_enabled）。与「有没有 token」分成两件事，是为了让用户能
+# 临时把认证关掉 / 恢复，而不必真的去删 token。
+_enabled: bool = False
 
 
 def configure(token: Optional[str], source: str = "") -> None:
     """由内核启动流程调用一次，注入本次进程使用的 token。未传 = 不启用认证。"""
-    global _token, _token_source
+    global _token, _token_source, _enabled
     t = (token or "").strip()
     _token = t or None
     _token_source = source if t else ""
+    # 默认：有 token 就启用——与改造前「有无 token 决定是否认证」完全一致。
+    # 设置页若存了显式开关，启动时会在 configure 之后再用 set_enabled 覆盖（见 main.py）。
+    _enabled = _token is not None
 
 
 def current_token() -> Optional[str]:
@@ -74,12 +82,38 @@ def current_token() -> Optional[str]:
 
 
 def is_enabled() -> bool:
-    return _token is not None
+    return _enabled and _token is not None
+
+
+def set_enabled(on: bool) -> Dict[str, Any]:
+    """运行时开 / 关入站认证（设置页的开关调它）。返回 ``{enabled, token, generated}``。
+
+    - **关**：``_enabled=False``，token 留着但不再校验（``check`` 直接放行）；
+    - **开**：``_enabled=True``。若手上没有任何 token（命令行形态没配），现生成一个
+      （``secrets.token_urlsafe``）——否则「开了却无从校验」是个自欺的状态。
+
+    ``generated=True`` 表示 token 是刚生成的：调用方要把它交给前端 adopt（存进
+    sessionStorage），否则这个新 token 只有内核知道，前端接着就 401。桌面 / 已配
+    token 的命令行形态不会触发生成，前端无感。
+    """
+    global _token, _token_source, _enabled
+    generated = False
+    if on:
+        if not _token:
+            _token = secrets.token_urlsafe(32)
+            _token_source = "设置页生成"
+            generated = True
+        _enabled = True
+    else:
+        _enabled = False
+    return {"enabled": is_enabled(), "token": _token or "", "generated": generated}
 
 
 def describe() -> str:
-    """给启动日志用的一句话摘要。**不要**把 token 本身打出来。"""
-    if not _token:
+    """给启动日志 / 设置页用的一句话摘要。**不要**把 token 本身打出来。"""
+    if not is_enabled():
+        if _token:
+            return f"已关闭（有 token，但被设置页关掉：{_token_source}）"
         return "未启用（任何能访问该端口的进程都能调用全部接口）"
     return f"已启用（来源：{_token_source}）"
 
@@ -98,7 +132,7 @@ def check(request: Request) -> None:
     用 ``compare_digest`` 而不是 ``==``：后者按字符短路比较，理论上能逐字节试探。
     token 是本地进程间凭据、攻击面很小，但这个成本是零。
     """
-    if not _token:
+    if not is_enabled():
         return
     provided = _extract(request)
     if provided and hmac.compare_digest(provided, _token):

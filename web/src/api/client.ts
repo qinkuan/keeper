@@ -88,6 +88,10 @@ import type {
 
   SettingsInput,
 
+  AuthSettings,
+
+  ReasoningEffort,
+
   PromptDumpSettings,
 
   AskRate,
@@ -249,6 +253,24 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
   const t = authToken();
 
   return t ? { ...extra, "X-Keeper-Token": t } : { ...extra };
+
+}
+
+/** 采纳内核新生成的入站 token（设置页开启认证、且此前没有任何 token 时）。
+    存进 sessionStorage，之后 authToken() 就会带上它——否则这个新 token 只有内核
+    知道，前端接着就 401。桌面形态本就走 preload，一般不触发这里。 */
+
+export function setAuthToken(t: string) {
+
+  try {
+
+    if (t) sessionStorage.setItem(TOKEN_SS_KEY, t);
+
+  } catch {
+
+    /* 隐私模式等写不进去也无妨：桌面形态不依赖这条路径 */
+
+  }
 
 }
 
@@ -939,7 +961,11 @@ export function apiNewSession(
 
   userSpaceId?: string,
 
-  kind: SessionKind = "chat"
+  kind: SessionKind = "chat",
+
+  thinking?: boolean,
+
+  reasoningEffort?: ReasoningEffort
 
 ) {
 
@@ -950,6 +976,10 @@ export function apiNewSession(
     {
 
       user_space_id: userSpaceId ?? "",
+
+      thinking: thinking ?? false,
+
+      reasoning_effort: reasoningEffort ?? "low",
 
       kind,
 
@@ -1348,6 +1378,14 @@ export function apiChatStream(
 
     userSpaceId?: string;
 
+    /** 思考模式（仅新建会话时生效；已有会话沿用库里绑定，同 userSpaceId） */
+
+    thinking?: boolean;
+
+    /** 思考强度（仅 thinking 开启时有意义） */
+
+    reasoningEffort?: ReasoningEffort;
+
     /** 新建会话时写进 kind 的类别；已有会话忽略这个值 */
 
     kind?: SessionKind;
@@ -1397,6 +1435,12 @@ export function apiChatStream(
       step_id: opts.stepId || "",
 
       user_space_id: opts.userSpaceId === "" ? undefined : opts.userSpaceId,
+
+      // 思考：仅新会话传（已有会话前端传 undefined，后端沿用库里绑定）
+
+      thinking: opts.thinking,
+
+      reasoning_effort: opts.reasoningEffort,
 
       kind: opts.kind || "chat",
 
@@ -2084,15 +2128,41 @@ export function apiUpdateSessionWorkspace(
 
   sessionId: string,
 
-  userSpaceId?: string | null
+  userSpaceId?: string | null,
+
+  thinking?: { enabled: boolean; reasoning_effort?: ReasoningEffort }
 
 ) {
 
-  return apiPut<{ session_id: string; user_space_id: string | null; ok?: boolean }>(
+  return apiPut<{
+
+    session_id: string;
+
+    user_space_id: string | null;
+
+    thinking?: boolean;
+
+    reasoning_effort?: ReasoningEffort;
+
+    ok?: boolean;
+
+  }>(
 
     `/agents/${agentId}/sessions/${sessionId}`,
 
-    { user_space_id: userSpaceId ?? null }
+    {
+
+      // 只带显式给的字段：思考可单独改而不动工作空间（后端用 exclude_unset 区分）
+
+      ...(userSpaceId !== undefined ? { user_space_id: userSpaceId ?? null } : {}),
+
+      ...(thinking
+
+        ? { thinking: thinking.enabled, reasoning_effort: thinking.reasoning_effort }
+
+        : {}),
+
+    }
 
   );
 

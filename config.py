@@ -572,6 +572,7 @@ def save_settings(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    auth: Optional[Dict[str, Any]] = None,
 ) -> None:
     """保存用户设置（写 ``settings.yaml``，**不碰** config.yaml）。
 
@@ -589,4 +590,5 @@ def save_settings(
         prompt_dump=prompt_dump,
         a2a=a2a,
         context=context,
+        auth=auth,
     )

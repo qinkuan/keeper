@@ -100,6 +100,15 @@ class ChatSession(Base):
     # 又会被用户改个名就失效。这列既不参与用户可见字段，也不随重命名/删除变化。
     ball_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 思考模式：这一轮是否让模型"先想再答"（DeepSeek thinking / 推理）。
+    # 会话级、建会话时定，之后沿用——与 user_space_id 同一套路：新建取前端传入的值，
+    # 已有会话读库里绑定的（见 chat/api.py 与 chat/service.py）。
+    thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 思考强度：low / high / max。仅 thinking 开启时有意义，关时忽略。
+    # 同 kind：无 DB CHECK，取值校验在接口层，新增取值不需迁移。
+    reasoning_effort: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, default="low"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow

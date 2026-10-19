@@ -522,6 +522,26 @@ async def _migrate_chat_session_ball_key(conn) -> None:
         )
 
 
+async def _migrate_chat_session_thinking(conn) -> None:
+    """chat_sessions 补 thinking / reasoning_effort 列：会话级思考模式与强度。
+
+    存量行回填 thinking=0（关）/ reasoning_effort='low'——与"从没配过思考"的行为一致。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "thinking" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN thinking BOOLEAN DEFAULT 0"
+        )
+    if "reasoning_effort" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN reasoning_effort TEXT DEFAULT 'low'"
+        )
+    await conn.exec_driver_sql(
+        "UPDATE chat_sessions SET reasoning_effort = 'low' WHERE reasoning_effort IS NULL"
+    )
+
+
 async def _seed_default_user_space(conn) -> None:
     """播种系统默认用户空间 ``~/.keeper/workspace/user/default``（幂等）。
 
@@ -761,6 +781,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_chat_session_kind(conn)
         await _migrate_chat_session_ball_key(conn)
         await _migrate_chat_session_deleted_at(conn)
+        await _migrate_chat_session_thinking(conn)
         await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)
         await _migrate_strip_tmp_artifacts(conn)

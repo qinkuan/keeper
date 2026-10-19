@@ -354,6 +354,8 @@ class LangChainLLM:
         self.usage = TokenUsage()
         # provider 不接受输出上限参数时置位：降级一次就别再试了（见 _ainvoke）
         self._no_output_cap = False
+        # 同理，provider 不接受思考参数（reasoning_effort / thinking）时置位
+        self._no_reasoning = False
 
     async def _record_usage(
         self,
@@ -520,23 +522,49 @@ class LangChainLLM:
             return {}
         return {"max_tokens": n} if n > 0 else {}
 
+    def _thinking_kwargs(self) -> Dict[str, Any]:
+        """本次调用要附加的思考参数（reasoning_effort + thinking）；未开启返回空 dict。
+
+        读 ContextVar（chat.context.current_thinking），与 _output_kwargs 同一思路：
+        思考是**会话级**的，而模型实例跨会话复用，所以只能调用时按当前请求注入。
+        DeepSeek 风格：thinking 开启 → ``extra_body={"thinking": {"type": "enabled"}}``；
+        ``reasoning_effort``（low/high/max）作为顶层参数透传。
+        """
+        if self._no_reasoning:
+            return {}
+        try:
+            from ..chat.context import current_thinking
+
+            t = current_thinking()
+        except Exception as e:  # noqa: BLE001 读不到就按不启用处理
+            logger.debug("读取思考模式失败，按不启用处理: %s", e)
+            return {}
+        if t is None or not t.enabled:
+            return {}
+        kw: Dict[str, Any] = {"extra_body": {"thinking": {"type": "enabled"}}}
+        if t.effort:
+            kw["reasoning_effort"] = t.effort
+        return kw
+
     async def _ainvoke(self, msgs: list[Any]) -> Any:
         """ainvoke + 输出上限；provider 不认这个参数时退回不带参数的调用。
 
         参数名各 provider 不统一（OpenAI 系是 ``max_tokens``，Ollama 是
         ``num_predict``），所以必须能失败降级——不能为了一个上限把整轮对话搞挂。
         """
-        kw = self._output_kwargs()
+        kw = {**self._output_kwargs(), **self._thinking_kwargs()}
         if kw:
             try:
                 return await self._model.ainvoke(msgs, **kw)
             except (TypeError, ValueError) as e:
-                # 只在第一次降级时告警，否则每步都刷日志
+                # 只在第一次降级时告警，否则每步都刷日志。两个附加参数一起降级：
+                # 拆开重试会多打一次 API，而它们本就是"锦上添花"，一起退更稳妥。
                 logger.warning(
-                    "[llm] 当前 provider 不接受输出上限参数（%s），"
-                    "本次起不再下发该参数", e,
+                    "[llm] 当前 provider 不接受附加参数（输出上限/思考，%s），"
+                    "本次起不再下发这些参数", e,
                 )
                 self._no_output_cap = True
+                self._no_reasoning = True
         return await self._model.ainvoke(msgs)
 
     def _direct_client(self):
@@ -590,6 +618,7 @@ class LangChainLLM:
             model=self.cfg.model_name,
             messages=self._direct_payload(msgs),
             **self._output_kwargs(),
+            **self._thinking_kwargs(),
         )
         u = getattr(resp, "usage", None)
         if u:
@@ -608,6 +637,7 @@ class LangChainLLM:
             messages=self._direct_payload(msgs),
             stream=True,
             **self._output_kwargs(),
+            **self._thinking_kwargs(),
         )
         async for chunk in resp:
             # usage 可能落在倒数第二个分片（DeepSeek 的已知行为，见 astream_chat）
@@ -670,7 +700,7 @@ class LangChainLLM:
             # 输出上限同样下发到流式：不加的话前端打字机这条主路径完全不受限，
             # 而它恰恰是最容易写出超长 ACTION_INPUT 的那条（要边生成边显示）。
             # 参数不被接受时下面的 except 会兜住，降级成一次性调用。
-            kw = self._output_kwargs()
+            kw = {**self._output_kwargs(), **self._thinking_kwargs()}
             async for chunk in self._model.astream(msgs, **kw):
                 if ttft_ms is None:  # 首字延迟：第一个 chunk 到达的时间
                     ttft_ms = int((time.perf_counter() - t0) * 1000)
