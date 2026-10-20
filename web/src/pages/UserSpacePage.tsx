@@ -1,64 +1,55 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronRight,
+  Download,
   File as FileIcon,
+  FileText,
   Folder,
   FolderOpen,
+  FolderPlus,
   Loader2,
-  TriangleAlert,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Upload,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   apiBrowseDir,
-  apiCreateUserSpace,
-  apiDeleteUserSpace,
-  apiListUserSpaces,
-  apiUpdateUserSpace,
+  apiDeleteMySpaceFile,
+  apiDownloadMySpace,
+  apiGetMySpace,
+  apiMkdirMySpace,
+  apiMySpaceFile,
+  apiOpenMySpace,
+  apiRenameMySpace,
+  apiSetMySpace,
+  apiUploadMySpace,
 } from "../api/client";
-import type { DirBrowseResp, UserSpace, UserSpaceInput } from "../api/types";
-import { Field, TextInput, ToggleField } from "../components/ui/Form";
-import { Hint, PageHeader, Section } from "../components/ui/Page";
-import { Table } from "../components/ui/Table";
-import type { Column } from "../components/ui/Table";
+import type { DirBrowseResp, MySpaceFile } from "../api/types";
+import { Hint, PageHeader } from "../components/ui/Page";
 import { Modal } from "../components/ui/Modal";
-import { Pill } from "../components/ui/Pill";
-import { ConfirmButton, DANGER_BTN, PLAIN_BTN } from "../components/ui/Confirm";
 import { toast } from "../components/ui/Toast";
 import { cn } from "../lib/utils";
+import MarkdownView from "../components/MarkdownView";
 
-const DEFAULT_FORM: UserSpaceInput & { id?: string } = {
-  name: "",
-  path: "",
-  read_only: true,
-  description: null,
-};
-
-/** 树节点：自建（替代 antd Tree）。懒加载，children 为 undefined 表示"还没展开过" */
-interface TreeNode {
+/** 树节点：既能是目录（可展开）也能是文件（叶子）。 */
+interface TNode {
   title: string;
   key: string;
-  children?: TreeNode[];
-  /** 已确认没有子目录，用来隐藏展开箭头 */
+  isDir: boolean;
   leaf?: boolean;
+  children?: TNode[];
 }
 
-/** 在树里按 key 递归地把 children 塞进去（懒加载用）。 */
-function injectTreeChildren(
-  nodes: TreeNode[],
-  key: string,
-  children: TreeNode[]
-): TreeNode[] {
-  return nodes.map((n) =>
-    n.key === key
-      ? { ...n, children, leaf: children.length === 0 }
-      : n.children
-      ? { ...n, children: injectTreeChildren(n.children, key, children) }
-      : n
-  );
-}
+const basename = (p: string) => {
+  const t = p.replace(/\/+$/, "");
+  const i = t.lastIndexOf("/");
+  return i >= 0 ? t.slice(i + 1) : t;
+};
 
 /** 在树里按 key 递归查找节点。 */
-function findNode(nodes: TreeNode[], key: string): TreeNode | undefined {
+function findNode(nodes: TNode[], key: string): TNode | undefined {
   for (const n of nodes) {
     if (n.key === key) return n;
     if (n.children) {
@@ -69,23 +60,141 @@ function findNode(nodes: TreeNode[], key: string): TreeNode | undefined {
   return undefined;
 }
 
-/** 递归渲染目录树。缩进用 padding 而不是深层嵌套 div——省掉一层盒子。 */
-function TreeView({
+/** 在树里按 key 递归把 children 塞进去（懒加载用）。 */
+function injectChildren(nodes: TNode[], key: string, children: TNode[]): TNode[] {
+  return nodes.map((n) =>
+    n.key === key
+      ? { ...n, children, leaf: children.length === 0 }
+      : n.children
+        ? { ...n, children: injectChildren(n.children, key, children) }
+        : n
+  );
+}
+
+/** 拉取某目录的子项（目录 + 文件，目录在前、按名排序），用于左侧树。 */
+async function loadChildren(p: string): Promise<TNode[]> {
+  const r = await apiBrowseDir(p);
+  const dirs: TNode[] = r.dirs.map((d) => ({
+    title: d.name,
+    key: d.path,
+    isDir: true,
+  }));
+  const files: TNode[] = r.files.map((f) => ({
+    title: f.name,
+    key: f.path,
+    isDir: false,
+    leaf: true,
+  }));
+  return [...dirs, ...files].sort(
+    (a, b) => Number(b.isDir) - Number(a.isDir) || a.title.localeCompare(b.title)
+  );
+}
+
+/** 在树里把 target 路径的祖先链都展开、确保中间节点已加载。 */
+async function syncTreeToPath(
+  target: string,
+  data0: TNode[]
+): Promise<{ data: TNode[]; expanded: Set<string> }> {
+  const segs = target.split("/").filter(Boolean);
+  const chain: string[] = [
+    "/",
+    ...segs.map((_, i) => "/" + segs.slice(0, i + 1).join("/")),
+  ];
+  let data = data0;
+  for (let i = 0; i < chain.length - 1; i++) {
+    const key = chain[i];
+    const node = findNode(data, key);
+    if (!node || node.children == null) {
+      const kids = await loadChildren(key);
+      data = injectChildren(data, key, kids);
+    }
+  }
+  return { data, expanded: new Set(chain.slice(0, -1)) };
+}
+
+const EXT_LANG: Record<string, string> = {
+  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", mjs: "javascript",
+  py: "python", rb: "ruby", go: "go", rs: "rust", java: "java", kt: "kotlin",
+  c: "c", h: "c", cpp: "cpp", cs: "csharp", php: "php", swift: "swift",
+  json: "json", yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", cfg: "ini",
+  sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
+  html: "html", htm: "html", css: "css", scss: "scss", less: "less",
+  sql: "sql", xml: "xml", svg: "xml", md: "markdown", lua: "lua",
+  dockerfile: "docker", makefile: "makefile",
+};
+function extLang(name: string): string {
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  return EXT_LANG[ext] ?? "";
+}
+function fence(content: string, lang: string): string {
+  return "```" + lang + "\n" + content + "\n```";
+}
+const fmtSize = (size: number) => {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+};
+const fmtMtime = (mtime: number) =>
+  new Date(mtime * 1000).toLocaleString("zh-CN", { hour12: false });
+
+/** 目录树里每行右侧的小操作按钮（hover 才显示）。 */
+function RowBtn({
+  title,
+  danger,
+  onClick,
+  children,
+}: {
+  title: string;
+  danger?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className={cn(
+        "flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/[0.06] hover:text-ink-strong",
+        danger && "hover:bg-red-500/10 hover:text-red-500"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 左侧目录树（递归）。目录可展开 / 收起；hover 每行出现原生文件操作按钮。 */
+function TreeNav({
   nodes,
   depth,
   expanded,
   selected,
   loadingKey,
   onToggle,
-  onSelect,
+  onSelectFile,
+  onOpen,
+  onDownload,
+  onRename,
+  onDelete,
+  onMkdirHere,
 }: {
-  nodes: TreeNode[];
+  nodes: TNode[];
   depth: number;
   expanded: Set<string>;
-  selected: string;
+  selected: string | null;
   loadingKey: string | null;
   onToggle: (key: string) => void;
-  onSelect: (key: string) => void;
+  onSelectFile: (key: string) => void;
+  onOpen: (key: string, isDir: boolean) => void;
+  onDownload: (key: string) => void;
+  onRename: (key: string) => void;
+  onDelete: (key: string) => void;
+  onMkdirHere: (key: string) => void;
 }) {
   return (
     <div>
@@ -96,16 +205,13 @@ function TreeView({
         return (
           <div key={n.key}>
             <div
-              style={{ paddingLeft: depth * 14 + 4 }}
+              style={{ paddingLeft: depth * 14 + 8 }}
               className={cn(
-                "flex items-center gap-1 rounded-md py-1 pr-2 transition-colors",
+                "group flex items-center gap-1 rounded-md py-1 pr-1 transition-colors",
                 isSel ? "bg-brand/10" : "hover:bg-black/[0.04] dark:hover:bg-white/5"
               )}
             >
-              {/* 展开箭头：叶子节点占位保持缩进对齐 */}
-              {n.leaf && n.children?.length === 0 ? (
-                <span className="h-3.5 w-3.5 shrink-0" />
-              ) : (
+              {n.isDir ? (
                 <button
                   type="button"
                   onClick={() => onToggle(n.key)}
@@ -122,27 +228,67 @@ function TreeView({
                     />
                   )}
                 </button>
+              ) : (
+                <span className="h-3.5 w-3.5 shrink-0" />
               )}
               <button
                 type="button"
-                onClick={() => onSelect(n.key)}
+                onClick={() => (n.isDir ? onToggle(n.key) : onSelectFile(n.key))}
                 className={cn(
-                  "min-w-0 flex-1 truncate text-left text-[13px]",
-                  isSel ? "text-brand" : "text-ink"
+                  "flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-[13px]",
+                  n.isDir ? "text-ink" : "text-ink-muted",
+                  isSel && "text-brand"
                 )}
               >
-                {n.title}
+                {n.isDir ? (
+                  <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                ) : (
+                  <FileIcon className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                )}
+                <span className="truncate">{n.title}</span>
               </button>
+              {/* hover 才出现：仿桌面文件管理器的右键式操作 */}
+              <div className="ml-auto hidden shrink-0 items-center gap-0.5 pl-1 group-hover:flex">
+                {n.isDir ? (
+                  <RowBtn title="在此新建子文件夹" onClick={() => onMkdirHere(n.key)}>
+                    <FolderPlus className="h-3.5 w-3.5" />
+                  </RowBtn>
+                ) : (
+                  <RowBtn
+                    title="下载 / 用系统程序打开"
+                    onClick={() => onDownload(n.key)}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </RowBtn>
+                )}
+                <RowBtn
+                  title="在文件管理器中打开"
+                  onClick={() => onOpen(n.key, n.isDir)}
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                </RowBtn>
+                <RowBtn title="重命名" onClick={() => onRename(n.key)}>
+                  <Pencil className="h-3.5 w-3.5" />
+                </RowBtn>
+                <RowBtn title="删除" danger onClick={() => onDelete(n.key)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </RowBtn>
+              </div>
             </div>
             {open && n.children && n.children.length > 0 && (
-              <TreeView
+              <TreeNav
                 nodes={n.children}
                 depth={depth + 1}
                 expanded={expanded}
                 selected={selected}
                 loadingKey={loadingKey}
                 onToggle={onToggle}
-                onSelect={onSelect}
+                onSelectFile={onSelectFile}
+                onOpen={onOpen}
+                onDownload={onDownload}
+                onRename={onRename}
+                onDelete={onDelete}
+                onMkdirHere={onMkdirHere}
               />
             )}
           </div>
@@ -152,23 +298,72 @@ function TreeView({
   );
 }
 
+/** 右侧文件内容：受限读取后渲染。Markdown 直接渲染，其它文本按语言高亮，
+ *  二进制 / 过大文件降级为「无法预览」信息卡。 */
+function FileViewer({ path }: { path: string }) {
+  const fq = useQuery({
+    queryKey: ["my-space-file", path],
+    queryFn: () => apiMySpaceFile(path),
+    // 切回窗口时自动拉最新（你在别的编辑器改完、点回本页即见）
+    refetchOnWindowFocus: true,
+  });
+  if (fq.isLoading)
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        加载中…
+      </div>
+    );
+  if (fq.isError)
+    return (
+      <div className="p-4">
+        <Hint tone="danger">{(fq.error as Error)?.message ?? "读取失败"}</Hint>
+      </div>
+    );
+  const f: MySpaceFile = fq.data!;
+  if (!f.is_text || f.too_large)
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+        <FileText className="h-8 w-8 text-ink-faint" />
+        <div className="text-[13px] text-ink">无法预览此文件</div>
+        <div className="text-[12px] text-ink-muted">
+          {f.name} · {fmtSize(f.size)}
+        </div>
+        <div className="text-[12px] text-ink-faint">
+          {f.too_large ? "文件过大（> 2MB）" : "非文本文件"}
+        </div>
+      </div>
+    );
+  const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : "";
+  const isMd = ["md", "markdown", "mdx"].includes(ext);
+  const text = isMd ? f.text : fence(f.text, extLang(f.name));
+  return (
+    <div className="kp-md mx-auto max-w-[900px]">
+      <MarkdownView text={text} mode="static" />
+    </div>
+  );
+}
+
 /**
- * 用户空间管理：用户自管的命名文件路径。
+ * 「我的空间」：唯一一个用户空间。
  *
- * default 是系统默认工作空间，始终存在且不可编辑 / 删除（改它会让默认工作区
- * 指向别处，所有没显式绑定空间的会话跟着漂移）。界面上把按钮置灰而不是藏起来，
- * 是为了让"为什么这个不能删"有迹可循。
+ * - 没配置 → 提醒页，引导去选一个文件夹（服务端目录浏览器）；
+ * - 已配置 → 仿 Obsidian 的两栏文件浏览器：左侧目录树、右侧文件内容预览
+ *   （Markdown 直接渲染，其它文本按语言高亮，二进制 / 过大文件降级为信息卡）。
+ * 选好的路径存 settings.yaml，立即生效。
  */
 export default function UserSpacePage() {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState<UserSpace | null>(null);
-  const [form, setForm] = useState<UserSpaceInput & { id?: string }>(DEFAULT_FORM);
-  const [formErr, setFormErr] = useState<Record<string, string>>({});
-  const patch = (k: keyof UserSpaceInput, v: unknown) =>
-    setForm((p) => ({ ...p, [k]: v }));
+  const q = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
+  const path = (q.data?.path ?? "").trim();
 
-  // 目录浏览：左侧目录树 + 右侧当前目录内容
+  // 已配置态：目录树
+  const [treeData, setTreeData] = useState<TNode[]>([]);
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  // 选目录弹窗
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browsePath, setBrowsePath] = useState("");
   const [browseParent, setBrowseParent] = useState<string | null>(null);
@@ -176,39 +371,188 @@ export default function UserSpacePage() {
   const [browseFiles, setBrowseFiles] = useState<DirBrowseResp["files"]>([]);
   const [browseErr, setBrowseErr] = useState<string | null>(null);
   const [browseLoading, setBrowseLoading] = useState(false);
-  const [treeData, setTreeData] = useState<TreeNode[]>([]);
-  const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
-  const [selectedKey, setSelectedKey] = useState("");
+  const [browseTree, setBrowseTree] = useState<TNode[]>([]);
+  const [browseExpanded, setBrowseExpanded] = useState<Set<string>>(new Set());
+  const [browseSelKey, setBrowseSelKey] = useState("");
 
-  const loadTreeChildren = async (path: string): Promise<TreeNode[]> => {
-    const r = await apiBrowseDir(path);
-    return r.dirs.map((d) => ({ title: d.name, key: d.path, isLeaf: false } as TreeNode));
-  };
+  const saveM = useMutation({
+    mutationFn: (p: string) => apiSetMySpace(p),
+    onSuccess: () => {
+      toast.success("已保存「我的空间」");
+      qc.invalidateQueries({ queryKey: ["my-space"] });
+      setBrowseOpen(false);
+    },
+    onError: (e: any) => toast.error(e?.message || "保存失败"),
+  });
 
-  /** 把树同步到 target 路径：确保从 "/" 起的祖先链都展开；除末节点外逐级
-      确保子目录已加载（这样目标节点才会存在于树中）。 */
-  const syncTreeToPath = async (
-    target: string,
-    data0: TreeNode[]
-  ): Promise<{ data: TreeNode[]; expanded: Set<string> }> => {
-    const segs = target.split("/").filter(Boolean);
-    const chain: string[] = [
-      "/",
-      ...segs.map((_, i) => "/" + segs.slice(0, i + 1).join("/")),
-    ];
-    let data = data0;
-    for (let i = 0; i < chain.length - 1; i++) {
-      const key = chain[i];
-      const node = findNode(data, key);
-      if (!node || node.children == null) {
-        const kids = await loadTreeChildren(key);
-        data = injectTreeChildren(data, key, kids);
+  // path 变化时：重置选中，并加载空间根目录的一级子项
+  useEffect(() => {
+    if (!path) {
+      setTreeData([]);
+      setSelectedFile(null);
+      return;
+    }
+    let cancelled = false;
+    setTreeLoadingKey(path);
+    (async () => {
+      try {
+        const kids = await loadChildren(path);
+        if (cancelled) return;
+        setTreeData([{ title: basename(path), key: path, isDir: true, children: kids }]);
+        setExpandedKeys(new Set([path]));
+      } catch (e: any) {
+        if (!cancelled) toast.error(e?.message || "加载目录失败");
+      } finally {
+        if (!cancelled) setTreeLoadingKey(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+
+  const onToggleDir = async (key: string) => {
+    const willOpen = !expandedKeys.has(key);
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    // 每次展开都重新列目录（仿原生文件管理器：外面新拷进来的文件立即出现）
+    if (willOpen) {
+      setTreeLoadingKey(key);
+      try {
+        const kids = await loadChildren(key);
+        setTreeData((prev) => injectChildren(prev, key, kids));
+      } catch (e: any) {
+        toast.error(e?.message || "加载子目录失败");
+      } finally {
+        setTreeLoadingKey(null);
       }
     }
-    return { data, expanded: new Set(chain.slice(0, -1)) };
   };
 
+  /** 刷新整棵已展开的树：把每个已加载节点重新列一遍目录（保留展开状态）。 */
+  const refreshTree = async () => {
+    if (!path) return;
+    const loadedKeys: string[] = [];
+    const walk = (nodes: TNode[]) =>
+      nodes.forEach((n) => {
+        if (n.children != null) {
+          loadedKeys.push(n.key);
+          walk(n.children);
+        }
+      });
+    walk(treeData);
+    if (loadedKeys.length === 0) loadedKeys.push(path);
+    setTreeLoadingKey(path);
+    try {
+      let data = treeData;
+      for (const k of loadedKeys) {
+        const kids = await loadChildren(k);
+        data = injectChildren(data, k, kids);
+      }
+      setTreeData(data);
+    } catch (e: any) {
+      toast.error(e?.message || "刷新目录失败");
+    } finally {
+      setTreeLoadingKey(null);
+    }
+  };
+
+  /** 刷新当前打开的文件内容（外面改了、点一下立刻看到最新）。 */
+  const refreshFile = () => {
+    if (selectedFile)
+      qc.invalidateQueries({ queryKey: ["my-space-file", selectedFile] });
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 上传目标目录 = 当前选中文件所在目录（没选中则空间根）；转成相对空间根的路径给后端
+  const uploadTargetDir =
+    selectedFile && selectedFile.includes("/")
+      ? selectedFile.replace(/\/[^/]*$/, "") || path
+      : path;
+  const uploadTargetRel =
+    uploadTargetDir === path
+      ? ""
+      : uploadTargetDir.slice(path.length).replace(/^\//, "");
+
+  /** 把 OS 拖进来的文件写进「我的空间」（拷入）。 */
+  const doUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    let ok = 0;
+    for (const f of Array.from(files)) {
+      try {
+        await apiUploadMySpace(f, uploadTargetRel);
+        ok++;
+      } catch (e: any) {
+        toast.error(`上传失败 ${f.name}：${e?.message || e}`);
+      }
+    }
+    if (ok) {
+      toast.success(`已拷贝 ${ok} 个文件到「我的空间」`);
+      refreshTree();
+    }
+  };
+
+  const doDownload = (key: string) => {
+    apiDownloadMySpace(key).catch((e) => toast.error(e?.message || "下载失败"));
+  };
+
+  const doOpen = (key: string, isDir: boolean) => {
+    apiOpenMySpace(key, isDir).catch((e) => toast.error(e?.message || "打开失败"));
+  };
+
+  const doRename = async (key: string) => {
+    const cur = key.split("/").pop() || "";
+    const name = window.prompt("重命名为：", cur);
+    if (!name || name === cur) return;
+    try {
+      const r = await apiRenameMySpace(key, name);
+      toast.success("已重命名");
+      if (selectedFile === key) setSelectedFile(r.path);
+      refreshTree();
+    } catch (e: any) {
+      toast.error(e?.message || "重命名失败");
+    }
+  };
+
+  const doDelete = async (key: string) => {
+    if (
+      !window.confirm(
+        `确定删除 ${key.split("/").pop()}？（空间内的文件将被永久删除）`
+      )
+    )
+      return;
+    try {
+      await apiDeleteMySpaceFile(key);
+      toast.success("已删除");
+      if (
+        selectedFile &&
+        (selectedFile === key || selectedFile.startsWith(key + "/"))
+      )
+        setSelectedFile(null);
+      refreshTree();
+    } catch (e: any) {
+      toast.error(e?.message || "删除失败");
+    }
+  };
+
+  const doMkdir = async (parentKey: string) => {
+    const name = window.prompt("新建文件夹名称：", "新建文件夹");
+    if (!name) return;
+    try {
+      await apiMkdirMySpace(parentKey, name);
+      toast.success("已新建文件夹");
+      refreshTree();
+    } catch (e: any) {
+      toast.error(e?.message || "新建失败");
+    }
+  };
+
+  // ── 选目录弹窗逻辑 ──
   const navigateDir = async (p?: string) => {
     setBrowseLoading(true);
     try {
@@ -218,11 +562,10 @@ export default function UserSpacePage() {
       setBrowseDirs(r.dirs);
       setBrowseFiles(r.files);
       setBrowseErr(r.error);
-      // 右侧进入子目录时，左侧树同步展开 / 选中到该路径
-      const syn = await syncTreeToPath(r.path, treeData);
-      setTreeData(syn.data);
-      setExpandedKeys(syn.expanded);
-      setSelectedKey(r.path);
+      const syn = await syncTreeToPath(r.path, browseTree);
+      setBrowseTree(syn.data);
+      setBrowseExpanded(syn.expanded);
+      setBrowseSelKey(r.path);
     } catch (e: any) {
       setBrowseErr(e?.message || "浏览失败");
     } finally {
@@ -231,7 +574,7 @@ export default function UserSpacePage() {
   };
 
   const openBrowse = async () => {
-    const start = form.path || undefined;
+    const start = path || undefined;
     setBrowseOpen(true);
     setBrowseLoading(true);
     try {
@@ -241,16 +584,15 @@ export default function UserSpacePage() {
       setBrowseDirs(r.dirs);
       setBrowseFiles(r.files);
       setBrowseErr(r.error);
-      // 树始终从系统根 "/" 起构建，再展开到 start 所在位置
-      const rootKids = await loadTreeChildren("/");
-      let data: TreeNode[] = [
-        { title: "/", key: "/", children: rootKids, leaf: rootKids.length === 0 },
+      const rootKids = await loadChildren("/");
+      let data: TNode[] = [
+        { title: "/", key: "/", isDir: true, children: rootKids },
       ];
       const syn = await syncTreeToPath(r.path, data);
       data = syn.data;
-      setTreeData(data);
-      setExpandedKeys(syn.expanded);
-      setSelectedKey(r.path);
+      setBrowseTree(data);
+      setBrowseExpanded(syn.expanded);
+      setBrowseSelKey(r.path);
     } catch (e: any) {
       setBrowseErr(e?.message || "浏览失败");
     } finally {
@@ -258,19 +600,18 @@ export default function UserSpacePage() {
     }
   };
 
-  const onTreeToggle = async (key: string) => {
-    const node = findNode(treeData, key);
-    // 第一次展开：先把子目录拉回来，再置为展开
+  const onBrowseToggle = async (key: string) => {
+    const node = findNode(browseTree, key);
     if (node && node.children == null) {
       setTreeLoadingKey(key);
       try {
-        const kids = await loadTreeChildren(key);
-        setTreeData((prev) => injectTreeChildren(prev, key, kids));
+        const kids = await loadChildren(key);
+        setBrowseTree((prev) => injectChildren(prev, key, kids));
       } finally {
         setTreeLoadingKey(null);
       }
     }
-    setExpandedKeys((prev) => {
+    setBrowseExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -279,267 +620,204 @@ export default function UserSpacePage() {
   };
 
   const chooseDir = () => {
-    patch("path", browsePath);
-    setBrowseOpen(false);
+    if (browsePath) saveM.mutate(browsePath);
   };
-
-  // 文件大小 / 修改时间格式化
-  const fmtSize = (size: number | null) => {
-    if (size == null) return "—";
-    if (size < 1024) return `${size} B`;
-    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-    if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-    return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  };
-  const fmtMtime = (mtime: number | null) =>
-    mtime == null
-      ? "—"
-      : new Date(mtime * 1000).toLocaleString("zh-CN", { hour12: false });
-
-  const q = useQuery({ queryKey: ["user-spaces"], queryFn: apiListUserSpaces });
-
-  const saveM = useMutation({
-    mutationFn: (v: UserSpaceInput & { id?: string }) => {
-      const { id, ...body } = v;
-      return id ? apiUpdateUserSpace(id, body) : apiCreateUserSpace(body);
-    },
-    onSuccess: () => {
-      toast.success("已保存");
-      setOpen(false);
-      qc.invalidateQueries({ queryKey: ["user-spaces"] });
-    },
-    onError: (e: any) => toast.error(e?.message || "保存失败"),
-  });
-
-  const delM = useMutation({
-    mutationFn: (id: string) => apiDeleteUserSpace(id),
-    onSuccess: () => {
-      toast.success("已删除（引用它的会话将回落到 agent 默认目录）");
-      qc.invalidateQueries({ queryKey: ["user-spaces"] });
-    },
-    onError: (e: any) => toast.error(e?.message || "删除失败"),
-  });
-
-  const openCreate = () => {
-    setEditing(null);
-    setForm({ ...DEFAULT_FORM });
-    setFormErr({});
-    setOpen(true);
-  };
-  const openEdit = (row: UserSpace) => {
-    setEditing(row);
-    setForm({ ...row });
-    setFormErr({});
-    setOpen(true);
-  };
-
-  const submit = () => {
-    const errs: Record<string, string> = {};
-    if (!String(form.name ?? "").trim()) errs.name = "请输入名称";
-    if (!String(form.path ?? "").trim()) errs.path = "请输入绝对路径";
-    setFormErr(errs);
-    if (Object.keys(errs).length) return;
-    saveM.mutate({ ...form, id: editing?.id });
-  };
-
-  const rows = q.data?.user_spaces ?? [];
-
-  const columns: Column<UserSpace>[] = [
-    { key: "name", title: "名称", width: 160, render: (r) => r.name },
-    {
-      key: "path",
-      title: "路径",
-      render: (r) => (
-        <span className="block max-w-[360px] truncate font-mono text-[12px] text-ink-muted">
-          {r.path}
-        </span>
-      ),
-    },
-    {
-      key: "read_only",
-      title: "只读",
-      width: 80,
-      render: (r) =>
-        r.read_only ? (
-          <Pill tone="orange">只读</Pill>
-        ) : (
-          <Pill tone="green">可写</Pill>
-        ),
-    },
-    {
-      key: "description",
-      title: "说明",
-      render: (r) => (
-        <span className="block max-w-[240px] truncate text-ink-muted">
-          {r.description || "—"}
-        </span>
-      ),
-    },
-    {
-      key: "ops",
-      title: "操作",
-      width: 160,
-      render: (r) => {
-        const isDefault = r.name === "default";
-        return (
-          <span className="flex items-center gap-1">
-            <button
-              type="button"
-              disabled={isDefault}
-              title={isDefault ? "系统默认工作空间不可编辑" : undefined}
-              onClick={() => openEdit(r)}
-              className="inline-flex h-6 items-center rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              编辑
-            </button>
-            <ConfirmButton
-              resetKey={rows.length}
-              disabled={isDefault}
-              onConfirm={() => delM.mutate(r.id)}
-              className={cn(DANGER_BTN, "h-6 text-[12px] disabled:cursor-not-allowed disabled:opacity-40")}
-            >
-              删除
-            </ConfirmButton>
-            {isDefault && (
-              <span
-                title="系统默认工作空间：始终存在，不可删除或编辑（除非手动改库）"
-                className="inline-flex text-ink-faint"
-              >
-                <TriangleAlert className="h-3.5 w-3.5" />
-              </span>
-            )}
-          </span>
-        );
-      },
-    },
-  ];
 
   const browseRows = [
     ...browseDirs.map((d) => ({ ...d, isDir: true as const })),
     ...browseFiles.map((f) => ({ ...f, isDir: false as const })),
   ];
 
+  const relPath = selectedFile
+    ? selectedFile.slice(path.length).replace(/^\//, "") || "/"
+    : "";
+
   return (
-    <>
+    <div className="flex h-full flex-col">
       <PageHeader
-        title="用户空间"
-        desc="用户自管的命名文件路径：每个会话可绑定一个，作为 agent 干活的主目录。其中 default 为系统默认工作空间（~/.keeper/workspace/user/default），始终存在、不可删除。新建空间会在 user/ 下建立同名软链接，指向你填的真实文件夹。"
-        actions={
-          <button
-            type="button"
-            onClick={openCreate}
-            className="rounded-lg bg-brand-gradient px-4 py-[7px] text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
-          >
-            新建用户空间
-          </button>
-        }
+        title="我的空间"
+        desc="唯一一个用户空间：agent 默认访问的文件夹。已配置后这里就是文件浏览器——左侧目录树、右侧内容预览（仿 Obsidian）。"
       />
 
-      {q.isError && (
-        <div className="mb-3">
-          <Hint tone="danger" title="加载失败">
-            {(q.error as Error)?.message}
-          </Hint>
+      {q.isLoading ? (
+        <div className="flex items-center gap-2 py-10 text-[13px] text-ink-muted">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          加载中…
         </div>
-      )}
-
-      <Section bodyClassName="p-0">
-        <Table
-          rows={rows}
-          columns={columns}
-          rowKey={(r) => r.id}
-          loading={q.isLoading}
-          minWidth={880}
-          empty="还没有用户空间"
-        />
-      </Section>
-
-      <Modal
-        open={open}
-        onClose={() => setOpen(false)}
-        width={560}
-        title={editing ? `编辑：${editing.name}` : "新建用户空间"}
-        footer={
-          <>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className={cn(PLAIN_BTN, "h-8 px-4")}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              disabled={saveM.isPending}
-              onClick={submit}
-              className="flex h-8 items-center gap-1.5 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50"
-            >
-              {saveM.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              保存
-            </button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <Field label="名称">
-            <TextInput
-              value={form.name}
-              onChange={(v) => patch("name", v)}
-              placeholder="如：我的仓库"
-            />
-            {formErr.name && (
-              <p className="mt-1 text-[12px] text-red-600 dark:text-red-300">
-                {formErr.name}
-              </p>
-            )}
-          </Field>
-
-          <Field
-            label="绝对路径"
-            extra="填真实文件夹的绝对路径；可点右侧「浏览」从服务器本机挑选；后端会在 user/ 下建立同名软链接指向它，路径不存在时自动创建（mkdir）。"
-          >
-            <div className="flex gap-2">
-              <div className="min-w-0 flex-1">
-                <TextInput
-                  value={form.path}
-                  onChange={(v) => patch("path", v)}
-                  placeholder="/Users/me/projects/xxx"
-                />
+      ) : q.isError ? (
+        <Hint tone="danger" title="加载失败">
+          {(q.error as Error)?.message}
+        </Hint>
+      ) : !path ? (
+        /* 未配置：提醒页 */
+        <div className="max-w-[760px] rounded-xl border border-dashed border-brand/40 bg-brand/[0.04] p-6">
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-gradient text-white shadow-brand">
+              <FolderOpen className="h-5 w-5" />
+            </span>
+            <div>
+              <div className="text-[15px] font-semibold text-ink-strong">
+                还没有配置「我的空间」
               </div>
+              <div className="text-[12.5px] text-ink-muted">
+                指定一个文件夹作为 agent 默认访问的工作目录
+              </div>
+            </div>
+          </div>
+          <p className="mt-4 text-[13px] leading-6 text-ink-muted">
+            「我的空间」是 agent 干活时安全访问的文件夹：bash 等工具可以把这里的路径当作
+            合法根，输入框里用 <code className="rounded bg-surface px-1">@我的空间</code>{" "}
+            也会展开成它的绝对路径。先选一个你常用的项目文件夹吧。
+          </p>
+          <button
+            type="button"
+            onClick={openBrowse}
+            className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg bg-brand-gradient px-5 text-[14px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+          >
+            <FolderOpen className="h-4 w-4" />
+            选择文件夹
+          </button>
+        </div>
+      ) : (
+        /* 已配置：两栏文件浏览器 */
+        <div className="mt-4 flex min-h-0 flex-1 gap-3">
+          {/* 左侧目录树 */}
+          <div className="flex w-[280px] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+            <div className="flex items-center gap-1 border-b border-line-soft px-2 py-1.5 text-[12px] font-medium text-ink-muted">
+              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-brand" />
+              <span className="truncate" title={path}>{basename(path)}</span>
+              <div className="ml-auto flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => doOpen(path, true)}
+                  title="在文件管理器中打开"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="上传文件到此处"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => doMkdir(uploadTargetDir)}
+                  title="在此新建文件夹"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={refreshTree}
+                  title="刷新目录（列出外部新增的文件）"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  {treeLoadingKey === path ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                doUpload(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <div
+              className="min-h-0 flex-1 overflow-auto py-1"
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                doUpload(e.dataTransfer.files);
+              }}
+            >
+              <TreeNav
+                nodes={treeData}
+                depth={0}
+                expanded={expandedKeys}
+                selected={selectedFile}
+                loadingKey={treeLoadingKey}
+                onToggle={onToggleDir}
+                onSelectFile={(k) => setSelectedFile(k)}
+                onOpen={doOpen}
+                onDownload={doDownload}
+                onRename={doRename}
+                onDelete={doDelete}
+                onMkdirHere={doMkdir}
+              />
+              <div className="px-3 py-2 text-[11px] leading-5 text-ink-faint">
+                把文件从电脑拖到这里即可拷入「我的空间」；hover 每行可下载 / 重命名 / 删除。
+              </div>
+            </div>
+          </div>
+
+          {/* 右侧内容预览 */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+            <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px] text-ink-muted">
+              {selectedFile ? (
+                <span className="flex min-w-0 items-center gap-1.5 truncate">
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                  <span className="truncate font-mono">{relPath}</span>
+                </span>
+              ) : (
+                <span className="text-ink-faint">未选择文件</span>
+              )}
+              {selectedFile && (
+                <button
+                  type="button"
+                  onClick={() => doOpen(selectedFile, false)}
+                  title="在文件管理器中打开"
+                  className="ml-auto shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                >
+                  打开
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={refreshFile}
+                title="刷新文件（读取外部修改后的最新内容）"
+                className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+              >
+                刷新
+              </button>
               <button
                 type="button"
                 onClick={openBrowse}
-                className="shrink-0 rounded-lg border border-line px-3 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
               >
-                浏览
+                重新选择文件夹
               </button>
             </div>
-            {formErr.path && (
-              <p className="mt-1 text-[12px] text-red-600 dark:text-red-300">
-                {formErr.path}
-              </p>
-            )}
-          </Field>
-
-          <ToggleField
-            label="只读"
-            extra="只读空间下，写类工具（bash__run、fs.write 等）会被自动跳过"
-            checked={!!form.read_only}
-            onChange={(v) => patch("read_only", v)}
-          />
-
-          <Field label="说明">
-            <textarea
-              rows={2}
-              value={form.description ?? ""}
-              onChange={(e) => patch("description", e.target.value)}
-              placeholder="可选"
-              className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]"
-            />
-          </Field>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {selectedFile ? (
+                <FileViewer path={selectedFile} />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">
+                  <FileText className="h-8 w-8" />
+                  <div className="text-[13px]">从左侧选择一个文件查看内容</div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      </Modal>
+      )}
 
+      {/* 选目录弹窗 */}
       <Modal
         open={browseOpen}
         onClose={() => setBrowseOpen(false)}
@@ -550,22 +828,23 @@ export default function UserSpacePage() {
             <button
               type="button"
               onClick={() => setBrowseOpen(false)}
-              className={cn(PLAIN_BTN, "h-8 px-4")}
+              className="h-8 rounded-lg border border-line px-4 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
             >
               取消
             </button>
             <button
               type="button"
+              disabled={saveM.isPending}
               onClick={chooseDir}
-              className="h-8 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+              className="h-8 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50"
             >
+              {saveM.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               选择此目录
             </button>
           </>
         }
       >
         <div className="flex h-[420px] flex-col">
-          {/* 路径栏：上一级 + 面包屑。面包屑自己拼，antd 的 items 协议没必要 */}
           <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
@@ -615,20 +894,18 @@ export default function UserSpacePage() {
           )}
 
           <div className="flex min-h-0 flex-1 gap-3">
-            {/* 左：目录树 */}
             <div className="w-[240px] shrink-0 overflow-auto rounded-lg border border-line-soft py-1">
-              <TreeView
-                nodes={treeData}
+              <TreeNav
+                nodes={browseTree}
                 depth={0}
-                expanded={expandedKeys}
-                selected={selectedKey}
+                expanded={browseExpanded}
+                selected={browseSelKey}
                 loadingKey={treeLoadingKey}
-                onToggle={onTreeToggle}
-                onSelect={(k) => void navigateDir(k)}
+                onToggle={onBrowseToggle}
+                onSelectFile={(k) => void navigateDir(k)}
               />
             </div>
 
-            {/* 右：当前目录内容（目录可点进去） */}
             <div className="min-w-0 flex-1 overflow-auto rounded-lg border border-line-soft">
               {browseLoading ? (
                 <div className="flex items-center justify-center py-10 text-ink-muted">
@@ -688,6 +965,6 @@ export default function UserSpacePage() {
           </div>
         </div>
       </Modal>
-    </>
+    </div>
   );
 }

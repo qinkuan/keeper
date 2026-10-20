@@ -175,7 +175,7 @@ function MentionSettings() {
       </p>
       <ul className="ml-4 list-disc text-[12px] leading-6 text-ink-muted">
         <li>
-          <code>{"{user_space}"}</code>：默认用户空间的绝对路径（name="default" 的那个，即「我的空间」）；
+          <code>{"{user_space}"}</code>：我的空间的绝对路径（来自 settings.yaml 的 user_space.path，单空间）；
         </li>
         <li>
           <code>{"{session_path}"}</code>：当前会话私有工作目录的绝对路径（agent_space）。

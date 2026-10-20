@@ -5,7 +5,7 @@
  * 不需要跨端同步。设置弹窗里的「输入 @ 快捷项」段负责增删改。
  *
  * 短语支持占位符：
- *  - `{user_space}`：默认用户空间的绝对路径（即 name="default" 的那个空间，对应「我的空间」）；
+ *  - `{user_space}`：我的空间的绝对路径（来自 settings.yaml 的 user_space.path，单空间）；
  *  - `{session_path}`：当前会话私有工作目录的绝对路径（agent_space）。
  */
 
@@ -76,7 +76,7 @@ export function saveMention(cfg: MentionConfig) {
 }
 
 /** 解析占位符：
- *  - `{user_space}`  → 默认用户空间的绝对路径（name="default" 的那个）；
+ *  - `{user_space}`  → 我的空间的绝对路径（settings.yaml 的 user_space.path，单空间）；
  *  - `{session_path}` → 当前会话私有工作目录的绝对路径（agent_space）。
  *  调用方负责传入真实绝对路径。 */
 export function resolveSnippet(

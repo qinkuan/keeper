@@ -36,7 +36,6 @@ from ..store import (
     AgentLLMBinding,
     LLMProfile,
     USER_SPACE_DEFAULT_NAME,
-    UserSpace,
     get_session_factory,
 )
 
@@ -335,43 +334,34 @@ def _enabled(
 
 
 async def _resolve_default_workspace(agent_id: str) -> tuple[Path, bool]:
-    """装配期确定「工作空间根 + 它是否只读」——**永远是 default 用户空间**。
+    """装配期确定「工作空间根 + 它是否只读」——**永远是「我的空间」**。
+
+    「我的空间」是唯一的用户空间，路径存在 ``settings.yaml`` 的 ``user_space.path``
+    （由「我的空间」页配置，写回 setting，不再读数据库 ``user_space`` 表）。
 
     工作空间是**会话级**的属性，不是 agent 的：agent 装配时只需要知道自己默认在
-    哪个目录读写，而这完全由 default 决定。所以这里不再看 agent 有没有「绑定」
-    工作区（workspace_kind / workspace_path 两列已随之删除）。
+    哪个目录读写，而这完全由「我的空间」决定，所以不碰 agent 画像行：核心 agent
+    没有 ``agent`` 表里的那一行，但同样需要一份装配期兜底工作区。
 
-    曾经这里是分支的：绑了空间就用那个空间的只读标志，没绑才用 default。于是
-    产生了一堆本不该有的状态——「绑定的空间没登记就报错」、「平台上同步下来的
-    agent 从来不绑定、于是永远是 default」、「改了 agent 的绑定但会话实际读写
-    目录没跟着变」（会话绑自己的空间，压根不看 agent 的）。分支收益为零，成本
-    是一整套需要维护的语义，所以直接删掉。
-
-    唯一真源是 user_space.read_only：运行期
-    keeper.chat.service.resolve_workspace 读的就是它。两处各判各的曾让
-    「工作区明明可写，装配期却按 agent 画像上那个从未被改过的默认值把写类工具全
-    丢了」——工具在界面上凭空消失，还没有任何报错。
-
-    只收 ``agent_id``（用于日志），**不碰画像行**：核心 agent 没有 ``agent`` 表
-    里的那一行，但它同样需要一份装配期兜底工作区。
+    只收 ``agent_id``（用于日志）。「我的空间」默认可写（read_only=False）。
     """
-    async with get_session_factory()() as db:
-        space = (
-            await db.execute(
-                select(UserSpace).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
-            )
-        ).scalars().first()
-        if space is None:
-            raise ValueError(
-                "user_space 表里没有 default 空间，无法确定工作区。"
-                "请先到「用户空间」创建 default。"
-            )
-    root = Path(space.path).expanduser()
-    logger.info(
-        "装配 agent %s：工作空间=%s（user_space「%s」read_only=%s）",
-        agent_id, root, space.name, bool(space.read_only),
+    from ..setting import get_user_space_path
+
+    raw = get_user_space_path()
+    if raw:
+        root = Path(raw).expanduser()
+        logger.info(
+            "装配 agent %s：工作空间=%s（我的空间，可写）", agent_id, root
+        )
+        return root, False
+
+    # 没配置「我的空间」：回落到内置默认目录，保证 agent 仍可运行；
+    # 「我的空间」页会提示用户去配置。
+    root = default_workspace_root() / USER_SPACE_DEFAULT_NAME
+    logger.warning(
+        "agent %s 未配置「我的空间」，回落到内置默认目录 %s", agent_id, root
     )
-    return root, bool(space.read_only)
+    return root, False
 
 
 async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:

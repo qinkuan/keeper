@@ -58,6 +58,8 @@ import type {
 
   WorkspaceFile,
 
+  MySpaceFile,
+
   Task,
 
   TaskItem,
@@ -2144,6 +2146,92 @@ export function apiBrowseDir(path?: string) {
 
   return apiGet<DirBrowseResp>("/user-spaces/browse", { path: path ?? "" });
 
+}
+
+/** 「我的空间」：单一用户空间，路径存 settings.yaml。GET 读当前路径（空=未配置）。 */
+export function apiGetMySpace() {
+  return apiGet<{ path: string | null }>("/user-spaces/mine");
+}
+
+/** 「我的空间」：把选中的文件夹绝对路径写入 settings.yaml，立即生效。 */
+export function apiSetMySpace(path: string) {
+  return apiPut<{ path: string }>("/user-spaces/mine", { path });
+}
+
+/** 「我的空间」：读取空间内某文件的受限内容（越界会被后端拒绝）。 */
+export function apiMySpaceFile(path: string) {
+  return apiGet<MySpaceFile>("/user-spaces/mine/file", { path });
+}
+
+/** 「我的空间」：在系统文件管理器里打开（定位到）本空间 / 某文件（等同 PyCharm 的 Reveal）。 */
+export function apiOpenMySpace(path: string, allowDir: boolean) {
+  return apiPost<{ ok: boolean }>("/user-spaces/mine/open", {
+    path,
+    allow_dir: allowDir,
+  });
+}
+
+/** 「我的空间」：把文件写入空间（拷入）。dir 为相对空间根的子目录，缺省为根。 */
+export function apiUploadMySpace(file: File, dir?: string) {
+  const form = new FormData();
+  form.append("file", file);
+  if (dir) form.append("dir", dir);
+  return fetch(`${BASE}/user-spaces/mine/upload`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  }).then(async (r) => {
+    if (!r.ok) {
+      let detail = `上传失败（${r.status}）`;
+      try {
+        const b = await r.json();
+        if (b && typeof b.detail === "string") detail = b.detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    return r.json();
+  });
+}
+
+/** 「我的空间」：下载空间内某文件（拷出），用带鉴权的 fetch 拿 blob 触发浏览器下载。 */
+export async function apiDownloadMySpace(path: string) {
+  const r = await fetch(
+    `${BASE}/user-spaces/mine/download?path=${encodeURIComponent(path)}`,
+    { headers: authHeaders() }
+  );
+  if (!r.ok) throw new Error(`下载失败（${r.status}）`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = path.split("/").pop() || "download";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** 「我的空间」：重命名文件或目录。 */
+export function apiRenameMySpace(path: string, name: string) {
+  return apiPost<{ ok: boolean; path: string; name: string }>(
+    "/user-spaces/mine/rename",
+    { path, name }
+  );
+}
+
+/** 「我的空间」：在指定父目录下新建子文件夹。 */
+export function apiMkdirMySpace(path: string, name: string) {
+  return apiPost<{ ok: boolean; path: string; name: string }>(
+    "/user-spaces/mine/mkdir",
+    { path, name }
+  );
+}
+
+/** 「我的空间」：删除文件或目录。 */
+export function apiDeleteMySpaceFile(path: string) {
+  return apiDelete<{ ok: boolean }>(
+    `/user-spaces/mine/file?path=${encodeURIComponent(path)}`
+  );
 }
 
 

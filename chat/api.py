@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Tuple
 from urllib.parse import quote, urlparse
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -1379,6 +1379,111 @@ async def browse_dir(path: str = "") -> Dict[str, Any]:
     files = [_info(e) for e in entries if e.is_file()]
     parent = str(root.parent) if root != root.parent else None
     return {"path": str(root), "parent": parent, "dirs": dirs, "files": files, "error": None}
+
+
+# 「我的空间」：单一用户空间，路径存在 settings.yaml（user_space.path），不再走数据库。
+# 与上面的多空间 CRUD（已废弃）区分开，单独一组 /mine 接口。
+class MySpaceIn(BaseModel):
+    """「我的空间」配置：单一用户空间的文件夹绝对路径。"""
+
+    path: str
+
+
+@user_space_router.get("/mine")
+async def get_my_space() -> Dict[str, Any]:
+    """读取「我的空间」路径（来自 settings.yaml 的 user_space.path；空串=未配置）。"""
+    from ..setting import get_user_space_path
+
+    return {"path": get_user_space_path()}
+
+
+@user_space_router.put("/mine")
+async def set_my_space(body: MySpaceIn) -> Dict[str, Any]:
+    """配置「我的空间」路径：写入 settings.yaml，立即生效（无需重启）。"""
+    from ..setting import set_user_space_path
+
+    p = Path(body.path).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail="路径必须是绝对路径")
+    if not p.is_dir():
+        raise HTTPException(
+            status_code=400, detail=f"目录不存在或不是文件夹：{p}"
+        )
+    set_user_space_path(str(p))
+    return {"path": str(p)}
+
+
+@user_space_router.get("/mine/file")
+async def get_my_space_file(
+    path: str = Query(..., description="文件绝对路径，必须位于「我的空间」目录内"),
+) -> Dict[str, Any]:
+    """读取「我的空间」内某文件的内容（受限：只能读配置目录内的文件）。
+
+    越界防护与文件读取逻辑见 filesystem.space_ops.read_space_file。
+    """
+    from ..filesystem.space_ops import read_space_file
+
+    return read_space_file(path)
+
+
+# 「在文件管理器中打开」：直接调系统文件管理器定位到本空间（等同 PyCharm 的
+# Reveal in Finder / Show in Explorer）。后端跑在本机，打开的就是用户真实文件夹。
+@user_space_router.post("/mine/open")
+async def open_my_space_in_explorer(body: Dict[str, Any]) -> Dict[str, Any]:
+    """在系统文件管理器里打开（定位到）本空间 / 某文件（等同 PyCharm 的 Reveal）。"""
+    from ..filesystem.space_ops import open_in_explorer
+
+    return open_in_explorer(
+        str(body.get("path") or ""), bool(body.get("allow_dir", False))
+    )
+
+
+@user_space_router.post("/mine/upload")
+async def upload_to_my_space(
+    file: UploadFile = File(...),
+    dir: str = Form(""),
+) -> Dict[str, Any]:
+    """把文件写入「我的空间」（拷入）。dir 为相对空间根的子目录，缺省为根。"""
+    from ..filesystem.space_ops import upload_to_space
+
+    data = await file.read()
+    return upload_to_space(file.filename or "", data, dir)
+
+
+@user_space_router.get("/mine/download")
+async def download_from_my_space(path: str = Query(...)) -> "Response":
+    """从「我的空间」下载文件（拷出）。"""
+    from ..filesystem.space_ops import download_from_space
+
+    return download_from_space(path)
+
+
+@user_space_router.delete("/mine/file")
+async def delete_in_my_space(path: str = Query(...)) -> Dict[str, Any]:
+    """删除「我的空间」内的文件或目录。"""
+    from ..filesystem.space_ops import delete_in_space
+
+    return delete_in_space(path)
+
+
+@user_space_router.post("/mine/rename")
+async def rename_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
+    """重命名「我的空间」内的文件或目录（不可重命名根）。"""
+    from ..filesystem.space_ops import rename_in_space
+
+    return rename_in_space(
+        str(body.get("path") or ""), str(body.get("name") or "")
+    )
+
+
+@user_space_router.post("/mine/mkdir")
+async def mkdir_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
+    """在指定父目录下新建子文件夹。"""
+    from ..filesystem.space_ops import mkdir_in_space
+
+    return mkdir_in_space(
+        str(body.get("path") or ""), str(body.get("name") or "")
+    )
 
 
 @user_space_router.post("")

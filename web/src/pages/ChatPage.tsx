@@ -103,6 +103,7 @@ import {
   apiListAgents,
   apiListTasks,
   apiListUserSpaces,
+  apiGetMySpace,
   apiSessionActivity,
   apiSessionMessages,
   apiSessions,
@@ -281,8 +282,7 @@ export default function ChatPage({
   const expandMentions = (text: string): string => {
     const ranges = computeMentions(text);
     if (!ranges.length) return text;
-    const dfltSpace = userSpaces.find((u) => u.name === "default");
-    const userSpacePath = dfltSpace?.path || workspace?.user_space?.path || "";
+    const userSpacePath = mySpacePath || workspace?.user_space?.path || "";
     const sessionPath =
       workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
     let out = text;
@@ -648,6 +648,10 @@ export default function ChatPage({
   // 用户空间列表（选择器用）
   const usQ = useQuery({ queryKey: ["user-spaces"], queryFn: apiListUserSpaces });
   const userSpaces: UserSpace[] = usQ.data?.user_spaces ?? [];
+
+  // 「我的空间」路径（来自 settings.yaml，单空间）：@我的空间 mention 解析用
+  const mySpaceQ = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
+  const mySpacePath = mySpaceQ.data?.path ?? "";
 
   // 部署形态：本机才显示「打开文件夹」（远程部署只支持下载）
   const deployQ = useQuery({
@@ -1495,8 +1499,7 @@ export default function ChatPage({
     const q = expandMentions(rawInput).trim();
     // 气泡展示用：把 @标签 连同它解析出的内容（如绝对路径）一起存下来，供 ChatBubble 渲染成 chip
     const mentionRanges = computeMentions(rawInput);
-    const dfltSpace = userSpaces.find((u) => u.name === "default");
-    const userSpacePath = dfltSpace?.path || workspace?.user_space?.path || "";
+    const userSpacePath = mySpacePath || workspace?.user_space?.path || "";
     const sessionPath =
       workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
     const mentions = mentionRanges.map((r) => ({

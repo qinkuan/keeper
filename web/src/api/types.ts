@@ -1440,6 +1440,19 @@ export interface WorkspaceFile {
   git: { status: string; original: string; modified: string };
 }
 
+/** 「我的空间」内某文件的受限读取结果（见 GET /user-spaces/mine/file）。 */
+export interface MySpaceFile {
+  path: string;
+  name: string;
+  mime: string | null;
+  size: number;
+  mtime: number;
+  is_dir: boolean;
+  is_text: boolean;
+  too_large: boolean;
+  text: string;
+}
+
 // ---- 模型管理（本地维护的模型预设；agent 通过绑定引用）----
 export interface ModelProfile {
   id: string;

@@ -34,7 +34,7 @@ SETTINGS_FILENAME = "settings.yaml"
 # 允许出现在 settings.yaml 里的段：只有「设置页会改」的东西才准进，
 # 免得这个文件慢慢变成第二个 config.yaml。
 #
-KNOWN_SECTIONS = ("observability", "a2a", "context", "auth")
+KNOWN_SECTIONS = ("observability", "a2a", "context", "auth", "user_space")
 
 
 def settings_path() -> Path:
@@ -206,6 +206,36 @@ def section(name: str) -> Dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+def get_user_space_path() -> str:
+    """「我的空间」的绝对路径（单一用户空间，存于 ``settings.yaml`` 的 ``user_space.path``）。
+
+    空串表示尚未配置——前端「我的空间」页会提示用户去选一个文件夹写入。
+    读的是原始文件、没有缓存层，调用方每次都拿到最新值。
+    """
+    v = load_raw().get("user_space")
+    if not isinstance(v, dict):
+        return ""
+    p = v.get("path") or ""
+    return p.strip()
+
+
+def set_user_space_path(path: str) -> None:
+    """写入「我的空间」路径（只动 ``user_space`` 这一段，其余段原样保留）。
+
+    立即生效：清掉各处的配置缓存，让 agent 装配 / 会话解析下一刻就拿到新值。
+    """
+    data = load_raw()
+    us = data.get("user_space")
+    if not isinstance(us, dict):
+        us = {}
+    us["path"] = path.strip()
+    data["user_space"] = us
+    # 只保留已知段（含新增的 user_space），避免写入杂项
+    data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
+    save_raw(data)
+    invalidate_caches()
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 默认值回填：settings.yaml 里**应当有每一项的显式配置**，初始值 = 代码默认
 #
@@ -256,6 +286,8 @@ def default_settings() -> Dict[str, Any]:
         "context": asdict(ContextSection()),
         "a2a": asdict(A2ASection()),
         "observability": {"prompt_dump": asdict(PromptDumpSection())},
+        # 我的空间：单一用户空间，路径存这里；空串=尚未配置（前端会提示去选）。
+        "user_space": {"path": ""},
         # 核心 agent：默认全空 → 运行期回落到"第一个已装载的 agent"，
         # 所以这个文件生成了、用户没改，行为与完全不配一致。
     }

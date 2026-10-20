@@ -57,12 +57,14 @@ import { Stat } from "./components/ui/Stat";
  * 会话记录本身（增删改查）搬进了对话页的「会话管理 / 任务管理」面板：那是会话
  * 真正待着的地方，把它们拆在两个界面只会让人找不到重命名和删除。
  *
- * 低频配置（设置 / 可观测 / 回收站 / 模型管理 / 用户空间）收在底部 Keeper 菜单。
+ * 低频配置（设置 / 可观测 / 回收站 / 模型管理）收在底部 Keeper 菜单；
+ * 「我的空间」是高频入口，提升为顶部主导航项（与「浏览器」并列）。
  */
 const NAV_MAIN = [
   { key: "chat", label: "对话", icon: MessageSquare },
   { key: "agents", label: "智能体", icon: Bot },
   { key: "browser", label: "浏览器", icon: Globe },
+  { key: "user-spaces", label: "我的空间", icon: Users },
 ] as const;
 
 type Route = {
@@ -363,8 +365,8 @@ export default function App() {
               >
                 {/* 设置：带子菜单。子菜单由 Radix 在**悬停**时自动展开——
                     这比"点开子菜单"少一次点击，也符合桌面应用的习惯。
-                    「用户空间」也归在这里：它本质是一段配置（读写目录 + 只读标志），
-                    和上下文 / 协作 / 调试同类，只是不用弹窗、直接开一个页面。 */}
+                    「我的空间」是单独的顶层菜单项（直接开配置页），
+                    不再归在「设置」子菜单里。 */}
                 <DropdownMenu.Sub>
                   <DropdownMenuSubTrigger
                     className="flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
@@ -393,21 +395,6 @@ export default function App() {
                         </span>
                       </DropdownMenuItem>
                     ))}
-                    <DropdownMenuSeparator className="my-1 h-px bg-line-soft" />
-                    <DropdownMenuItem
-                      onSelect={() => setRoute({ page: "user-spaces" })}
-                      className={cn(
-                        "flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100",
-                        route.page === "user-spaces"
-                          ? "bg-brand/12"
-                          : "data-[highlighted]:bg-brand/12"
-                      )}
-                    >
-                      <Users className="h-[15px] w-[15px] shrink-0 text-ink-faint" />
-                      <span className="font-medium text-ink-strong">
-                        用户空间
-                      </span>
-                    </DropdownMenuItem>
                   </DropdownMenuSubContent>
                 </DropdownMenu.Sub>
 

@@ -20,11 +20,13 @@ from .user_settings import (
     default_settings,
     ensure_defaults,
     fingerprint,
+    get_user_space_path,
     invalidate_caches,
     load_raw,
     save_raw,
     save_sections,
     section,
+    set_user_space_path,
     settings_path,
 )
 
@@ -40,6 +42,9 @@ __all__ = [
     "save_sections",
     "default_settings",
     "ensure_defaults",
+    # 「我的空间」单一用户空间（路径存 settings.yaml）
+    "get_user_space_path",
+    "set_user_space_path",
     # 变更通知
     "fingerprint",
     "invalidate_caches",

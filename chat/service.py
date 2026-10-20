@@ -166,13 +166,11 @@ from .runs import (
 from .hub import ensure_run, publish_delta, publish_step
 from .hub import finish as hub_finish
 from ..store import (
-    USER_SPACE_DEFAULT_NAME,
     AgentMessage,
     ChatSession,
     ReactStep,
     SessionMessage,
     Thread,
-    UserSpace,
     get_session_factory,
 )
 from ..store.models import new_id
@@ -196,27 +194,19 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
 
-    # 默认用户空间（「我的空间」）的绝对路径，作为 bash 等危险工具的额外合法根：
+    # 「我的空间」的绝对路径，作为 bash 等危险工具的额外合法根：
     # 让 agent 既能跑在会话空间、也能安全访问用户的「我的空间」（@我的空间 mention
-    # 把它的绝对路径交给了模型）。取不到（未建 default 空间 / DB 异常）时留空，
-    # 不影响主流程；守卫侧会据此放行或继续按原沙箱根判定。
+    # 把它的绝对路径交给了模型）。未配置（settings.yaml 里 user_space.path 为空）时
+    # 留空，不影响主流程；守卫侧会据此放行或继续按原沙箱根判定。
     user_space: Optional[Path] = None
     try:
-        from ..store import UserSpace, get_session_factory
-        from ..agent.config import USER_SPACE_DEFAULT_NAME
+        from ..setting import get_user_space_path
 
-        async with get_session_factory()() as db:
-            space = (
-                await db.execute(
-                    select(UserSpace).where(
-                        UserSpace.name == USER_SPACE_DEFAULT_NAME
-                    )
-                )
-            ).scalars().first()
-        if space is not None and space.path:
-            user_space = Path(space.path).expanduser()
+        p = get_user_space_path()
+        if p:
+            user_space = Path(p).expanduser()
     except Exception as e:  # noqa: BLE001
-        logger.warning("解析默认用户空间失败（已忽略，user_space 留空）：%s", e)
+        logger.warning("解析「我的空间」路径失败（已忽略，user_space 留空）：%s", e)
 
     return WorkspaceCtx(
         root=agent_space,
@@ -292,29 +282,13 @@ async def resolve_memory_day(session_id: Optional[str]) -> str:
 
 
 async def _default_space_id() -> Optional[str]:
-    """取默认用户空间（``user_space.name == "default"``）的 id；没有就 None。
+    """取会话默认绑定的用户空间 id。
 
-    会话默认落在 default 上
-    ----------------------
-    工作空间是**会话级**的东西，不是 agent 的属性——agent 不绑定工作区，装配时用
-    的目录只是它自己的默认工作目录，与会话实际读写哪里无关。
-
-    以前会话只认显式传入的 ``user_space_id``，没传就是 None，于是 ``user_space_id``
-    恒为空、顶栏那个下拉一个匹配项都没有，只能渲染成空白——看着像配置没保存。
-
-    这里补上默认值：没指定就落到 ``default``。它找不到就返回 None（那是"确实没有
-    默认空间"的事实，不该硬凑一个顶上），界面上会显示成"未绑定"。
+    已作废：用户空间不再存数据库，单一「我的空间」路径来自 ``settings.yaml``，由
+    ``resolve_workspace`` 直接读取。会话不再绑定 ``user_space_id``（恒为 None），
+    统一落到全局的「我的空间」。这里一律返回 None。
     """
-    from ..store import UserSpace
-
-    async with get_session_factory()() as db:
-        return (
-            await db.execute(
-                select(UserSpace.id)
-                .where(UserSpace.name == "default")
-                .order_by(UserSpace.created_at, UserSpace.id)
-            )
-        ).scalars().first()
+    return None
 
 
 async def latest_ball_answer(session_id: str) -> Dict[str, Any]:
