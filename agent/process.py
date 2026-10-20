@@ -770,7 +770,7 @@ class ReactProcess:
             f"原样重发不会有不同结果，请换思路：换一个路径/工具，"
             f"或把这一步拆成更小的步骤。"
             f"如果连着失败是因为依赖的东西还没准备好，"
-            f"先用 `bash`（`ls` / `test -f` 等）或 `fs.list_dir` 确认它真的存在，再继续。"
+            f"先用 `bash`（`ls` / `test -f` 等）确认它真的存在，再继续。"
         )
 
     def _guard_check(

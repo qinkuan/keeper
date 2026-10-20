@@ -18,61 +18,6 @@ from typing import Any, Dict, List, Optional
 # name 与工厂里 ProcessorTool 的 name 保持一致（否则装配出的工具名会漂移）。
 BUILTIN_TOOLS: List[Dict[str, Any]] = [
     {
-        "name": "fs.list_dir",
-        "impl": "keeper.tools.builtin:make_list_dir",
-        "description": "列出目录内容（[D] 目录，[F] 文件）",
-        "parameters": {"path": "目录路径，默认 '.'"},
-        # read_only 与 mutating 是两回事：前者决定能不能并发跑（工具并行化 P1-1），
-        # 后者决定只读工作区下装不装。
-        "read_only": True,
-        "mutating": False,
-        "requires_workspace": True,
-    },
-    {
-        "name": "fs.read_file",
-        "impl": "keeper.tools.builtin:make_read_file",
-        "description": "读取文本文件",
-        "parameters": {"path": "文件路径"},
-        "read_only": True,
-        "mutating": False,
-        "requires_workspace": True,
-    },
-    {
-        "name": "fs.write_file",
-        "impl": "keeper.tools.builtin:make_write_file",
-        "description": "把内容写入文件（父目录自动创建）",
-        "parameters": {
-            "path": "文件路径",
-            "content": "要写入的文本",
-        },
-        "mutating": True,
-        "requires_workspace": True,
-    },
-    {
-        "name": "fs.edit_file",
-        "impl": "keeper.tools.builtin:make_edit_file",
-        "description": "编辑**已有**的文本文件：精确替换其中一段（改几行只传那几行）",
-        "parameters": {
-            "path": "文件路径",
-            "old_string": "要被替换的原文（原样含缩进换行，最好足够长以保证唯一）",
-            "new_string": "替换后的文本；删除则传空字符串",
-            "replace_all": "可选，默认 false；确认替换全部同名片段时置 true",
-        },
-        # 读-改-写之间有中间态，不能与别的工具并发跑
-        "read_only": False,
-        "mutating": True,
-        "requires_workspace": True,
-    },
-    {
-        "name": "fs.find",
-        "impl": "keeper.tools.builtin:make_find",
-        "description": "按文件名 glob 搜索已存在的文件（含子目录），返回匹配的路径列表",
-        "parameters": {"pattern": "文件名 glob 模式，如 '*录取*'、'*.pdf'"},
-        "read_only": True,
-        "mutating": False,
-        "requires_workspace": True,
-    },
-    {
         "name": "fs.deliver",
         "impl": "keeper.tools.builtin:make_deliver",
         "description": "文件 / 多模态交付的唯一正式入口：把本次要交付的「块（block）」列表（blocks）一次性声明，界面按块的 kind 渲染成可交互内容（图片预览、HTML 沙箱、代码高亮、图表、表格、流程图…）；兼容旧写法 paths",

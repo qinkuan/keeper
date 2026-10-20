@@ -144,7 +144,7 @@ class SessionMessage(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user / assistant
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
-    # 产物引用（JSON）：本轮 agent 通过 fs.write_file 产出的文件，供前端展示 / 下载。
+    # 产物引用（JSON）：本轮 agent 交付 / 产出的文件（经 fs.deliver 显式交付，或由 _capture_unpublished_files 按 mtime 兜底登记），供前端展示 / 下载。
     # 形如 [{"id","name","path"(相对工作空间根),"mime","size"}]；无产物则为 NULL。
     artifacts: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 本条消息（一轮）的端到端耗时：从提问到答完的墙钟毫秒。
@@ -155,7 +155,7 @@ class SessionMessage(Base):
     # 形如 [{"id","name","mime","size","provider","model","file_id","expires_at",
     #        "cache_path"(相对 @tmp/)}]；无附件则为 NULL。
     #
-    # 为什么不复用 artifacts：那一列的语义是「本轮 agent 通过 fs.write_file 产出的
+    # 为什么不复用 artifacts：那一列的语义是「本轮 agent 产出的
     # 文件」，指向用户工作区里的真实文件；附件是「用户塞进来的输入」，指向厂商侧的
     # file_id。两者生命周期、安全边界、展示意图全不同，混用会让「谁产生的」变含糊。
     attachments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

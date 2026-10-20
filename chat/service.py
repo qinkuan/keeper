@@ -927,7 +927,7 @@ class ChatService:
                 session_id, anchor_message_id, anchor_question, result
             )
             # 产物捕获：与记忆同时机（最终完成才登记）。优先用 agent 末尾的
-            # fs.deliver([...]) 交付清单；没调 deliver 时退回捕获本轮 fs.write_file 生成的。
+            # fs.deliver([...]) 交付清单；没调 deliver 时由 _capture_unpublished_files 按 mtime 兜底扫描本轮新建的文件。
             captured = await self._capture_artifacts(
                 result, assistant_message_id, session_id
             )
@@ -2040,8 +2040,9 @@ class ChatService:
 
         为什么需要
         ----------
-        `_capture_artifacts` 优先认 ``fs.deliver([...])`` 交付清单；没调时退回认
-        ``fs.write_file`` 写出的文件。
+        `_capture_artifacts` 优先认 ``fs.deliver([...])`` 交付清单；没调 deliver 时，
+        文件往往是 bash（``cp`` / ``cat >`` / ``npm run build`` …）生成的，这里按 mtime
+        兜底扫出本轮新建的文件补登记。
         但文件经常是**别的动作**造出来的：``cp a b``、``cat a > b``、``npm run build``。
         这类文件真实存在、模型也在回答里说了名字，却因为没有对应的那两个动作
         而**不产生产物卡片**——用户只看到一句「文件在工作区」，点不开。
@@ -2122,15 +2123,10 @@ class ChatService:
           本次要交付的所有**块**（文件 / 图表 / 表格 / 地图 / 流程图…，每个块带
           ``kind``），后端把每个块挂成 artifact（写入 kind 与块特有字段）。以它为准——
           只要调过 deliver，产物就是清单里的那些，不夹带其它文件。
-        - **``fs.write_file``（兜底）**：只在**本轮完全没调过 ``fs.deliver``** 时启用，
-          把本轮新写出的文件都登记为产物。这是为了兼容「忘了列清单」的旧行为、避免回归；
-          理想情况下 agent 应该显式 ``fs.deliver``。
-
         **``@tmp/`` 开头的一律不登记**：那是会话私有临时目录，放的是临时测试脚本、补丁
         脚本、同一文件的中间版本——属于**过程**而不是交付。登记它们只会让会话里堆满
         一次性的check.py / patch_*.js，而这些东西既不该给用户看，收尾时还会被 agent
-        清掉，列出来点了直接 404。要追溯过程看 ``react_steps`` 里那几步 write_file
-        记录即可，文件本身也还在临时目录里。
+        清掉，列出来点了直接 404。要追溯过程看 ``react_steps`` 里的工具调用记录即可，文件本身也还在临时目录里。
 
         失败 / 拒绝的动作（observation 以 ``[`` 开头）不登记。每条产物的 ``path`` 直接
         存**写入 / 交付时刻的绝对路径**（``safe_path`` 解析并校验过，杜绝 ``../`` 穿越）：
@@ -2231,16 +2227,6 @@ class ChatService:
                 continue
             for b in parse_blocks(step.args or {}):
                 _add_block(b)
-
-        # 没显式交付时，退回旧行为：把本轮 fs.write_file 写出的文件都登记
-        if not deliver_called:
-            for step in result.steps:
-                if getattr(step, "tool", None) != "fs.write_file":
-                    continue
-                rel = (step.args or {}).get("path") or ""
-                if not rel:
-                    continue
-                _add_block({"kind": "file", "path": rel}, step.observation or "")
 
         if not artifacts:
             return []

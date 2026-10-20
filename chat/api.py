@@ -3146,7 +3146,7 @@ def _item_prompt(
             parts.append(line)
         parts += [
             "",
-            "  （需要查看已有文件内容时用 `bash`（cat / less 等）或 `fs.list_dir`，不要凭记忆重写。）",
+            "  （需要查看已有文件内容时用 `bash`（cat / less 等），不要凭记忆重写。）",
         ]
     parts += [
         "",
