@@ -1037,10 +1037,46 @@ async def set_agent_plugins(agent_id: str, body: PluginsSetIn) -> Dict[str, Any]
 
     "整体替换"而不是增删：UI 上是一个多选框，提交的就是最终集合；
     做成增量反而要处理"到底该加还是该减"的歧义。
+
+    核心 agent 不在 ``agents`` 表里（它从 ``~/.keeper/core-agent/agent.yaml`` 构建），
+    但插件绑定同样是 ``~/.keeper/agents/<id>/plugins/<name>`` 的符号链接，直接建/删链接
+    即可、无需查库落行；重建走 ``reload_core_agent()``。
     """
+    from keeper.config import core_agent_id
+    from keeper.plugin import link_plugin, linked_plugins, unlink_plugin
+
+    if agent_id and agent_id == core_agent_id():
+        wanted = _resolve_plugins(body.plugins)
+        _env_gate(wanted)
+        target = {p.dirname or p.name: p for p in wanted}
+        current = set(linked_plugins(agent_id))
+        logger.info(
+            "设置核心 agent 插件绑定 agent=%s 原来=%s 目标=%s",
+            agent_id, sorted(current) or "无", sorted(target) or "无",
+        )
+        for name in sorted(current - set(target)):
+            unlink_plugin(agent_id, name)
+        for name, p in target.items():
+            link_plugin(agent_id, p)  # 幂等：已存在的会被重建以跟上库里的变化
+
+        # 工具是在装配阶段读取的，改绑定不会反映到已建好的实例上，所以重建。
+        restarted = False
+        from keeper.agent.keeper import reload_core_agent
+
+        try:
+            await reload_core_agent()
+            restarted = True
+        except Exception as e:  # noqa: BLE001 装配失败是常态（soul 写错、模型没配）
+            logger.warning("核心 agent 绑定插件后重建失败: %s", e)
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "plugins": sorted(target),
+            "restarted": restarted,
+        }
+
     from sqlalchemy import select
 
-    from keeper.plugin import link_plugin, linked_plugins, unlink_plugin
     from keeper.store import Agent as AgentRow
     from keeper.store import get_session_factory
 

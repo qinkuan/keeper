@@ -89,6 +89,22 @@ export interface AgentConfig {
   llm?: LlmInfo | null;
 }
 
+/** agent 当前绑定的插件（直接列链接目录得出，附链接是否可用）。 */
+export interface AgentPluginBinding {
+  name: string;
+  description?: string | null;
+  version?: string | null;
+  manifest?: unknown | null;
+  /** 当前恒为 true（列目录得到的都是已勾选的）；保留字段以备将来 */
+  enabled?: boolean;
+  /** 链接是否有效（库目录还在）；悬空为 false */
+  available?: boolean;
+}
+
+export interface AgentPluginsResp {
+  plugins: AgentPluginBinding[];
+}
+
 // ---- 聊天消息（前端本地状态）----
 /** 一条产物引用：agent 本轮通过 fs.write_file 产出的文件。 */
 export interface Artifact {

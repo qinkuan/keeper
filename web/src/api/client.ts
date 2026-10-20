@@ -2,6 +2,8 @@ import type {
 
   AgentConfig,
 
+  AgentPluginsResp,
+
   AgentStep,
 
   ChatResp,
@@ -1016,6 +1018,13 @@ export function apiListAgents() {
 export function apiConfig(agentId: string) {
 
   return apiGet<AgentConfig>(`/agents/${agentId}/config`);
+
+}
+
+/** 该 agent 已绑定的插件（含悬空链接），用于插件 tab 的绑定态展示。 */
+export function apiAgentPlugins(agentId: string) {
+
+  return apiGet<AgentPluginsResp>(`/agents/${agentId}/plugins`);
 
 }
 

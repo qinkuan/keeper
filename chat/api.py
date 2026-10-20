@@ -707,10 +707,20 @@ async def list_plugins(agent_id: str) -> Dict[str, Any]:
     绑定关系就是 ``~/.keeper/agents/<id>/plugins/<name>`` 这个符号链接，所以没有
     查表的必要：列目录是什么就是什么。链接有效 = 插件还在；悬空 = 库里的目录
     没了，装配时会跳过。
+
+    核心 agent 不在 ``agents`` 表里（从本地目录构建），但插件绑定同样是这个链接目录，
+    直接扫目录即可——不必走 ``_agent``（那条路径会 404）。
     """
-    agent = _agent(agent_id)
+    from keeper.config import core_agent_id
+
+    if agent_id == core_agent_id():
+        aid = core_agent_id()
+        set_agent(aid, aid)
+    else:
+        agent = _agent(agent_id)
+        aid = agent.id
     lib = {p.dirname: p for p in scan_library()}
-    linked = agent_plugins_dir(agent.id)
+    linked = agent_plugins_dir(aid)
     out = []
     if not linked.is_dir():  # 还没勾过插件，目录不存在
         return {"plugins": out}
@@ -766,7 +776,18 @@ async def list_capabilities(agent_id: str) -> Dict[str, Any]:
     覆盖。插件统一承载 MCP server、可执行工具（bin）与技能（skill）；这里顺便把
     该插件名下已连上的 MCP 工具带出来，供前端展开查看。
     """
-    agent = _agent(agent_id)
+    from keeper.config import core_agent_id
+
+    # 核心 agent 不在 agents 表里（从本地目录构建），用 resolve_for_chat 取已装配的
+    # 实例；没装配出来就是 404（与 _agent 语义一致）。普通 agent 走 _agent。
+    if agent_id == core_agent_id():
+        agent = resolve_for_chat(agent_id)
+    else:
+        agent = _agent(agent_id)
+    if agent is None:
+        raise HTTPException(
+            status_code=404, detail=f"agent 不存在或未就绪: {agent_id}"
+        )
 
     from ..store import AgentCapabilityOverride, get_session_factory
     from ..tools.builtin.registry import BUILTIN_TOOLS, KIND as BUILTIN_KIND

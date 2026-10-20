@@ -712,6 +712,15 @@ async def build_agent(
     return agent
 
 
+class _CoreAgentRef:
+    """给 ``_load_plugins`` 用的轻量代理：核心 agent 不在 ``agents`` 表里，但插件
+    装配只读 ``id`` / ``name`` 两个字段，用这个替身即可，不必造一条假 DB 行。"""
+
+    def __init__(self, id: str, name: str):
+        self.id = id
+        self.name = name
+
+
 async def build_core_agent() -> Optional[KeeperAgent]:
     """从本地目录装配核心 agent，并登记到核心槽位。
 
@@ -729,7 +738,13 @@ async def build_core_agent() -> Optional[KeeperAgent]:
     """
     from ..config import load_config
     from . import core as core_def
-    from .config import AgentConfig, WorkspaceConfig, load_builtin_tools
+    from .config import (
+        AgentConfig,
+        WorkspaceConfig,
+        _build_skill_registry,
+        _load_plugins,
+        load_builtin_tools,
+    )
 
     cfg = load_config()
 
@@ -744,6 +759,8 @@ async def build_core_agent() -> Optional[KeeperAgent]:
     from ..config import core_agent_id
 
     core_id = core_agent_id(cfg)
+
+
 
     # 模型走**标准的 agent 绑定**（agent_llm_binding），和普通 agent 同一套：
     # 核心 agent 现在也有 agent_id 了，所以能在这张表里占一行。这样"换模型"这件
@@ -791,16 +808,30 @@ async def build_core_agent() -> Optional[KeeperAgent]:
         logger.warning("核心 agent 装配内置工具失败，仅影响本地文件能力: %s", e)
         builtin_tools = []
 
+    # 插件：核心 agent 的插件同样是 ``~/.keeper/agents/<id>/plugins/<name>`` 的符号链接，
+    # 与普通 agent 同一套机制——只是它不进 ``agents`` 数据库表、从本地目录构建。这里
+    # 显式装载，界面上「绑定本地插件到核心 agent」才真正生效。
+    plugin_tools: List[Any] = []
+    plugin_mcp: Dict[str, Any] = {}
+    plugin_skills: List[Dict[str, Any]] = []
+    try:
+        _comps = await _load_plugins(_CoreAgentRef(core_id, d.name))
+        plugin_tools = _comps.tools
+        plugin_mcp = _comps.mcp_servers
+        plugin_skills = _comps.skill_items
+    except Exception as e:  # noqa: BLE001 插件坏不该让主脑起不来
+        logger.warning("核心 agent 装载插件失败，仅影响插件能力: %s", e)
+
     agent_config = AgentConfig(
         name=d.name,
         persona=persona,
         description=d.description,
         workspace=workspace,
         llm=llm,
-        tools=builtin_tools,
-        # 刻意留空：核心 agent 不连接 MCP server、不预挂对端。
-        # 要用这些能力时，通过会话把执行者/插件加进来。
-        mcp_servers={},
+        tools=builtin_tools + plugin_tools,
+        # 插件带来的 MCP server / 工具 / 技能：核心 agent 同样支持本地插件。
+        mcp_servers=plugin_mcp,
+        skill_registry=_build_skill_registry(plugin_skills),
         peers={},
     )
 

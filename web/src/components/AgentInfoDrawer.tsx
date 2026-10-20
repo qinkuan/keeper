@@ -22,8 +22,11 @@ import {
   apiListModels,
   apiGetAgentModel,
   apiSetAgentModel,
+  apiListPlugins,
+  apiAgentPlugins,
+  apiSetLocalAgentPlugins,
 } from "../api/client";
-import type { CapabilityItem } from "../api/types";
+import type { CapabilityItem, LibraryPlugin } from "../api/types";
 
 /** 传给后端的能力类型：内置工具 / 插件（插件统一承载 MCP、工具、技能） */
 type CapKind = "builtin" | "plugin";
@@ -92,6 +95,23 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
       </span>
       <span className="min-w-0 flex-1 text-[13px] text-ink">{children}</span>
     </div>
+  );
+}
+
+/** 插件能力类型（bin / mcp / skill …）小标签，照搬库页的观感 */
+function KindPill({ k }: { k: string }) {
+  const cls =
+    k === "bin"
+      ? "bg-blue-500/15 text-blue-600 dark:text-blue-300"
+      : k === "mcp"
+        ? "bg-purple-500/15 text-purple-600 dark:text-purple-300"
+        : "bg-black/[0.06] text-ink-muted dark:bg-white/[0.08]";
+  return (
+    <span
+      className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] leading-4 ${cls}`}
+    >
+      {k}
+    </span>
   );
 }
 
@@ -168,6 +188,28 @@ export default function AgentInfoDrawer({
     queryFn: () => apiGetAgentModel(agentId),
     enabled: open,
   });
+  // 插件库（本地磁盘目录，只读）与「本 agent 已绑定的插件」：用于插件 tab 的绑定 / 解绑。
+  const libQ = useQuery({
+    queryKey: ["plugin-lib"],
+    queryFn: apiListPlugins,
+    enabled: open,
+  });
+  const boundQ = useQuery({
+    queryKey: ["agent-plugins", agentId],
+    queryFn: () => apiAgentPlugins(agentId),
+    enabled: open,
+  });
+  // 是否为本地 agent：平台 agent 的插件由平台下发管理，不可在本地增删。
+  // 核心 agent 同样可绑定（它从本地文件构建、不在 agents 表里），其 id 由
+  // /agents 的 core_agent_id 字段给出。
+  const isLocal =
+    (agentsQ.data?.agents ?? []).some((a) => a.id === agentId) ||
+    (agentsQ.data?.core_agent_id ?? null) === agentId;
+  // 已绑定且仍在库里的插件名（悬空链接不含，避免提交时被 _resolve_plugins 拒绝）。
+  const libDirs = new Set((libQ.data?.plugins ?? []).map((p) => p.dirname));
+  const boundNames = (boundQ.data?.plugins ?? [])
+    .map((p) => p.name)
+    .filter((n) => libDirs.has(n));
   const setModelM = useMutation({
     mutationFn: (llmProfileId: string | null) =>
       apiSetAgentModel(agentId, llmProfileId),
@@ -178,6 +220,28 @@ export default function AgentInfoDrawer({
     },
     onError: (e: Error) => toast.error("绑定失败：" + e.message),
   });
+  const setPluginsM = useMutation({
+    mutationFn: (names: string[]) => apiSetLocalAgentPlugins(agentId, names),
+    onSuccess: () => {
+      toast.success("插件绑定已更新（已重建实例）");
+      qc.invalidateQueries({ queryKey: ["agent-plugins", agentId] });
+      qc.invalidateQueries({ queryKey: ["config", agentId] });
+      qc.invalidateQueries({ queryKey: ["capabilities", agentId] });
+      qc.invalidateQueries({ queryKey: ["effective-tools", agentId] });
+      qc.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (e: Error) => toast.error("插件绑定失败：" + e.message),
+  });
+  const togglePlugin = (p: LibraryPlugin) => {
+    if (!isLocal) {
+      toast.error("平台 agent 的插件由平台下发管理，请在本地 agent 上绑定本地插件");
+      return;
+    }
+    const next = new Set(boundNames);
+    if (next.has(p.dirname)) next.delete(p.dirname);
+    else next.add(p.dirname);
+    setPluginsM.mutate([...next]);
+  };
 
   const localAgents = (agentsQ.data?.agents ?? []).filter((a) => a.id !== agentId);
 
@@ -481,17 +545,102 @@ export default function AgentInfoDrawer({
                   代码在 keeper 客户端里，平台不管理也不需要下载；默认启用，可按需关闭（写类工具在只读工作区下会自动跳过）。
                 </Hint>
               )}
+              {t.key === "builtin" && (
+                <div className="mt-3">
+                  <CapList
+                    items={(caps?.[t.key] ?? []) as CapabilityItem[]}
+                    kind={t.kind}
+                  />
+                </div>
+              )}
               {t.key === "plugin" && (
-                <Hint title="插件由平台管理">
-                  一个插件统一承载 MCP server、可执行工具（bin）与技能（skill）；可在本页按需开关，点开插件可查看其下已连上的 MCP 工具。
+                <Hint title="本地插件库">
+                  从本机插件库里挑插件挂到这个 agent 上：勾上即建符号链接、重建实例生效，取消即解绑。
+                  {!isLocal &&
+                    "当前是平台 agent，其插件由平台下发管理、本地不可增删；想挂本地插件请改用本地 agent（在「智能体」里装载一个本地 agent 后再绑定）。"}
                 </Hint>
               )}
-              <div className="mt-3">
-                <CapList
-                  items={(caps?.[t.key] ?? []) as CapabilityItem[]}
-                  kind={t.kind}
-                />
-              </div>
+
+              {/* 本地插件库：所有 agent 都展示，便于看到本机有哪些可挂的插件；
+                  只有本地 agent 才允许实际切换绑定（平台 agent 的插件由平台管理，
+                  整体替换会误删平台下发的插件目录）。每个插件只显示一条，右侧开关
+                  直接管「绑定 / 解绑」——不另起「启用 / 停用」行，避免重复。 */}
+              {t.key === "plugin" && (
+                <div className="mt-3">
+                  {libQ.isLoading ? (
+                    <div className="flex items-center gap-2 text-[13px] text-ink-muted">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      加载插件库…
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-line-soft">
+                      {(libQ.data?.plugins ?? []).map((p: LibraryPlugin) => {
+                        const bound = boundNames.includes(p.dirname);
+                        return (
+                          <div key={p.dirname} className="py-2.5">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-[13px] font-medium text-ink">
+                                    {p.name}
+                                  </span>
+                                  {p.version && (
+                                    <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[12px] text-ink">
+                                      {p.version}
+                                    </code>
+                                  )}
+                                  {p.kinds?.map((k) => (
+                                    <KindPill key={k} k={k} />
+                                  ))}
+                                </div>
+                                {p.description && (
+                                  <p className="mt-0.5 text-[12px] leading-5 text-ink-muted">
+                                    {p.description}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-2">
+                                <span
+                                  className={
+                                    bound
+                                      ? "text-[12px] text-emerald-600 dark:text-emerald-300"
+                                      : "text-[12px] text-ink-faint"
+                                  }
+                                >
+                                  {bound ? "已绑定" : "未绑定"}
+                                </span>
+                                <Toggle
+                                  checked={bound}
+                                  disabled={!isLocal || setPluginsM.isPending}
+                                  onChange={() => togglePlugin(p)}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {(libQ.data?.plugins ?? []).length === 0 && (
+                        <div className="py-3 text-[13px] text-ink-faint">
+                          插件库是空的——把插件包放进库目录（见「插件库」页）后刷新即可
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 平台 agent 不能本地增删插件，只能用「启用 / 停用」微调能力——保留能力列表 */}
+              {t.key === "plugin" && !isLocal && (
+                <div className="mt-5">
+                  <div className="mb-1.5 text-[13px] font-semibold text-ink-strong">
+                    能力
+                  </div>
+                  <CapList
+                    items={(caps?.[t.key] ?? []) as CapabilityItem[]}
+                    kind={t.kind}
+                  />
+                </div>
+              )}
             </div>
           )
       )}
