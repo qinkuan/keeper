@@ -171,6 +171,10 @@ def make_subprocess_tool(
     workspace: Optional[Path] = None,
     read_only: bool = True,
     tool_read_only: bool = False,
+    # 运行期把 cwd 覆盖成「当前会话的私有草稿区」而非装配期写死的路径。
+    # 通用 shell（bash__run）需要这个：模型裸写 `cat > f`，文件应落到会话区
+    # 而不是插件目录，这样模型无需理解任何工作区路径。
+    cwd_override: Optional[str] = None,
 ) -> ProcessorTool:
     """把一个可执行文件条目包装成 :class:`ProcessorTool`（与主进程工具同构）。
 
@@ -192,12 +196,18 @@ def make_subprocess_tool(
         # 工作区根也取请求期的实际用户空间（default 或被绑定的那个），
         # 而不是 build 期的兜底值——否则会话绑了别的用户空间，bin 工具仍会落到 default。
         ws_root = ws.root if ws else workspace
+        # 运行期 cwd：默认用装配期写死的 cwd（插件目录）；若声明覆盖为
+        # "agent_space"，则改用当前会话的私有草稿目录（per-session），
+        # 这样 bash 里裸写的相对路径默认就落在会话区。
+        run_cwd = cwd
+        if cwd_override == "agent_space" and agent_space is not None:
+            run_cwd = str(agent_space)
         return await call_subprocess_tool(
             command=command,
             tool=tool_name,
             args=args,
             extra_argv=extra_argv,
-            cwd=cwd,
+            cwd=run_cwd,
             timeout=timeout,
             workspace=ws_root,
             read_only=read_only,

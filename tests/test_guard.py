@@ -42,6 +42,14 @@ READONLY_CASES = [
     ("cat ../../etc/passwd", False, ".. 越界"),
     ("cat ~/.ssh/id_rsa", False, "~ 越界"),
     ("cd /tmp && rm -rf x", False, "复合命令"),
+    # 用 heredoc 写整个 HTML 文件：正文里的 </body> 曾经被误判成越界路径 /body。
+    # 现在守卫会剥掉正文、放行落到工作空间内的绝对路径重定向。
+    (
+        "cat > /Users/admin/.keeper/workspace/session/s1/snake.html <<'EOF'\n"
+        "<html><body><h1>hi</h1></body></html>\nEOF",
+        True,
+        "heredoc 写 HTML 到会话区（根内绝对路径）",
+    ),
     # `...tail` 是 shell 字符串截取的省略写法。作为 `ls` 的参数它是普通文件名，
     # 合法；作为命令它不在白名单里，该拦。这里两组一起覆盖，确保它**不会**
     # 因为 `..` 前缀被误判成路径穿越（那才是真正的误杀）。
@@ -56,6 +64,21 @@ WRITABLE_CASES = [
     ("npm install", False, "放行包管理"),
     ("grep foo /etc/hosts", True, "仍拦越界读系统文件"),
     ("pip install requests", False, "包管理器豁免路径检查"),
+    # heredoc 写文件：正文里的 </html> 不是路径，可写区不应拦
+    (
+        "cat > /Users/admin/.keeper/workspace/session/s1/snake.html <<'EOF'\n"
+        "<html><body><h1>hi</h1></body></html>\nEOF",
+        False,
+        "heredoc 写 HTML（可写区不拦）",
+    ),
+    # 引号里的 HTML 片段也不是路径
+    ('echo "<html></html>"', False, "引号内 HTML 片段不是路径"),
+    # node -e 内联脚本里的正则斜杠（/const CELL = (\d+)/）不是越界路径
+    (
+        'node -e "const c=+/const CELL = (\\d+)/.exec(s)[1]; const open=(s.match(/<script>/g)||[]).length"',
+        False,
+        "node 内联脚本的正则斜杠不是路径",
+    ),
 ]
 
 

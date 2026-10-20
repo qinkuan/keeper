@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import List, Optional
 
 from ..base import ProcessorTool
-from .sandbox import TMP_PREFIX, PathEscape, resolve_path
+from .sandbox import (
+    TMP_PREFIX,
+    USER_PREFIX,
+    SESSION_PREFIX,
+    PathEscape,
+    resolve_path,
+    is_scratch,
+    classify_prefix,
+)
 from ...viewer import parse_blocks, block_file_ref, validate_chart_spec
 
 # 单次读取的最大字节数：只取文件头部，避免大文件把内存撑爆 / 阻塞事件循环
@@ -252,10 +260,10 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
         content = args.get("content", "")
         if not rel:
             return _write_arg_missing(content)
-        is_tmp = rel.strip().lstrip("/") == "@tmp" or rel.strip().lstrip("/").startswith(
-            "@tmp/"
-        )
-        if eff_ro and not is_tmp:
+        prefix = classify_prefix(rel)
+        scratch = prefix == "tmp"
+        in_session = prefix in ("session", "tmp")
+        if eff_ro and prefix in ("user", "default"):
             return "[工作空间为只读，不能写文件]"
         if len(content) > _MAX_SINGLE_WRITE:
             return _write_too_long(rel, len(content))
@@ -266,23 +274,25 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         hint = _integrity_hint(rel, content)
-        # 临时目录要给真实绝对路径：``bash__run`` 这类插件不认 ``@tmp/`` 前缀
+        # 会话工作区（@session/ @tmp）要给真实绝对路径：``bash__run`` 这类插件不认前缀
         # （它起的是真子进程，没有我们的路径解析），agent 只能拿绝对路径去
         # ``cd`` / 传参。写完就告诉它一次，省得它把脚本又写回用户工作区。
-        if is_tmp:
+        if in_session:
             return (
                 f"已写入 {rel}（{len(content)} 字符），"
-                f"实际路径 {p}（这是会话临时目录，bash 命令里请用这个绝对路径）"
+                f"实际路径 {p}（这是会话工作区，bash 命令里请用这个绝对路径）"
             ) + (f"\n{hint}" if hint else "")
         return f"已写入 {rel}（{len(content)} 字符）" + (f"\n{hint}" if hint else "")
 
     return ProcessorTool(
         name="fs.write_file",
         description=(
-            "把内容写入文件（父目录自动创建）。"
-            "路径相对工作空间；**临时文件请用 `@tmp/` 前缀**"
-            "（如 `@tmp/check.py`、`@tmp/test_a.js`）——它落在本会话私有的临时目录，"
-            "不会弄脏用户工作区。只有**要交付给用户的文件**才直接写在工作空间里。"
+            "把内容写入文件（父目录自动创建）。路径用前缀区分工作区："
+            "`@user/`（用户工作区，只读时不可写）、`@session/`（会话工作区，始终可写，"
+            "用于交付给用户的成品）、`@tmp/`（会话内的临时草稿，每轮清空、不交付）。"
+            "没有前缀时按用户工作区处理。"
+            "随手测试脚本、分片、中间产物请用 `@tmp/`（如 `@tmp/check.py`）；"
+            "要交付的成品写到 `@session/`（如 `@session/report.md`），最后用 fs.deliver 交付。"
             "\n\n【content 长度限制 —— 超过会被直接拒绝、文件不会被创建】"
             "content 是要**由你逐字生成**并放进 JSON 的，"
             f"所以单次上限是 {_MAX_SINGLE_WRITE} 字符。"
@@ -300,7 +310,8 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
         ),
         parameters={
             "path": (
-                "文件路径。相对工作空间；临时文件用 `@tmp/` 前缀（如 `@tmp/check.py`）"
+                "文件路径。可用前缀：@user/（用户工作区）、@session/（会话工作区，交付成品）、"
+                "@tmp/（临时草稿）；无前缀按用户工作区处理，如 `@session/report.md`"
             ),
             "content": (
                 f"要写入的文本。**单次上限 {_MAX_SINGLE_WRITE} 字符**；"
@@ -445,10 +456,8 @@ def make_edit_file(root: Path, read_only: bool) -> ProcessorTool:
         if new is None:
             return "[缺少参数 new_string] 替换后的文本（删除这段就传空字符串）"
 
-        is_tmp = rel.strip().lstrip("/") == TMP_PREFIX or rel.strip().lstrip(
-            "/"
-        ).startswith(TMP_PREFIX + "/")
-        if eff_ro and not is_tmp:
+        prefix = classify_prefix(rel)
+        if eff_ro and prefix in ("user", "default"):
             return "[工作空间为只读，不能改文件]"
         try:
             p = resolve_path(eff_root, tmp_root, rel)
@@ -559,7 +568,7 @@ def make_edit_file(root: Path, read_only: bool) -> ProcessorTool:
             "以真实输出为准；不许凭空声称「已验证通过」。"
         ),
         parameters={
-            "path": "相对工作空间的文件路径（也可用 @tmp/ 前缀指向会话临时目录）",
+            "path": "文件路径，支持 @user/（用户工作区）、@session/（会话工作区）、@tmp/ 前缀（无前缀按用户工作区）",
             "old_string": "要被替换的原文，必须原样包含缩进与换行，且最好足够长以保证唯一",
             "new_string": "替换后的文本；删除这段则传空字符串",
             "replace_all": "可选，默认 false。确认要替换全部同名片段时置 true",
@@ -636,10 +645,15 @@ def make_find(root: Path, read_only: bool) -> ProcessorTool:
         if not matches:
             return "（未找到匹配文件）"
         matches.sort(key=lambda x: str(x))
-        shown = [
-            f"{TMP_PREFIX}/{m}" if base.strip().lstrip("/").startswith(TMP_PREFIX) else str(m)
-            for m in matches[:MAX_LIST]
-        ]
+        base_s = base.strip().lstrip("/")
+        prefix_out = (
+            base_s.rstrip("/") + "/"
+            if base_s.startswith(
+                (USER_PREFIX + "/", SESSION_PREFIX + "/", TMP_PREFIX + "/", TMP_PREFIX)
+            )
+            else ""
+        )
+        shown = [prefix_out + str(m) for m in matches[:MAX_LIST]]
         body = "\n".join(shown)
         if len(matches) >= MAX_LIST:
             body += f"\n...(已截断，前 {MAX_LIST} 个)"
@@ -651,13 +665,13 @@ def make_find(root: Path, read_only: bool) -> ProcessorTool:
             "当用户要你「找某个文件」（如「帮我找录取通知书」「有没有 travel 相关的 pdf」）时，"
             "按文件名 glob 在指定目录内（含子目录）搜索，返回匹配文件的相对路径列表，例如 "
             "pattern='*录取*' 或 '*.pdf'。找到后通常紧接着用 fs.deliver 把该文件列入交付清单，出现在对话里供用户查看。"
-            f"（用 path='{TMP_PREFIX}/' 可以搜会话临时工作区）"
+            f"（path 支持 @user/、@session/、@tmp/ 前缀，分别搜用户工作区、会话工作区、临时草稿）"
         ),
         parameters={
             "pattern": "文件名 glob 模式，如 '*录取*'、'*.pdf'、'report*.png'",
             "path": (
-                f"可选，搜索起点目录。默认 '.'（用户工作区）；"
-                f"传 '{TMP_PREFIX}/' 则搜会话临时工作区"
+                "可选，搜索起点目录。默认 '.'（用户工作区）；"
+                "传 '@user/'、'@session/' 或 '@tmp/' 指定对应工作区"
             ),
         },
         read_only=True,  # 只读：可并发
@@ -697,7 +711,7 @@ def make_deliver(root: Path, read_only: bool) -> ProcessorTool:
                     skip.append(f"{b.get('kind')}（既无 file 也无 src）")
                 continue
             rel = rel.strip().strip("/")
-            if rel == TMP_PREFIX or rel.startswith(TMP_PREFIX + "/"):
+            if not rel or is_scratch(rel):
                 skip.append(f"{rel}（临时目录，不作为交付）")
                 continue
             try:
@@ -740,37 +754,19 @@ def make_deliver(root: Path, read_only: bool) -> ProcessorTool:
     return ProcessorTool(
         name="fs.deliver",
         description=(
-            "**文件 / 多模态交付的唯一正式入口**：把本次要交付给用户的「块（block）」用一次调用"
-            "列成清单推到对话里。块是带类型的——文件只是块的一种，图表 / 表格 / 地图 / 流程图"
-            "是另外的 kind，前端按 kind 渲染成可交互内容。\n"
-            "先在工作空间里用 ``bash`` 把文件内容写好（如 ``cat > file``、编辑器命令、或 ``cat a > b``/"
-            "``npm run build`` 生成），末尾调本工具，参数 ``blocks`` 填块列表。\n"
-            "**块声明与内容分离**：重内容（图表 spec、数据）先写进文件，块只描述「怎么渲染这个文件」，"
-            "几行 JSON 即可，不要把巨型 spec 塞进工具参数（会超输出上限且易错）。\n"
-            "块的写法（kind 必填）：\n"
-            "- ``{\"kind\":\"file\",\"path\":\"x.png\",\"render\":\"preview|run|inline|folder\"}``：普通文件；"
-            "render 不写则按扩展名默认（图片/视频/PDF→浏览器打开，HTML→沙箱运行，代码/文档→内联，其余→文件夹按钮）。\n"
-            "- ``{\"kind\":\"chart\",\"file\":\"x.vg.json\",\"engine\":\"vega-lite\"}``：图表（spec 写进 *.vg.json）。\n"
-            "- ``{\"kind\":\"mermaid\",\"src\":\"graph TD;A-->B\"}`` 或 ``{\"kind\":\"mermaid\",\"file\":\"x.mmd\"}``：流程图。\n"
-            "- ``{\"kind\":\"table\",\"file\":\"d.csv\"}``：可排序表格。\n"
-            "- ``{\"kind\":\"map\",\"file\":\"m.geojson\"}``：地图。\n"
-            "- ``{\"kind\":\"audio\",\"file\":\"a.mp3\"}``：音频。\n"
-            "兼容旧写法：传 ``paths=[\"report.html\",\"a.png\"]`` 等价于一列 file 块。\n"
-            "\n"
-            "【只交付、不读取】如果你自己只是想分析某个文件的内容，用 ``bash``（cat / less 等）"
-            "读取即可，不要把文件内容贴进你的回答；本工具是把文件**交付给用户**看的卡片。"
-            "一句话——**用户想*看 / 拿到文件*，就用 deliver，自己分析用 bash**。"
-            "\n\n"
-            "【场景】用户想在对话里直接看到 / 打开工作空间里的文件时。例如「想看看我最近的照片」"
-            "（先 fs.find 搜到图片，再交付 ``{\"kind\":\"file\",\"path\":...,\"render\":\"preview\"}``）、"
-            "「帮我写个 html 小游戏」（写完后交付 ``{\"kind\":\"file\",\"path\":\"game.html\",\"render\":\"run\"}``，"
-            "用户能在对话里直接玩）。**不要**说你无法展示文件，交给交付卡片去呈现即可。"
-            "\n\n"
-            "【注意】``@tmp/`` 临时目录里的文件（测试脚本、中间产物）**不要**放进交付清单——"
-            "它会被跳过，且本就不该给用户看。"
+            "**唯一正式交付入口**——把要交付给用户的「块」用一次 `fs.deliver(blocks=[...])` 列出，前端按 kind 渲染成可交互内容：\n"
+            "- 文件 `{\"kind\":\"file\",\"path\":\"x\",\"render\":\"preview|run|inline|folder\"}`（render 不写按扩展名默认：图/视频/PDF→打开，HTML→沙箱，代码/文档→内联）；\n"
+            "- 图表 `{\"kind\":\"chart\",\"file\":\"x.vg.json\",\"engine\":\"vega-lite\"}`；流程图 `{\"kind\":\"mermaid\",\"src\":\"...\"}` 或 `{\"kind\":\"mermaid\",\"file\":\"x.mmd\"}`；表格 `{\"kind\":\"table\",\"file\":\"d.csv\"}`；地图 `{\"kind\":\"map\",\"file\":\"m.geojson\"}`；音频 `{\"kind\":\"audio\",\"file\":\"a.mp3\"}`。兼容旧写法 `paths=[\"x\"]`。\n"
+            "- 先 `bash` 把内容写好（cat > / npm run build 等）；重内容（spec、数据）写进文件，块只写「怎么渲染」几行 JSON，别把巨型内容塞进参数。\n"
+            "- **交付给用户看**才用本工具；自己分析文件用 `bash`（cat / less）即可。\n"
+            "- bash 生成的文件不会自动上卡片：写完必须显式交付，否则用户只听到「文件已生成」却点不开。\n"
+            "- 只交最终成品；草稿 / 临时 / 中间产物（测试脚本、分片、构建缓存）不要交——会被跳过。要交付 bash 写出的成品，`path` 用 `@session/` 前缀（如 `@session/report.md`）。\n"
         ),
         parameters={
             "blocks": "要交付的块列表；每个块是带 kind 的字典（见上方写法），或兼容地传 paths/路径字符串列表",
         },
         run=run,
     )
+
+
+

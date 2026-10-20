@@ -143,10 +143,10 @@ def default_workspace_root() -> Path:
     return WORKSPACE_ROOT / "user"
 
 
-def default_agent_space_root(session_id: str, agent_id: str) -> Path:
-    """会话级 agent 空间（``session``）：``~/.keeper/workspace/session/<session_id>/<agent_id>``。
+def default_agent_space_root(session_id: str, agent_id: str = "") -> Path:
+    """会话级 agent 空间（``session``）：``~/.keeper/workspace/session/<session_id>``。
 
-    每个 (会话, agent) 一份，放 agent 私有产物（插件索引、缓存、**临时文件**等），
+    每个会话一份（不分 agent），放 agent 私有产物（插件索引、缓存、**临时文件**等），
     纯路径推导、不落库。会话开始时由工作空间解析逻辑负责 ``mkdir``。
 
     模型侧用 ``@tmp/xxx`` 指代这里（见 ``tools.builtin.sandbox.resolve_path``），
@@ -155,7 +155,7 @@ def default_agent_space_root(session_id: str, agent_id: str) -> Path:
     目录刻意留在用户工作区**之外**：放进去虽然省了改沙箱的功夫，却会在用户的
     文件浏览器里凭空多出一堆临时文件。
     """
-    return WORKSPACE_ROOT / "session" / session_id / agent_id
+    return WORKSPACE_ROOT / "session" / session_id
 
 
 def default_agent_space_base(agent_id: str) -> Path:
@@ -974,6 +974,10 @@ def _build_plugin_components(
                         command=str(command),
                         extra_argv=extra_argv,
                         cwd=entry_cwd,
+                        # 通用 shell（bash）的 cwd 覆盖成「当前会话私有草稿区」：
+                        # 模型裸写 `cat > f` 会落到会话区，而不是插件目录。
+                        # 其它 bin 工具保持装配期 cwd（插件目录）不变。
+                        cwd_override="agent_space" if name == "bash" else None,
                         timeout=timeout,
                         workspace=root,
                         read_only=read_only,

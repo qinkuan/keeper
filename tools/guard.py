@@ -59,10 +59,17 @@ _SPLIT = re.compile(r"\|\||&&|;|\n|\|")
 # ~ 开头 / .. 开头的路径逃逸
 _ESCAPE = re.compile(r"(?:^|[\s'\"=:(])(~[^\s'\"]*|\.\.[/\\][^\s'\"]*)")
 
-# 绝对路径。排除 URL 的 //
-_ABS_PATH = re.compile(r"(?<!:)//[^\s'\"]*|(?<![\w:/])/[^\s'\"]*")
+# 绝对路径：必须是「以 / 开头、且整段都是路径合法字符（字母/数字/_ . - /）」的 token。
+# 这样不会把代码 / 正则 / sed 里的斜杠误判成越界路径——像 node -e 的
+# /const CELL = (\d+)/、sed 的 s|/old|/new|，那些 / 要么不在 token 开头，要么
+# 夹杂空格、( ) = 等非路径字符。真正越界的绝对路径（/etc/passwd、/Users/...）
+# 总是独立成一个 clean 的 token。
+_ABS_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 
 _URLISH = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+# here-doc 操作符：<< 或 <<-，后面跟可选空白与定界符（可加引号）
+_HEREDOC_OP = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*|[^'\"\s]+)['\"]?")
 
 # 无害的系统设备文件：``2>/dev/null`` / ``> /dev/null`` 是 shell 里最常见的写法，
 # 把它们当「工作空间之外的路径」拦掉是纯粹的误判——而且这个误判代价很大：
@@ -188,6 +195,36 @@ def _head_words(seg: str) -> List[str]:
     return out
 
 
+def _strip_heredocs(text: str) -> str:
+    """删除 here-document 的正文，只留命令骨架。
+
+    守卫不做真正的 shell 解析，而 here-doc 的正文是**文件内容**（HTML / 脚本源码），
+    里面会出现 ``</html>``、``/usr/bin/env`` 这种看着像路径、其实只是数据的片段。
+    不剥掉它们，就会被当成越界路径误杀，导致「用 heredoc 写整个文件」被整条拒绝。
+    """
+    if "<<" not in text:
+        return text
+    lines = text.split("\n")
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _HEREDOC_OP.search(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        # 只保留 << 操作符之前的部分（命令 + 重定向目标），正文整段丢弃
+        out.append(line[: m.start()].rstrip())
+        delim = m.group(1)
+        i += 1
+        while i < len(lines) and lines[i].strip() != delim:
+            i += 1
+        if i < len(lines):
+            i += 1  # 跳过 delimiter 本身
+    return "\n".join(out)
+
+
 def find_escapes(text: str) -> List[str]:
     """找出指向工作空间之外的路径：``~`` 开头、``..`` 开头、绝对路径。
 
@@ -196,12 +233,23 @@ def find_escapes(text: str) -> List[str]:
 
     ``..`` 必须后跟分隔符才算逃逸，否则 ``...tail -c 200 f``（shell 里字符串
     截取的省略写法）会被当成 ``../`` 穿越而误杀。
+
+    这里只扫**命令本身**：先剥掉 here-document 的正文（那是文件内容，不是参数），
+    再跳过含 ``<`` / ``>`` 的片段（HTML / XML 标签，如 ``</body>`` 会被切成
+    ``/body`` 误判成越界绝对路径）。否则「用 heredoc 写一整个 HTML 文件」这种
+    正常操作会被整条命令拒绝。
     """
+    text = _strip_heredocs(text)
     hits: List[str] = []
-    for raw in re.split(r"[\s,;|&()<>]+", text or ""):
+    # 注意：这里**不**按 ( ) 断词。路径 token 本就由空白 / 重定向分隔；按 ( ) 断
+    # 只会把内联代码（如 node -e 的 (\d+)/.exec(s)[1];）碎成「/.exec」这种看着像
+    # 干净绝对路径的假片段，造成误杀。$(...) 这类本就是守卫解析不了的已知盲区。
+    for raw in re.split(r"[\s,;|&]+", text or ""):
         t = _unwrap(raw)
         if not t or _URLISH.match(t):
             continue
+        if "<" in t or ">" in t:
+            continue  # HTML / XML 标签片段不是路径
         if t.startswith("-") or t.startswith("%") or t.startswith("$"):
             continue  # 选项名 / printf 格式串 / 变量（变量是已知漏判）
         if t.startswith("..") and (len(t) == 2 or t[2] in "/\\"):
@@ -215,6 +263,23 @@ def find_escapes(text: str) -> List[str]:
                 continue
             hits.append(tok)
     return hits
+
+
+def _redirect_targets(seg: str) -> List[str]:
+    """取出片段里所有输出重定向（> / >>）后面的目标 token。"""
+    out: List[str] = []
+    for m in _REDIRECT.finditer(seg):
+        rest = seg[m.end():]
+        mm = re.match(r"\s*([^\s;&|]+)", rest)
+        if mm:
+            out.append(mm.group(1))
+    return out
+
+
+def _inside_any(path: str, roots: Optional[List[Path]]) -> bool:
+    if not roots:
+        return False
+    return any(is_inside(path, r) for r in roots)
 
 
 def _norm(p: str) -> str:
@@ -243,7 +308,9 @@ def is_inside(path: str, root: Optional[Path]) -> bool:
 # ---------------------------------------------------------------- 判定
 
 
-def _judge_segment(seg: str, read_only: bool) -> Optional[str]:
+def _judge_segment(
+    seg: str, read_only: bool, allowed_roots: Optional[List[Path]] = None
+) -> Optional[str]:
     """判定单个命令片段；返回拒绝原因，放行返回 ``None``。"""
     words = [w for w in re.split(r"\s+", seg) if w]
     if not words:
@@ -293,9 +360,24 @@ def _judge_segment(seg: str, read_only: bool) -> Optional[str]:
                 f"{shown} 不是只读操作（该命令允许的子命令：{'、'.join(sorted(allowed))}）"
             )
 
-    # 4) 输出重定向：落文件就是写
+    # 4) 输出重定向：落文件就是写。例外：重定向目标是工作空间 / 会话草稿区内部
+    #    （agent 自己的可写区，写这里不算越界）；只拦真正指向根外的绝对路径。
     if read_only and _REDIRECT.search(seg):
-        return f"`{cmd}` 带了输出重定向（> / >>），会写文件，只读环境已禁用"
+        ok = True
+        for tgt in _redirect_targets(seg):
+            if tgt.startswith("/"):
+                if not _inside_any(tgt, allowed_roots):
+                    ok = False
+                    break
+            else:
+                # 相对路径落点未知（cwd 不一定是工作空间），保守拦截
+                ok = False
+                break
+        if not ok:
+            return (
+                f"`{cmd}` 带了输出重定向（> / >>），会写文件，只读环境已禁用"
+                f"（写文件请用会话工作区的绝对路径）"
+            )
     return None
 
 
@@ -325,6 +407,14 @@ def check_call(
         return None
 
     text = stringify_args(args)
+    # 先剥掉 here-document 正文：那是文件内容（HTML / 脚本），不是命令参数，
+    # 否则正文里的 </html> 会被当路径、脚本行会被当成命令片段误判。
+    text = _strip_heredocs(text)
+
+    # 合法根：用户工作区 + 会话私有草稿区（extra_roots）。两者内部都算「沙箱内」，
+    # 路径越界检查与只读重定向豁免都基于这套根。
+    roots: List[Path] = [workspace] if workspace is not None else []
+    roots += [r for r in (extra_roots or []) if r is not None]
 
     # 路径越界：两种模式都查。PATH_EXEMPT 里的命令豁免（包管理器 / VCS 天生要
     # 访问工作空间之外，对它们查路径没有意义）。
@@ -335,8 +425,6 @@ def check_call(
         if w
     }
     if not (cmds & PATH_EXEMPT):
-        roots: List[Path] = [workspace] if workspace is not None else []
-        roots += [r for r in (extra_roots or []) if r is not None]
         outside = [
             p
             for p in find_escapes(text)
@@ -357,7 +445,7 @@ def check_call(
         return None
 
     for seg in _segments(text):
-        reason = _judge_segment(seg, read_only=True)
+        reason = _judge_segment(seg, read_only=True, allowed_roots=roots)
         if reason:
             return f"只读工作空间下拒绝执行：{reason}"
     return None

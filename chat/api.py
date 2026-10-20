@@ -1799,7 +1799,10 @@ async def _store_agent_attachment(
     if session_id:
         rel = f"@tmp/uploads/{attachment_id}/{filename}"
         ws = await resolve_workspace(agent, session_id)
-        target = ws.agent_space / "uploads" / attachment_id / filename
+        # cache_path 是 ``@tmp/uploads/<id>/<名>``，resolve_path 会把 @tmp/ 解析成
+        # agent_space/tmp，所以本地缓存必须落在 agent_space/tmp/uploads 下才能被
+        # get_attachment 预览端点按 @tmp/ 找回（之前漏了 tmp 段，文件写了却读不到）。
+        target = ws.agent_space / "tmp" / "uploads" / attachment_id / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         cache_path = rel

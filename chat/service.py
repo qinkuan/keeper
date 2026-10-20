@@ -23,8 +23,8 @@ from pathlib import Path
 
 from ..tools.builtin.sandbox import (
     PathEscape,
-    TMP_PREFIX,
-    safe_path,
+    is_scratch,
+    resolve_path,
 )
 from ..viewer import block_file_ref, default_render_hint, parse_blocks
 
@@ -184,40 +184,18 @@ default_initiator_id = 9999
 async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     """按 (会话, agent) 解析本次请求生效的工作空间。
 
-    - 会话绑定的用户空间（``ChatSession.user_space_id`` → ``UserSpace``）：取其
-      ``path`` / ``read_only``；
-    - 没绑（或绑的已删）→ 回落系统默认用户空间（``workspace/user/default``）；
-    - agent 空间：``default_agent_space_root(session_id, agent_id)``，自动 mkdir
-      （决策：路径可不存在，允许自动创建）。
+    设计上已**移除独立的「用户工作区」概念**：agent 唯一的操作空间就是
+    会话空间（SessionSpace，``default_agent_space_root(session_id, agent_id)``），
+    自动 mkdir。用户文件不再来自某个挂载的工作区，而是由用户通过消息主动
+    带入——附件会落到会话空间的 ``@tmp/uploads/<id>/`` 下——因此 ``root``
+    与 ``agent_space`` 指向同一份会话目录，guard / 工具 cwd / fs 前缀全部
+    以会话空间为唯一基准。会话空间是 agent 自己的草稿区，默认可写。
     """
     from ..agent.config import default_agent_space_root
 
-    user_space = None
-    factory = get_session_factory()
-    async with factory() as db:
-        row = await db.get(ChatSession, session_id)
-        usid = getattr(row, "user_space_id", None) if row is not None else None
-        if usid:
-            user_space = await db.get(UserSpace, usid)
-        # 没绑（或绑定的已删）→ 回落系统默认用户空间，保证一定有主目录
-        if user_space is None:
-            user_space = (
-                await db.execute(
-                    select(UserSpace).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
-                )
-            ).scalars().first()
-
-    if user_space is not None:
-        root = Path(user_space.path).expanduser()
-        read_only = bool(user_space.read_only)
-    else:
-        # 极端兜底：默认记录都没（不应发生），用 agent 默认目录
-        root = agent.workspace_root
-        read_only = bool(getattr(agent.config.workspace, "read_only", False))
-
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
-    return WorkspaceCtx(root=root, read_only=read_only, agent_space=agent_space)
+    return WorkspaceCtx(root=agent_space, read_only=False, agent_space=agent_space)
 
 
 async def resolve_thinking(session_id: Optional[str]) -> ThinkingCtx:
@@ -2107,12 +2085,14 @@ class ChatService:
         前端拿不到绝对路径。
         """
         # 写入 / 交付时刻的真实根：以 (会话, agent) 解析，与 fs 工具实际生效的根一致。
-        # 剔掉 ``@tmp/`` 后剩下的都是工作空间内的相对路径，故用 ``safe_path`` 即可
-        # （``@tmp/`` 会解析到工作空间外的 agent_space，是另一套边界检查，不适用）。
+        # 同时取会话工作区（agent_space），供会话前缀（@session/ @tmp/）解析与每轮清临时目录用。
         try:
-            write_root = (await resolve_workspace(self.agent, session_id)).root
+            ws = await resolve_workspace(self.agent, session_id)
+            write_root = ws.root
+            session_root = ws.agent_space
         except Exception:
             write_root = None
+            session_root = None
         artifacts: list = []
         seen: set = set()
 
@@ -2147,7 +2127,7 @@ class ChatService:
                     )
                 return
             rel = rel.strip().strip("/")
-            if not rel or rel == TMP_PREFIX or rel.startswith(TMP_PREFIX + "/"):
+            if not rel or is_scratch(rel):
                 return
             aid = hashlib.sha1(f"{assistant_message_id}:{rel}".encode()).hexdigest()[:12]
             if aid in seen:
@@ -2155,9 +2135,10 @@ class ChatService:
             seen.add(aid)
             name = Path(rel).name or rel
             # 解析成绝对路径并校验不越界（写入侧兜底）；解析失败则退回相对路径。
+            # 这里走前缀感知的 resolve_path：@user/ → 用户工作区，@session/ → 会话工作区。
             if write_root:
                 try:
-                    abs_path = "file://" + str(safe_path(write_root, rel))
+                    abs_path = "file://" + str(resolve_path(write_root, session_root, rel))
                 except PathEscape:
                     return
             else:
@@ -2214,4 +2195,16 @@ class ChatService:
                 .values(artifacts=json.dumps(artifacts, ensure_ascii=False))
             )
             await db.commit()
+        # 每轮末尾清空会话临时目录（@tmp / @session/tmp 下的草稿）；交付物在会话根，
+        # 不在其中，不受影响。这样会话工作区根始终干净，避免 agent 列目录时被草稿干扰。
+        if session_root:
+            try:
+                import shutil as _sh
+
+                td = Path(session_root) / "tmp"
+                if td.exists():
+                    _sh.rmtree(td)
+                td.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         return artifacts
