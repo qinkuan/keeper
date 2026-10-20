@@ -208,6 +208,14 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** 生成途中被用户停止：内容是已产出的部分 */
   canceled?: boolean;
+  /**
+   * 输入框 `@` 快捷项：发送时把 `@标签` 原文留在气泡里渲染成高亮 chip。
+   * `mentionRaw` 是用户输入原文（含 `@标签`），`mentions` 是每项已解析好的展示内容
+   * （label + resolved，resolved 即占位符展开后的真实文本，如绝对路径）。
+   * 真正的 `text`（已展开、无 `@标签`）发给模型；这里只用于气泡展示。
+   */
+  mentionRaw?: string;
+  mentions?: { label: string; resolved: string }[];
 }
 
 /** processor 自主规划的一步 */
@@ -1330,6 +1338,10 @@ export interface SessionMessage {
    * 为空表示后端没有活跃运行（正常情况：这一轮刚结束，或进程重启过）。
    */
   in_progress_run_id?: string | null;
+  /** 输入框 @ 标签展示元数据：用户输入原文（含 @标签）；无 @标签 的消息不存在此字段 */
+  mention_raw?: string;
+  /** 每条 @标签 的展示内容：label + 已解析文本（如绝对路径）；气泡据此渲染高亮 chip */
+  mentions?: { label: string; resolved: string }[];
 }
 
 /** 会话里挂起等待用户回答的追问 */

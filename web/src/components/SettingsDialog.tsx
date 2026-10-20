@@ -29,6 +29,12 @@ import {
   apiUpdateSettings,
   setAuthToken,
 } from "../api/client";
+import {
+  loadMention,
+  saveMention,
+  type MentionConfig,
+  type MentionItem,
+} from "../lib/mention";
 import type {
   A2ASettings,
   AuthSettings,
@@ -45,7 +51,8 @@ export type SettingsSection =
   | "a2a"
   | "debug"
   | "auth"
-  | "delegatee";
+  | "delegatee"
+  | "mention";
 
 /** 侧栏弹出菜单用它渲染条目（label/描述集中在这里，菜单与标题不会写错） */
 export const SETTINGS_SECTIONS: {
@@ -66,6 +73,11 @@ export const SETTINGS_SECTIONS: {
     key: "delegatee",
     label: "子 agent",
     desc: "每个子 agent 独立的模型与插件",
+  },
+  {
+    key: "mention",
+    label: "输入 @ 快捷项",
+    desc: "在聊天框 @ 唤出、可插入消息的短语",
   },
 ];
 
@@ -128,6 +140,112 @@ const DEFAULT_DUMP: PromptDumpSettings = {
 };
 
 const DEFAULT_AUTH: AuthSettings = { enabled: false };
+
+/** 输入 @ 快捷项：纯前端 localStorage 配置，不依赖后端 settings */
+function MentionSettings() {
+  const [cfg, setCfg] = useState<MentionConfig>(() => loadMention());
+  const patchItem = (i: number, k: keyof MentionItem, v: string) =>
+    setCfg((p) => ({
+      ...p,
+      items: p.items.map((it, idx) => (idx === i ? { ...it, [k]: v } : it)),
+    }));
+  const addItem = () =>
+    setCfg((p) => ({
+      ...p,
+      items: [
+        ...p.items,
+        { key: "m" + Date.now(), label: "新项", snippet: "" },
+      ],
+    }));
+  const delItem = (i: number) =>
+    setCfg((p) => ({ ...p, items: p.items.filter((_, idx) => idx !== i) }));
+  const save = () => {
+    saveMention(cfg);
+    toast.success("已保存（立即生效）");
+  };
+
+  const btn =
+    "flex items-center gap-1.5 rounded-lg border border-line bg-panel px-3 py-[7px] text-[13px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:bg-surface hover:text-ink-strong active:scale-[0.98]";
+
+  return (
+    <Stack>
+      <p className="text-[12px] leading-6 text-ink-muted">
+        在聊天输入框输入 <code>@</code> 会弹出下面的快捷项，选中后把对应文本插入消息。
+        短语里支持两个占位符，插入时由后端给出的真实绝对路径替换（都不是 <code>~</code> 简写）：
+      </p>
+      <ul className="ml-4 list-disc text-[12px] leading-6 text-ink-muted">
+        <li>
+          <code>{"{user_space}"}</code>：默认用户空间的绝对路径（name="default" 的那个，即「我的空间」）；
+        </li>
+        <li>
+          <code>{"{session_path}"}</code>：当前会话私有工作目录的绝对路径（agent_space）。
+        </li>
+      </ul>
+      <p className="text-[12px] leading-6 text-ink-muted">
+        「工作空间根」仅在没有活跃会话（还没发第一条）时给 <code>{"{session_path}"}</code> 作兜底。
+      </p>
+
+      <Section title="工作空间根（{session_path} 用）">
+        <Stack>
+          <TextField
+            label="根路径"
+            placeholder="~/.keeper/workspace/session/"
+            value={cfg.root}
+            onChange={(v) => setCfg((p) => ({ ...p, root: v }))}
+          />
+        </Stack>
+      </Section>
+
+      <Section title="快捷项">
+        <Stack>
+          {cfg.items.map((it, i) => (
+            <div key={it.key} className="rounded-lg border border-line-soft p-2.5">
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="shrink-0 text-[12px] text-ink-muted">@</span>
+                <input
+                  value={it.label}
+                  onChange={(e) => patchItem(i, "label", e.target.value)}
+                  placeholder="显示名"
+                  className="min-w-0 flex-1 rounded-md border border-line bg-panel px-2 py-1 text-[12.5px] text-ink outline-none focus:border-brand"
+                />
+                <button
+                  type="button"
+                  onClick={() => delItem(i)}
+                  className={btn + " px-2.5 text-red-600 dark:text-red-300"}
+                >
+                  删除
+                </button>
+              </div>
+              <textarea
+                value={it.snippet}
+                onChange={(e) => patchItem(i, "snippet", e.target.value)}
+                placeholder="插入的文本（可用 {session_path}）"
+                rows={2}
+                className="w-full resize-none rounded-md border border-line bg-panel px-2 py-1 text-[12.5px] text-ink outline-none focus:border-brand"
+              />
+            </div>
+          ))}
+          <button type="button" onClick={addItem} className={btn}>
+            ＋ 新增
+          </button>
+        </Stack>
+      </Section>
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={save}
+          className={
+            btn +
+            " bg-brand-gradient text-white hover:brightness-110 active:scale-95"
+          }
+        >
+          保存
+        </button>
+      </div>
+    </Stack>
+  );
+}
 
 export function SettingsDialog({
   section,
@@ -235,8 +353,9 @@ export function SettingsDialog({
       title={title}
       width={620}
       footer={
-        // delegatee 段自带逐项的保存按钮，不需要弹窗底部的统一「保存 / 重新加载」
-        section === "delegatee" ? (
+        // delegatee / mention 段自带保存逻辑（后者是纯前端 localStorage），
+        // 不需要弹窗底部的统一「保存 / 重新加载」
+        section === "delegatee" || section === "mention" ? (
           <></>
         ) : (
           <>
@@ -779,6 +898,8 @@ export function SettingsDialog({
           )}
 
           {section === "delegatee" && <DelegateeSettings />}
+
+          {section === "mention" && <MentionSettings />}
         </div>
       )}
     </Modal>

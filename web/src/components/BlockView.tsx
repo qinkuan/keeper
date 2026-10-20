@@ -301,6 +301,13 @@ function MermaidBlock({
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           src = await res.text();
         }
+        // 时序图（ref==="seq"）：agent 在 mermaid 源码里用 [seq] 占「这一步序号」的位，
+        // 渲染前统一替换成递增序号（1,2,3…）。否则历史图重开时读到的就是原样 [seq]。
+        // 这条对实时渲染和读历史一致生效，且对已经带好序号的源码无副作用（匹配不到就不替换）。
+        if (artifact.ref === "seq" && src) {
+          let _n = 0;
+          src = src.replace(/\[seq\]/g, () => String(++_n));
+        }
         const mermaid = (await import("mermaid")).default;
         if (!mermaidReady) {
           mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });

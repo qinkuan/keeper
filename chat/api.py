@@ -19,7 +19,7 @@ import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Literal, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -193,6 +193,10 @@ class ChatStreamIn(BaseModel):
     # 由 POST .../attachments 返回）。文件内容不走这里——那要走 multipart，
     # 和 SSE 的长连接混在一起很别扭；所以是「先上传、后发送」两步。
     attachments: list[Dict[str, Any]] = []
+    # 输入框 @ 快捷项：用户消息里 @标签 的展示元数据。**不参与模型推理**，
+    # 仅原样存库、回读时交给前端把气泡里的 @标签 渲染成高亮 chip。
+    mention_raw: str = ""
+    mentions: Optional[List[Dict[str, str]]] = None
 
 
 class ChatAbortIn(BaseModel):
@@ -380,6 +384,8 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
                 reasoning_effort=body.reasoning_effort or None,
                 mode=body.mode or "normal",
                 attachments=body.attachments or None,
+                mention_raw=body.mention_raw or None,
+                mentions=body.mentions,
                 # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
                 # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
                 # 整片消失。

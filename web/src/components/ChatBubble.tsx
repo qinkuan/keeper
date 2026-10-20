@@ -110,6 +110,43 @@ function formatTime(iso: string): string {
  * 回调因此设计成「接收 messageId」而不是「闭包捕获 id」——后者每次渲染都是新
  * 函数，会让 memo 直接失效（这是给组件加 memo 最常见的坑）。
  */
+/** 用户气泡里的 @标签 渲染：把 @标签 渲染成高亮 chip（不附绝对路径，避免冗余；
+ * 模型侧需要路径时走 chat 请求的 mentions 结构化字段，气泡只负责展示 @标签 本身） */
+function MentionChips({
+  raw,
+  mentions,
+}: {
+  raw: string;
+  mentions?: { label: string; resolved: string }[];
+}) {
+  if (!mentions || !mentions.length) return <>{raw}</>;
+  const re = new RegExp(
+    "@(" +
+      mentions
+        .map((m) => m.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|") +
+      ")",
+    "g"
+  );
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > last)
+      nodes.push(<span key={`t${i++}`}>{raw.slice(last, m.index)}</span>);
+    nodes.push(
+      <span key={`c${i++}`}>
+        <span className="rounded bg-brand/15 px-px text-brand">@{m[1]}</span>
+      </span>
+    );
+    last = re.lastIndex;
+  }
+  if (last < raw.length)
+    nodes.push(<span key={`t${i++}`}>{raw.slice(last)}</span>);
+  return <>{nodes}</>;
+}
+
 function ChatBubble({
   msg,
   agentId,
@@ -280,9 +317,15 @@ function ChatBubble({
             {/* 助手回复基本都是 Markdown（标题 / 列表 / 表格 / 代码块）→ 渲染；
                 用户消息保持纯文本，避免 a_b 变斜体、#1 变标题这类误伤 */}
             {isUser ? (
-              <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {msg.text}
-              </div>
+              msg.mentionRaw ? (
+                <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  <MentionChips raw={msg.mentionRaw} mentions={msg.mentions} />
+                </div>
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {msg.text}
+                </div>
+              )
             ) : (
               <div>
                 {renderInline(msg.text)}

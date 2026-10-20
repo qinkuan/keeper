@@ -1423,6 +1423,12 @@ export function apiChatStream(
      */
     attachments?: Attachment[];
 
+    /** 输入框 @ 快捷项：展示用元数据，后端原样存、回读时用于气泡渲染（不参与推理）。 */
+    mentionRaw?: string;
+
+    /** 每条 @标签 的展示内容：label + 已解析文本（如绝对路径）。 */
+    mentions?: { label: string; resolved: string }[];
+
     signal?: AbortSignal;
 
   },
@@ -1474,6 +1480,11 @@ export function apiChatStream(
 
       // 附件：空数组时不发这个键，让后端拿到默认值（与「没传」等价）
       attachments: opts.attachments?.length ? opts.attachments : undefined,
+
+      // @ 快捷项展示元数据（不参与推理，仅气泡渲染用）。mention_raw 空串也发，
+      // 后端会归一为 NULL；mentions 为空则省略，等价于没传。
+      mention_raw: opts.mentionRaw ?? "",
+      mentions: opts.mentions,
 
     },
 

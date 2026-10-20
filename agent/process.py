@@ -809,7 +809,10 @@ class ReactProcess:
                 # 会话私有临时目录在工作区之外，但它是 agent 自己的草稿区，
                 # 明确放行——否则 bash 里带临时文件路径会被当越界拦掉，agent
                 # 只好把测试脚本堆回用户工作区。
-                extra_roots=[ws.agent_space],
+                # 会话私有空间 + 默认用户空间（「我的空间」）：两者都作为合法根放行，
+                # 这样 agent 既能在本轮会话空间跑，也能访问用户用 @我的空间 指定的目录。
+                extra_roots=[ws.agent_space]
+                + ([ws.user_space] if ws.user_space else []),
             )
         except Exception as e:  # noqa: BLE001
             # 守卫本身出错不能变成「放行」——但也不该让整轮对话挂掉。

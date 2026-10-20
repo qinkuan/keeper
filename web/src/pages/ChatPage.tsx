@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { DragEvent } from "react";
 
 import {
@@ -45,6 +45,15 @@ import { ThinkingPicker } from "../components/ThinkingPicker";
 import { ModePicker } from "../components/ModePicker";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
+import MentionPicker from "../components/MentionPicker";
+import {
+  loadMention,
+  resolveSnippet,
+  filterMentionItems,
+  MENTION_EVENT,
+  type MentionConfig,
+  type MentionItem,
+} from "../lib/mention";
 import type { UsageSummary } from "../api/types";
 
 
@@ -227,6 +236,191 @@ export default function ChatPage({
    */
   const [msgsBySession, setMsgsBySession] = useState<MsgsBySession>({});
   const [input, setInput] = useState("");
+
+  // 输入框 `@` 快捷项：检测到光标前出现 `@查询` 时弹出候选，选中后把短语插入消息。
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(
+    null
+  );
+  const [activeMention, setActiveMention] = useState(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const [mentionCfg, setMentionCfg] = useState<MentionConfig>(() =>
+    loadMention()
+  );
+  useEffect(() => {
+    const onUpd = () => setMentionCfg(loadMention());
+    window.addEventListener(MENTION_EVENT, onUpd);
+    return () => window.removeEventListener(MENTION_EVENT, onUpd);
+  }, []);
+  const filteredMentions = mention
+    ? filterMentionItems(mentionCfg.items, mention.query)
+    : [];
+
+  // 把输入串里「@标签」且标签命中设置项的子串识别为 mention（用于高亮 + 发送时展开）。
+  const computeMentions = (
+    text: string
+  ): { start: number; end: number; item: MentionItem }[] => {
+    const labels = mentionCfg.items;
+    if (!labels.length) return [];
+    const re = new RegExp(
+      "@(" +
+        labels.map((i) => i.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") +
+        ")",
+      "g"
+    );
+    const out: { start: number; end: number; item: MentionItem }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const item = labels.find((it) => it.label === m![1]);
+      if (item) out.push({ start: m.index, end: m.index + m[0].length, item });
+    }
+    return out;
+  };
+
+  // 发送前把 @标签 展开成对应短语（占位符在此时解析成真实绝对路径）
+  const expandMentions = (text: string): string => {
+    const ranges = computeMentions(text);
+    if (!ranges.length) return text;
+    const dfltSpace = userSpaces.find((u) => u.name === "default");
+    const userSpacePath = dfltSpace?.path || workspace?.user_space?.path || "";
+    const sessionPath =
+      workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
+    let out = text;
+    for (let k = ranges.length - 1; k >= 0; k--) {
+      const r = ranges[k];
+      out =
+        out.slice(0, r.start) +
+        resolveSnippet(r.item.snippet, { sessionPath, userSpacePath }) +
+        out.slice(r.end);
+    }
+    return out;
+  };
+
+  // 镜像层：把命中 mention 的 @标签 渲染成微微高亮的 chip。
+  // 注意：chip 文本与 textarea 里那段 @标签 完全一致（只多一层底色），
+  // 所以不会产生宽度错位，光标始终对得齐。
+  const renderBackdrop = (text: string): ReactNode => {
+    const ranges = computeMentions(text);
+    if (!ranges.length) return text;
+    const nodes: ReactNode[] = [];
+    let last = 0;
+    let i = 0;
+    for (const r of ranges) {
+      if (r.start > last)
+        nodes.push(<span key={`t${i++}`}>{text.slice(last, r.start)}</span>);
+      nodes.push(
+        <span key={`c${i++}`} className="rounded bg-brand/15 px-px text-brand">
+          {text.slice(r.start, r.end)}
+        </span>
+      );
+      last = r.end;
+    }
+    if (last < text.length)
+      nodes.push(<span key={`t${i++}`}>{text.slice(last)}</span>);
+    return nodes;
+  };
+
+  /** 根据光标前的文本判断是否处于 `@查询` 状态，并记下 `@` 的位置 */
+  const updateMention = (val: string, caret: number) => {
+    const before = val.slice(0, caret);
+    // `@` 前面是行首或非字母/数字即触发（中文、标点后也能唤出）；
+    // 前面是字母/数字则不触发，避免误伤邮箱 / URL（如 a@b.com）。
+    const m = before.match(/(^|[^A-Za-z0-9])@([^\s@]*)$/);
+    if (m) {
+      setMention({ start: caret - m[2].length - 1, query: m[2] });
+      setActiveMention(0);
+    } else {
+      setMention(null);
+    }
+  };
+
+  const onInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setInput(val);
+    updateMention(val, e.target.selectionStart ?? val.length);
+  };
+
+  // 选中后插入「@标签」原文（不在此展开）：输入框里看到的是高亮 chip，
+  // 真正展开成提示词发生在发送时（expandMentions）。
+  const selectMention = (item: MentionItem) => {
+    if (!mention || !item) {
+      setMention(null);
+      return;
+    }
+    const el = textareaRef.current;
+    const caret = el?.selectionStart ?? input.length;
+    const insert = "@" + item.label;
+    const next = input.slice(0, mention.start) + insert + input.slice(caret);
+    setInput(next);
+    setMention(null);
+    const pos = mention.start + insert.length;
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(pos, pos);
+    });
+  };
+
+  const onInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mention && filteredMentions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActiveMention((i) => Math.min(i + 1, filteredMentions.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActiveMention((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        selectMention(filteredMentions[activeMention]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
+    // 非候选项态下：退格/删除「紧挨着 mention chip」时整块删掉 @标签（而不是逐字删）
+    if (!mention) {
+      const el = textareaRef.current;
+      const caret = el?.selectionStart ?? input.length;
+      if (caret === (el?.selectionEnd ?? caret)) {
+        const ranges = computeMentions(input);
+        if (e.key === "Backspace") {
+          const r = ranges.find((x) => x.end === caret);
+          if (r) {
+            e.preventDefault();
+            const next = input.slice(0, r.start) + input.slice(r.end);
+            setInput(next);
+            requestAnimationFrame(() => {
+              el?.focus();
+              el?.setSelectionRange(r.start, r.start);
+            });
+            return;
+          }
+        } else if (e.key === "Delete") {
+          const r = ranges.find((x) => x.start === caret);
+          if (r) {
+            e.preventDefault();
+            const next = input.slice(0, r.start) + input.slice(r.end);
+            setInput(next);
+            requestAnimationFrame(() => {
+              el?.focus();
+              el?.setSelectionRange(r.start, r.start);
+            });
+            return;
+          }
+        }
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
   /**
    * 已上传、还没发出去的附件。
    *
@@ -506,6 +700,9 @@ export default function ChatPage({
           usage: m.usage ?? null,
           duration_ms: m.duration_ms ?? null,
           llm: m.role === "assistant",
+          // @ 快捷项展示元数据：回读后让气泡把 @标签 渲染成高亮 chip（刷新后仍保留）
+          mentionRaw: m.mention_raw,
+          mentions: m.mentions ?? undefined,
         }));
         return add.length ? [welcomeMsg, ...add, ...rest] : prev;
       });
@@ -556,6 +753,9 @@ export default function ChatPage({
                   // 可观测：历史消息的用量 / 耗时（刷新后仍要能看到）
                   usage: m.usage ?? null,
                   duration_ms: m.duration_ms ?? null,
+                  // @ 快捷项展示元数据：刷新后气泡仍渲染成高亮 chip
+                  mentionRaw: m.mention_raw,
+                  mentions: m.mentions ?? undefined,
                   // 历史消息后端不带 llm 字段（session_messages 也没存这一列），
                   // 会话里的 assistant 回复本就是 agent 生成的，按 role 补上，
                   // 否则 ChatBubble 的「AI 生成」标签不会显示。
@@ -1291,7 +1491,19 @@ export default function ChatPage({
   };
 
   const send = async (raw?: string, stepId?: string) => {
-    const q = (raw ?? input).trim();
+    const rawInput = raw ?? input;
+    const q = expandMentions(rawInput).trim();
+    // 气泡展示用：把 @标签 连同它解析出的内容（如绝对路径）一起存下来，供 ChatBubble 渲染成 chip
+    const mentionRanges = computeMentions(rawInput);
+    const dfltSpace = userSpaces.find((u) => u.name === "default");
+    const userSpacePath = dfltSpace?.path || workspace?.user_space?.path || "";
+    const sessionPath =
+      workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
+    const mentions = mentionRanges.map((r) => ({
+      label: r.item.label,
+      resolved: resolveSnippet(r.item.snippet, { sessionPath, userSpacePath }),
+    }));
+    const mentionRaw = mentionRanges.length ? rawInput : undefined;
     // 仅发附件（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
     // 这种消息 q 为空，但 pendingFiles 非空，应当照常发出。
     if ((!q && pendingFiles.length === 0) || sending) return;
@@ -1323,8 +1535,12 @@ export default function ChatPage({
     const userMsg: ChatMessage = {
       id: newId(),
       role: "user",
-      text: q,
+      // 气泡显示用「干净原文」（@标签 由 MentionChips 渲染成 chip，不展开绝对路径）；
+      // 发给模型、带路径展开的文本走 apiChatStream 的第二个参数 q，二者分开。
+      text: rawInput,
       created_at: new Date().toISOString(),
+      mentionRaw,
+      mentions: mentions.length ? mentions : undefined,
     };
     const placeholderId = newId();
     placeholderRef.current = placeholderId;
@@ -1406,6 +1622,9 @@ export default function ChatPage({
           runId,
           // 本轮附件：随消息一起发（只带 file_id 等元信息，文件内容已在上面传完）
           attachments: pendingFiles,
+          // @ 快捷项展示元数据：后端原样存，刷新后气泡仍渲染成高亮 chip（不参与推理）
+          mentionRaw,
+          mentions: mentions.length ? mentions : undefined,
           signal: controller.signal,
         },
         {
@@ -1843,7 +2062,7 @@ export default function ChatPage({
               一个贴着边的多行文本框。聚焦时再加一圈品牌色描边，光标落点一眼可见。 */}
           <div
             className={cn(
-              "rounded-[18px] border border-line-soft bg-panel px-3.5 py-2.5",
+              "relative rounded-[18px] border border-line-soft bg-panel px-3.5 py-2.5",
               "shadow-[0_8px_28px_-8px_rgba(0,0,0,0.16),0_2px_6px_-2px_rgba(0,0,0,0.06)]",
               "transition-all duration-200 ease-apple",
               "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(66,133,244,0.4)]"
@@ -1883,28 +2102,55 @@ export default function ChatPage({
               </div>
             )}
             {/* 正文输入：无边无底色，融进浮块 */}
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="今天帮你做什么？@ 添加上下文，/ 调用技能与指令"
-              style={{ height: inputH }}
-              className="w-full resize-none bg-transparent px-1 pt-0.5 text-[13.5px] leading-6 text-ink outline-none placeholder:text-ink-faint"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              onPaste={(e) => {
-                // 粘贴文件 / 截图：拦截掉"图片被塞成 base64 文本"，转为附件上传。
-                // 纯文本粘贴不受影响，照常走 onChange。
-                const pasted = e.clipboardData?.files;
-                if (pasted && pasted.length) {
-                  e.preventDefault();
-                  void addFiles(pasted);
-                }
-              }}
-            />
+            {/* @ 快捷项弹出：出现在输入框上方（bottom-full），不挡住正在输入的光标 */}
+            {mention && filteredMentions.length > 0 && (
+              <div className="absolute bottom-full left-4 right-4 z-50 mb-2">
+                <MentionPicker
+                  items={filteredMentions}
+                  activeIndex={activeMention}
+                  onSelect={selectMention}
+                  onHover={setActiveMention}
+                />
+              </div>
+            )}
+
+            {/* 输入框分两层：透明 textarea（接收输入 / 光标）+ 背后镜像层（把 @标签 渲染成高亮 chip）。
+                两层字号 / 行高 / 内边距完全一致，所以光标与高亮始终对齐；textarea 文字透明，只露光标。 */}
+            <div className="relative">
+              <div
+                ref={backdropRef}
+                aria-hidden
+                className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-1 pt-0.5 text-[13.5px] leading-6 text-ink"
+                style={{ height: inputH }}
+              >
+                {renderBackdrop(input)}
+                {"\n"}
+              </div>
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={onInputChange}
+                placeholder="今天帮你做什么？@ 添加上下文，/ 调用技能与指令"
+                style={{ height: inputH }}
+                className="relative w-full resize-none break-words bg-transparent px-1 pt-0.5 text-[13.5px] leading-6 text-transparent caret-ink outline-none placeholder:text-ink-faint [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                onKeyDown={onInputKeyDown}
+                onScroll={(e) => {
+                  if (backdropRef.current)
+                    backdropRef.current.scrollTop = (
+                      e.target as HTMLTextAreaElement
+                    ).scrollTop;
+                }}
+                onPaste={(e) => {
+                  // 粘贴文件 / 截图：拦截掉"图片被塞成 base64 文本"，转为附件上传。
+                  // 纯文本粘贴不受影响，照常走 onChange。
+                  const pasted = e.clipboardData?.files;
+                  if (pasted && pasted.length) {
+                    e.preventDefault();
+                    void addFiles(pasted);
+                  }
+                }}
+              />
+            </div>
 
             {/* 工具行：左边低频动作、右边模型与发送。整行高度固定 30px */}
             <div className="mt-1 flex items-center gap-1">
@@ -2038,7 +2284,7 @@ export default function ChatPage({
                   <button
                     type="button"
                     onClick={() => send()}
-                    disabled={!input.trim()}
+                    disabled={!expandMentions(input).trim()}
                     title="发送（Enter）"
                     className={cn(
                       "flex h-[30px] w-[30px] items-center justify-center rounded-full transition-all duration-150 ease-apple active:scale-95",

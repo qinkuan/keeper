@@ -681,6 +681,16 @@ async def _migrate_session_message_duration(conn) -> None:
         )
 
 
+async def _migrate_session_message_mentions(conn) -> None:
+    """session_messages 补 mention_raw / mentions 列：气泡里 @标签 的展示元数据（存量库升级）。"""
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(session_messages)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "mention_raw" not in existing:
+        await conn.exec_driver_sql("ALTER TABLE session_messages ADD COLUMN mention_raw TEXT")
+    if "mentions" not in existing:
+        await conn.exec_driver_sql("ALTER TABLE session_messages ADD COLUMN mentions TEXT")
+
+
 async def _migrate_task_time_range(conn) -> None:
     """tasks 补 started_at / finished_at：任务耗时（存量库升级）。
 
@@ -822,6 +832,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_react_step_duration(conn)
         await _migrate_capability_loads(conn)
         await _migrate_session_message_duration(conn)
+        await _migrate_session_message_mentions(conn)
         await _migrate_task_time_range(conn)
         await _migrate_llm_call_reasoning(conn)
         await _migrate_model_price_time_range(conn)

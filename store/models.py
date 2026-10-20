@@ -159,6 +159,11 @@ class SessionMessage(Base):
     # 文件」，指向用户工作区里的真实文件；附件是「用户塞进来的输入」，指向厂商侧的
     # file_id。两者生命周期、安全边界、展示意图全不同，混用会让「谁产生的」变含糊。
     attachments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 输入框 @ 快捷项：用户消息里 @标签 的展示元数据，仅用于气泡渲染成高亮 chip，
+    # 不参与模型推理（发给模型的是已展开的 content）。mention_raw 是用户输入原文
+    # （含 @标签），mentions 是每项 {label, resolved} 的 JSON；两者皆为空则为 NULL。
+    mention_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mentions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ReactStep(Base):

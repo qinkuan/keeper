@@ -273,11 +273,15 @@ class WorkspaceCtx:
     - ``read_only``：该用户空间是否只读。
     - ``agent_space``：本 (session_id, agent_id) 的私有产物目录（自动创建、
       纯路径推导、不落库），插件索引等放这里，互不污染。
+    - ``user_space``：默认用户空间（「我的空间」）的绝对路径。它是 bash 等危险工具的
+      额外合法根——agent 既能跑在会话空间、也能安全访问用户的「我的空间」（``@我的空间``
+      mention 把它的绝对路径交给了模型，守卫据此放行）。取不到时为空，不影响主流程。
     """
 
     root: Path
     read_only: bool
     agent_space: Path
+    user_space: Optional[Path] = None
 
 
 _current_workspace: ContextVar[Optional[WorkspaceCtx]] = ContextVar(

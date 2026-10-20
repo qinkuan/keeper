@@ -195,7 +195,35 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
 
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
-    return WorkspaceCtx(root=agent_space, read_only=False, agent_space=agent_space)
+
+    # 默认用户空间（「我的空间」）的绝对路径，作为 bash 等危险工具的额外合法根：
+    # 让 agent 既能跑在会话空间、也能安全访问用户的「我的空间」（@我的空间 mention
+    # 把它的绝对路径交给了模型）。取不到（未建 default 空间 / DB 异常）时留空，
+    # 不影响主流程；守卫侧会据此放行或继续按原沙箱根判定。
+    user_space: Optional[Path] = None
+    try:
+        from ..store import UserSpace, get_session_factory
+        from ..agent.config import USER_SPACE_DEFAULT_NAME
+
+        async with get_session_factory()() as db:
+            space = (
+                await db.execute(
+                    select(UserSpace).where(
+                        UserSpace.name == USER_SPACE_DEFAULT_NAME
+                    )
+                )
+            ).scalars().first()
+        if space is not None and space.path:
+            user_space = Path(space.path).expanduser()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("解析默认用户空间失败（已忽略，user_space 留空）：%s", e)
+
+    return WorkspaceCtx(
+        root=agent_space,
+        read_only=False,
+        agent_space=agent_space,
+        user_space=user_space,
+    )
 
 
 async def resolve_thinking(session_id: Optional[str]) -> ThinkingCtx:
@@ -354,6 +382,9 @@ async def run_one_ask(
     mode: str = "normal",
     title_text: Optional[str] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
+    # 输入框 @ 快捷项：展示用元数据，原样存库、不参与模型推理。
+    mention_raw: Optional[str] = None,
+    mentions: Optional[List[Dict[str, str]]] = None,
     on_session: Optional[Callable[[str], Awaitable[None]]] = None,
     on_step: Optional[Callable[[int, Dict[str, Any]], Awaitable[None]]] = None,
     on_delta: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -423,6 +454,7 @@ async def run_one_ask(
             text, step_id=step_id or None, user_space_id=user_space_id or None,
             thinking=thinking, reasoning_effort=reasoning_effort or None,
             mode=mode, attachments=attachments,
+            mention_raw=mention_raw, mentions=mentions,
         )
 
     ensure_run(run_id, agent_id)
@@ -475,6 +507,8 @@ async def run_one_ask(
             on_delta=emit_delta,
             should_stop=should_stop,
             attachments=attachments,
+            mention_raw=mention_raw,
+            mentions=mentions,
         )
         # 先封存终态再交给调用方往外推：hub 里的 done 帧是「刷新后重连」时直接拿
         # 结果的依据（那一轮已经跑完的情况）。
@@ -640,6 +674,9 @@ class ChatService:
         on_step=None,
         on_delta=None,
         attachments: Optional[List[Dict[str, Any]]] = None,
+        # 输入框 @ 快捷项：展示用元数据，仅用于气泡渲染，不参与模型推理。
+        mention_raw: Optional[str] = None,
+        mentions: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """对外入口：**同一会话串行执行**（串行锁见 ``_session_lock``）。
 
@@ -689,6 +726,8 @@ class ChatService:
                 on_step=on_step,
                 on_delta=on_delta,
                 attachments=attachments,
+                mention_raw=mention_raw,
+                mentions=mentions,
             )
 
     @staticmethod
@@ -732,6 +771,9 @@ class ChatService:
         on_step=None,
         on_delta=None,
         attachments: Optional[List[Dict[str, Any]]] = None,
+        # 输入框 @ 快捷项：展示用元数据，仅用于气泡渲染，不参与模型推理。
+        mention_raw: Optional[str] = None,
+        mentions: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """真正跑一轮问答（调用方需已持有该会话的串行锁）。
 
@@ -771,7 +813,8 @@ class ChatService:
 
         # 落库本轮的用户消息（生成 message_id，或沿用对端指定的）
         user_message_id = await self._append_message(
-            session_id, "user", text, message_id=message_id, attachments=attachments
+            session_id, "user", text, message_id=message_id, attachments=attachments,
+            mention_raw=mention_raw, mentions=mentions,
         )
         if anchor_message_id is None:
             anchor_message_id = user_message_id  # 新话轮：锚 = 本轮 user 消息
@@ -1401,6 +1444,8 @@ class ChatService:
         content: str,
         message_id: Optional[str] = None,
         attachments: Optional[List[Dict[str, Any]]] = None,
+        mention_raw: Optional[str] = None,
+        mentions: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """追加一条消息（seq 取当前会话最大值 +1），返回 message_id。
 
@@ -1409,6 +1454,8 @@ class ChatService:
         attachments：只对 user 消息有意义（agent 侧不产生附件）。为空时写 NULL，
         与 artifacts 的口径一致——别写 "[]"，那一列存 NULL 才能让 SQL 侧的
         「有没有附件」判断保持简单。
+        mention_raw / mentions：输入框 @ 快捷项的展示元数据，仅用于气泡渲染，
+        为空时写 NULL（与 attachments 口径一致）。
         """
         factory = get_session_factory()
         async with factory() as db:
@@ -1420,6 +1467,10 @@ class ChatService:
                 content=content,
                 attachments=(
                     json.dumps(attachments, ensure_ascii=False) if attachments else None
+                ),
+                mention_raw=mention_raw or None,
+                mentions=(
+                    json.dumps(mentions, ensure_ascii=False) if mentions else None
                 ),
             )
             db.add(msg)
@@ -1837,6 +1888,9 @@ class ChatService:
                 # 而 file_id 本身不是秘密（它只在持有同一把 api_key 时有意义，
                 # 而那把 key 从不下发前端）。
                 "attachments": json.loads(m.attachments) if m.attachments else [],
+                # 输入框 @ 标签展示元数据：回读给前端，气泡据此渲染高亮 chip（刷新后也保留）
+                "mention_raw": m.mention_raw,
+                "mentions": json.loads(m.mentions) if m.mentions else None,
                 "steps": final_steps.get(m.id, []),
                 # 可观测：本轮用量 + 端到端墙钟（usage 只含 LLM 耗时）
                 "usage": usage_out.get(m.id),
