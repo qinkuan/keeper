@@ -1257,6 +1257,43 @@ class ReactProcess:
 
         return _b
 
+    async def _delegatee_sub_session(
+        self, parent_id: Optional[str], name: str
+    ) -> Optional[str]:
+        """找/建该 delegatee 在 parent 下的专属子会话（按 parent_id + agent_id 复用）。
+
+        子 agent 的 LLM / 工具调用会记到这个子会话名下，再经 parent_id 归并进主
+        任务的总成本；不在任何会话里（无 parent_id）则回退 None，消耗落到「无 session」
+        分组，不影响主流程。每个 (主会话, delegatee) 只建一条，多次调用复用。
+        """
+        if not parent_id:
+            return None
+        from sqlalchemy import select
+
+        from ..store import ChatSession, get_session_factory, new_id
+
+        async with get_session_factory()() as db:
+            existing = (
+                await db.execute(
+                    select(ChatSession).where(
+                        ChatSession.parent_id == parent_id,
+                        ChatSession.agent_id == f"delegatee:{name}",
+                    )
+                )
+            ).scalars().first()
+            if existing:
+                return existing.id
+            row = ChatSession(
+                id=new_id(),
+                parent_id=parent_id,
+                agent_id=f"delegatee:{name}",
+                kind="delegatee",
+                title=f"子 agent：{name}",
+            )
+            db.add(row)
+            await db.commit()
+            return row.id
+
     def replace_tools(self, tools) -> None:
         """整体替换本轮可用的工具表：registry 对象不变，只换内容。
 
@@ -1659,16 +1696,27 @@ class ReactProcess:
                     clipped = obs
                 else:
                     try:
-                        from ..chat.context import current_workspace
-
-                        res = await delg.run(
-                            Requirement(text=dec.requirement or "", context=dec.context),
-                            Ctx(
-                                workspace=current_workspace(),
-                                call_tool=self._delegate_bridge(delg),
-                                budget={},
-                            ),
+                        from ..chat.context import (
+                            current_session_id,
+                            current_workspace,
+                            override_session_id,
                         )
+
+                        # 子 agent 跑在「专属子会话」里：把这次调用的归属切到子会话，
+                        # 它的 LLM / 工具消耗会记到子会话名下，再经 parent_id 归并进
+                        # 主任务总成本；跑完自动还原，主循环后续调用仍归主会话。
+                        sub_id = await self._delegatee_sub_session(
+                            current_session_id(), dec.capability
+                        )
+                        async with override_session_id(sub_id):
+                            res = await delg.run(
+                                Requirement(text=dec.requirement or "", context=dec.context),
+                                Ctx(
+                                    workspace=current_workspace(),
+                                    call_tool=self._delegate_bridge(delg),
+                                    budget={},
+                                ),
+                            )
                         obs = res.answer or ""
                         if res.ask:
                             obs = f"[子 agent {dec.capability} 需要补充信息：{res.ask}]"

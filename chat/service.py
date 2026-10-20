@@ -60,6 +60,8 @@ SESSION_KIND_CHAT = "chat"
 SESSION_KIND_TASK = "task"
 SESSION_KIND_BROWSER = "browser"
 SESSION_KIND_BROWSER_AUTOMATION = "browser-automation"
+# 子 agent（delegatee）的子会话：内部成本归集用，不进任何用户的会话列表
+SESSION_KIND_DELEGATEE = "delegatee"
 SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER, SESSION_KIND_BROWSER_AUTOMATION)
 
 # 浮球的默认会话标记（chat_sessions.ball_key 的取值）。
@@ -1571,6 +1573,8 @@ class ChatService:
                 stmt = stmt.where(ChatSession.initiator_id == self.initiator_id)
             if kind:
                 stmt = stmt.where(ChatSession.kind == kind)
+            # 子会话（delegatee）是成本归集用的内部会话，不进任何用户的会话列表
+            stmt = stmt.where(ChatSession.kind != SESSION_KIND_DELEGATEE)
             rows = await db.execute(stmt)
             items = list(rows.scalars())
         return [

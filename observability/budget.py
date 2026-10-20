@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import case, func, select
 
-from ..store import LLMCall, get_session_factory
+from ..store import ChatSession, LLMCall, get_session_factory
 from ._guard import raise_if_bug
 from .pricing import _context_limit_for, _cost_of, _price_for
+from .stats import _session_subtree_ids
 
 logger = logging.getLogger(__name__)
 
@@ -111,45 +112,147 @@ async def aggregate(
         "context_warning": False,
         "errors": 0,
         "error_rate": 0.0,
+        # 主 / 子 agent 明细：按会话拆分（子会话形如 "delegatee:code"），详见 session_breakdown
+        "session_breakdown": [],
     }
     try:
-        stmt = select(
-            LLMCall.model,
-            LLMCall.provider,
-            LLMCall.profile_id,
-            func.sum(LLMCall.prompt_tokens),
-            func.sum(LLMCall.completion_tokens),
-            func.sum(LLMCall.cached_tokens),
-            func.sum(LLMCall.cache_write_tokens),
-            func.sum(LLMCall.reasoning_tokens),
-            func.sum(LLMCall.duration_ms),
-            func.count(LLMCall.id),
-            func.count(LLMCall.cached_tokens),  # 只有非 NULL 才计数
-            func.max(LLMCall.prompt_tokens),  # 单次最大输入：上下文水位用
-            # 失败调用数（ok=False）：超时 / 报错都算，用于错误率
-            func.sum(case((LLMCall.ok.is_(False), 1), else_=0)),
-            # 该组最早的调用时间：用于匹配**当时**生效的单价（模型会调价）
-            func.min(LLMCall.created_at),
-        ).group_by(LLMCall.model, LLMCall.provider, LLMCall.profile_id)
-
-        if step_id:
-            stmt = stmt.where(LLMCall.step_id == step_id)
-        if message_id:
-            stmt = stmt.where(LLMCall.message_id == message_id)
-        if session_id:
-            stmt = stmt.where(LLMCall.session_id == session_id)
-        if task_id:
-            stmt = stmt.where(LLMCall.task_id == task_id)
-        if agent_id:
-            stmt = stmt.where(LLMCall.agent_id == agent_id)
-        if since:
-            stmt = stmt.where(LLMCall.created_at >= since)
-        if until:
-            stmt = stmt.where(LLMCall.created_at <= until)
-
         factory = get_session_factory()
+        meta: Dict[str, Any] = {}
         async with factory() as db:
+            # session_id 级查询 = 主会话 + 全部子会话（子 agent）的子树：
+            # 这样「本会话总成本 / 总耗时」会把所有 delegatee 一并算进来。
+            sids: Optional[List[str]] = None
+            if session_id:
+                sids = await _session_subtree_ids(db, session_id)
+
+            stmt = select(
+                LLMCall.model,
+                LLMCall.provider,
+                LLMCall.profile_id,
+                func.sum(LLMCall.prompt_tokens),
+                func.sum(LLMCall.completion_tokens),
+                func.sum(LLMCall.cached_tokens),
+                func.sum(LLMCall.cache_write_tokens),
+                func.sum(LLMCall.reasoning_tokens),
+                func.sum(LLMCall.duration_ms),
+                func.count(LLMCall.id),
+                func.count(LLMCall.cached_tokens),  # 只有非 NULL 才计数
+                func.max(LLMCall.prompt_tokens),  # 单次最大输入：上下文水位用
+                # 失败调用数（ok=False）：超时 / 报错都算，用于错误率
+                func.sum(case((LLMCall.ok.is_(False), 1), else_=0)),
+                # 该组最早的调用时间：用于匹配**当时**生效的单价（模型会调价）
+                func.min(LLMCall.created_at),
+            ).group_by(LLMCall.model, LLMCall.provider, LLMCall.profile_id)
+
+            if step_id:
+                stmt = stmt.where(LLMCall.step_id == step_id)
+            if message_id:
+                stmt = stmt.where(LLMCall.message_id == message_id)
+            if sids is not None:
+                stmt = stmt.where(LLMCall.session_id.in_(sids))
+            if task_id:
+                stmt = stmt.where(LLMCall.task_id == task_id)
+            if agent_id:
+                stmt = stmt.where(LLMCall.agent_id == agent_id)
+            if since:
+                stmt = stmt.where(LLMCall.created_at >= since)
+            if until:
+                stmt = stmt.where(LLMCall.created_at <= until)
+
             rows = (await db.execute(stmt)).all()
+
+            # 主 / 子 agent 明细：按「会话」拆（主会话 = 主 agent，子会话 = 子 agent）。
+            # 不按 agent_id 拆——delegatee 跑在主 agent 的上下文里，其 LLM 调用的
+            # agent_id 仍是主 agent，只有 session_id 才是区分主/子的真实维度。子会话的
+            # parent_id 非 NULL、且 agent_id 形如 "delegatee:code"，据此判定并生成标签。
+            sess_acc: Dict[str, Dict[str, Any]] = {}
+            if sids is not None:
+                meta = {
+                    r[0]: r
+                    for r in (
+                        await db.execute(
+                            select(
+                                ChatSession.id,
+                                ChatSession.title,
+                                ChatSession.agent_id,
+                                ChatSession.parent_id,
+                            ).where(ChatSession.id.in_(sids))
+                        )
+                    ).all()
+                }
+                sess_rows = (
+                    await db.execute(
+                        select(
+                            LLMCall.session_id,
+                            LLMCall.model,
+                            LLMCall.provider,
+                            LLMCall.profile_id,
+                            func.sum(LLMCall.prompt_tokens),
+                            func.sum(LLMCall.completion_tokens),
+                            func.sum(LLMCall.cached_tokens),
+                            func.sum(LLMCall.duration_ms),
+                            func.count(LLMCall.id),
+                            func.count(LLMCall.cached_tokens),
+                            func.sum(case((LLMCall.ok.is_(False), 1), else_=0)),
+                            func.min(LLMCall.created_at),
+                        )
+                        .where(LLMCall.session_id.in_(sids))
+                        .group_by(
+                            LLMCall.session_id,
+                            LLMCall.model,
+                            LLMCall.provider,
+                            LLMCall.profile_id,
+                        )
+                    )
+                ).all()
+                for (
+                    sid,
+                    model,
+                    provider,
+                    profile_id,
+                    s_prompt,
+                    s_completion,
+                    s_cached,
+                    s_dur,
+                    n_calls,
+                    n_cached_rows,
+                    n_errors,
+                    s_first_at,
+                ) in sess_rows:
+                    a = sess_acc.setdefault(
+                        sid,
+                        {
+                            "calls": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "cached_tokens": 0,
+                            "duration_ms": 0,
+                            "cost": 0.0,
+                            "currency": None,
+                            "errors": 0,
+                        },
+                    )
+                    prompt = int(s_prompt or 0)
+                    completion = int(s_completion or 0)
+                    cached = int(s_cached or 0)
+                    a["calls"] += int(n_calls or 0)
+                    a["prompt_tokens"] += prompt
+                    a["completion_tokens"] += completion
+                    a["cached_tokens"] += cached
+                    a["duration_ms"] += int(s_dur or 0)
+                    a["errors"] += int(n_errors or 0)
+                    price = await _price_for(
+                        profile_id, model, provider, at=s_first_at
+                    )
+                    c = _cost_of(
+                        prompt,
+                        completion,
+                        cached if n_cached_rows else None,
+                        price,
+                    )
+                    if c is not None:
+                        a["cost"] += c
+                        a["currency"] = price[3] if price else a["currency"]
 
         total_cost = 0.0
         priced = False
@@ -218,6 +321,40 @@ async def aggregate(
             )
         else:
             out["cache_hit_rate"] = 0.0
+
+        # 主 / 子 agent 明细（按会话拆）：主会话标「主 agent」，子会话标「子 agent：xxx」
+        breakdown = []
+        for sid, a in sess_acc.items():
+            mrow = meta.get(sid)
+            is_del = bool(
+                mrow and (mrow[3] or (mrow[2] or "").startswith("delegatee:"))
+            )
+            if is_del:
+                del_name = (
+                    (mrow[2] or "")[len("delegatee:") :]
+                    if (mrow[2] or "").startswith("delegatee:")
+                    else (mrow[2] or sid)
+                )
+                label = mrow[1] or f"子 agent：{del_name}"
+            else:
+                label = (mrow[1] if mrow else None) or "主 agent"
+            breakdown.append(
+                {
+                    "session_id": sid,
+                    "label": label,
+                    "is_delegatee": is_del,
+                    "calls": a["calls"],
+                    "prompt_tokens": a["prompt_tokens"],
+                    "completion_tokens": a["completion_tokens"],
+                    "cached_tokens": a["cached_tokens"],
+                    "duration_ms": a["duration_ms"],
+                    "cost": round(a["cost"], 6) if a["cost"] else None,
+                    "cost_currency": a["currency"],
+                    "errors": a["errors"],
+                }
+            )
+        breakdown.sort(key=lambda x: -(x["cost"] or 0))
+        out["session_breakdown"] = breakdown
     except Exception as e:
         raise_if_bug(e, "聚合用量")
         logger.debug("聚合用量失败: %s", e)

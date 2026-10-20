@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 
 from ..store import LLMCall, ToolCall, get_session_factory
 from ._context import _resolve_round_anchor
@@ -351,8 +351,84 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
         "summary": summary,
         "steps": steps,
         "duplicates": duplicates,
+        # 本轮被委托出去的子 agent（delegatee）调用汇总，供「详情 / dump」展示
+        "subagents": await message_subagent_breakdown(message_id),
     }
 
+
+
+async def message_subagent_breakdown(message_id: str) -> List[Dict[str, Any]]:
+    """一条消息里被委托出去的**子 agent**（delegatee）的调用汇总。
+
+    子 agent 跑在专属子会话里，但其 LLM 调用的 ``message_id`` 仍继承自父消息
+    （delegatee 只切了 ``session_id``，没切 ``message_id``），所以按 ``message_id``
+    能捞到它们；再落到 ``kind='delegatee'`` 的子会话，即子 agent。返回每个子 agent
+    的轮次（调用数）、token 与成本——不含主 agent 自身（主 agent 的步级明细在
+    ``steps`` 里）。查不到 / 没子 agent 时返回空列表，绝不抛错。
+    """
+    try:
+        from ..store import ChatSession, get_session_factory
+
+        anchor = await _resolve_round_anchor(message_id)
+        factory = get_session_factory()
+        async with factory() as db:
+            sids = (
+                await db.execute(
+                    select(LLMCall.session_id)
+                    .join(ChatSession, ChatSession.id == LLMCall.session_id)
+                    .where(
+                        LLMCall.message_id == anchor,
+                        ChatSession.kind == "delegatee",
+                    )
+                    .distinct()
+                )
+            ).scalars().all()
+            subs = {
+                r.id: r
+                for r in (
+                    await db.execute(
+                        select(
+                            ChatSession.id,
+                            ChatSession.title,
+                            ChatSession.agent_id,
+                        ).where(ChatSession.kind == "delegatee")
+                    )
+                ).all()
+            }
+        out = []
+        for sid in sids:
+            # 复用 aggregate 的计价（按模型分组求和 + 单价匹配）：这一 (子会话, 消息)
+            # 切片就是该子 agent 在本轮的全部调用。
+            sub = await aggregate(session_id=sid, message_id=anchor)
+            if not sub.get("calls"):
+                continue
+            m = subs.get(sid)
+            name = (
+                (m.agent_id or "")[len("delegatee:") :]
+                if m and (m.agent_id or "").startswith("delegatee:")
+                else (m.agent_id if m else sid)
+            )
+            label = (m.title if m and m.title else None) or f"子 agent：{name}"
+            out.append(
+                {
+                    "session_id": sid,
+                    "label": label,
+                    "is_delegatee": True,
+                    "calls": sub["calls"],
+                    "prompt_tokens": sub["prompt_tokens"],
+                    "completion_tokens": sub["completion_tokens"],
+                    "cached_tokens": sub["cached_tokens"],
+                    "duration_ms": sub["duration_ms"],
+                    "cost": sub["cost"],
+                    "cost_currency": sub["cost_currency"],
+                    "errors": sub["errors"],
+                }
+            )
+        return out
+    except Exception as e:  # noqa: BLE001
+        raise_if_bug(e, "统计本轮子 agent 调用")
+        logger.debug("统计本轮子 agent 调用失败: %s", e)
+        return []
 
 
 async def set_message_duration(message_id: Optional[str], duration_ms: int) -> None:

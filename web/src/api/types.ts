@@ -209,6 +209,41 @@ export interface UsageSummary {
   /** 失败调用数（超时 / 报错）与错误率 */
   errors?: number;
   error_rate?: number;
+  /** 主 / 子 agent 拆分：本会话（含所有子 agent 子会话）按会话归类的成本/用量明细 */
+  session_breakdown?: SessionBreakdownItem[];
+}
+
+/** 单个会话（主会话或子 agent 子会话）在本会话树内的成本/用量明细，用于区分主/子 agent */
+export interface SessionBreakdownItem {
+  session_id: string;
+  label: string;
+  /** 是否为子 agent（delegatee）：子会话的 parent_id 非 NULL、agent_id 形如 "delegatee:code" */
+  is_delegatee: boolean;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  duration_ms: number;
+  cost: number | null;
+  cost_currency: string | null;
+  errors: number;
+}
+
+/** 一条消息里被委托出去的**子 agent**（delegatee）的调用汇总（按子会话归类） */
+export interface SubagentBreakdownItem {
+  session_id: string;
+  label: string;
+  /** 固定为 true：本结构只装子 agent */
+  is_delegatee: boolean;
+  /** 轮次：该子 agent 在本轮（该 message）的 LLM 调用数 */
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  duration_ms: number;
+  cost: number | null;
+  cost_currency: string | null;
+  errors: number;
 }
 
 /** 工具维度统计（一行 = 一个工具） */
@@ -737,6 +772,14 @@ export interface DumpCall {
   response?: string;
   /** 工具入参（增量拼接，无工具调用时为空串） */
   tool_args?: string;
+  /** 该次 dump 所属会话（子 agent 的 dump 落在各自的子会话目录下，据此区分主/子） */
+  session_id?: string | null;
+  /** 是否为子 agent（delegatee）的 dump */
+  is_delegatee?: boolean;
+  /** 子 agent 标签，如「子 agent：code」；主 agent 调用无此字段 */
+  subagent_label?: string | null;
+  /** 子 agent 内部迭代序号（父步 N 下的第 M 次迭代 → 标签 step{N}.{M}）；主 agent 无此字段 */
+  sub_step?: number | null;
   usage?: {
     prompt_tokens?: number | null;
     completion_tokens?: number | null;
@@ -969,6 +1012,8 @@ export interface MessageTimeline {
   steps: TimelineStep[];
   /** 本轮的重复调用 / 空转与追回抖动（和 token 曲线放一起看才好排查） */
   duplicates?: DuplicateCalls | null;
+  /** 本轮被委托出去的子 agent（delegatee）调用汇总，详情 / dump 里逐项展示 */
+  subagents?: SubagentBreakdownItem[];
 }
 
 export interface AgentStep {

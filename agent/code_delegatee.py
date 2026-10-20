@@ -38,6 +38,8 @@ class CodeDelegatee(Delegatee):
         self.max_iter = max_iter
 
     async def run(self, req: Requirement, ctx: Ctx) -> DelegateResult:
+        from ..chat.context import sub_step
+
         prompt = req.text or ""
         if req.context:
             prompt += "\n\n已知信息：\n" + req.context
@@ -46,8 +48,11 @@ class CodeDelegatee(Delegatee):
             {"role": "user", "content": prompt},
         ]
         last_out = ""
-        for _ in range(self.max_iter):
-            text = await self.llm.chat(messages)
+        for it in range(self.max_iter):
+            # 把「这是父步下的第几次内部迭代」注入上下文，落盘标签才能显示
+            # step{父}.{it+1}，否则子 agent 的多次迭代会全压平成一个 step。
+            async with sub_step(it + 1):
+                text = await self.llm.chat(messages)
             code = _extract_code(text)
             if not code:
                 # 没给代码：可能直接给了答案

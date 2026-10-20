@@ -62,6 +62,12 @@ class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
     id: Mapped[str] = mapped_column(String(26), primary_key=True, default=new_id)
+    # 父会话：子 agent（delegatee）的子会话挂在这里，形成「主会话 → 子会话」树。
+    # 聚合（费用 / 时长）时按 parent_id 递归收集整棵子树，从而把「主任务 + 所有子
+    # agent」一起算进总成本。无父（普通会话 / 任务会话）时为 NULL。
+    parent_id: Mapped[Optional[str]] = mapped_column(
+        String(26), ForeignKey("chat_sessions.id"), nullable=True, index=True
+    )
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     initiator_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     # 所属 agent：单进程多 agent 下**按它隔离会话**。

@@ -771,6 +771,19 @@ async def _migrate_react_parse_stat_model(conn) -> None:
         )
 
 
+async def _migrate_chat_session_parent_id(conn) -> None:
+    """chat_sessions 补 parent_id 列：子 agent（delegatee）子会话挂到主会话下（存量库升级）。
+
+    存量行一律留空——升级前没有子会话概念，普通会话本就没有父。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "parent_id" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN parent_id TEXT"
+        )
+
+
 async def init_db(url: str | None = None) -> None:
     """建表（幂等）+ 补列迁移。顺带开 WAL，提升读写并发。"""
     engine = get_engine(url)
@@ -815,6 +828,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_model_price_weekdays(conn)
         await _migrate_tool_call_args_hash(conn)
         await _migrate_react_parse_stat_model(conn)
+        await _migrate_chat_session_parent_id(conn)
 
 
 async def dispose_engine() -> None:

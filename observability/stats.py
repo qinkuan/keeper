@@ -15,6 +15,7 @@ from sqlalchemy import case, func, or_, select
 
 from ..store import (
     CapabilityLoad,
+    ChatSession,
     LLMCall,
     ReactParseStat,
     ToolCall,
@@ -25,6 +26,28 @@ from ._guard import raise_if_bug, warn_bug_only
 from .pricing import _cost_of, _price_for
 
 logger = logging.getLogger(__name__)
+
+
+async def _session_subtree_ids(db, root_id: str) -> List[str]:
+    """返回 root 及其全部后代会话 id（含 root 本身）。
+
+    按 ``parent_id`` 自顶向下迭代收集：聚合「费用 / 时长」时，给定主会话就能把它的
+    所有子 agent（delegatee）子会话一并算进总成本。DB 里会话规模可控，迭代查询足够。
+    """
+    ids: List[str] = [root_id]
+    frontier = [root_id]
+    while frontier:
+        children = (
+            await db.execute(
+                select(ChatSession.id).where(ChatSession.parent_id.in_(frontier))
+            )
+        ).scalars().all()
+        nxt = [c for c in children if c not in ids]
+        if not nxt:
+            break
+        ids.extend(nxt)
+        frontier = nxt
+    return ids
 
 
 async def react_parse_stats(agent_id: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
@@ -325,21 +348,24 @@ async def usage_timeseries(
     fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m-%d %H:00"
     bucket_expr = func.strftime(fmt, LLMCall.created_at)
 
-    conds = []
-    if agent_id:
-        conds.append(LLMCall.agent_id == agent_id)
-    if session_id:
-        conds.append(LLMCall.session_id == session_id)
-    if task_id:
-        conds.append(LLMCall.task_id == task_id)
-    if since:
-        conds.append(LLMCall.created_at >= since)
-    if until:
-        conds.append(LLMCall.created_at <= until)
-
     try:
         factory = get_session_factory()
         async with factory() as db:
+            # session_id 级查询 = 该会话 + 其全部子会话（子 agent）的子树，
+            # 这样「主任务的总成本 / 总耗时」会把所有 delegatee 一并算进来。
+            conds = []
+            if agent_id:
+                conds.append(LLMCall.agent_id == agent_id)
+            if session_id:
+                sids = await _session_subtree_ids(db, session_id)
+                conds.append(LLMCall.session_id.in_(sids))
+            if task_id:
+                conds.append(LLMCall.task_id == task_id)
+            if since:
+                conds.append(LLMCall.created_at >= since)
+            if until:
+                conds.append(LLMCall.created_at <= until)
+
             rows = (
                 await db.execute(
                     select(
@@ -424,21 +450,22 @@ async def slowest_calls(
     只看记到耗时的调用；按 duration_ms 降序返回，带上 token、是否流式、首字
     延迟与归属（message / step / session），便于直接跳到那一轮排查。
     """
-    conds = [LLMCall.duration_ms.is_not(None)]
-    if agent_id:
-        conds.append(LLMCall.agent_id == agent_id)
-    if session_id:
-        conds.append(LLMCall.session_id == session_id)
-    if task_id:
-        conds.append(LLMCall.task_id == task_id)
-    if since:
-        conds.append(LLMCall.created_at >= since)
-    if until:
-        conds.append(LLMCall.created_at <= until)
-
     try:
         factory = get_session_factory()
         async with factory() as db:
+            conds = [LLMCall.duration_ms.is_not(None)]
+            if agent_id:
+                conds.append(LLMCall.agent_id == agent_id)
+            if session_id:
+                sids = await _session_subtree_ids(db, session_id)
+                conds.append(LLMCall.session_id.in_(sids))
+            if task_id:
+                conds.append(LLMCall.task_id == task_id)
+            if since:
+                conds.append(LLMCall.created_at >= since)
+            if until:
+                conds.append(LLMCall.created_at <= until)
+
             rows = (
                 await db.execute(
                     select(LLMCall)
@@ -487,18 +514,6 @@ async def error_breakdown(
     错误信息可能很长且每次略有不同，这里按**前 120 字符**归并统计，
     避免每个不同的报错都单独占一行而看不出主次。
     """
-    conds: List[Any] = []
-    if agent_id:
-        conds.append(LLMCall.agent_id == agent_id)
-    if session_id:
-        conds.append(LLMCall.session_id == session_id)
-    if task_id:
-        conds.append(LLMCall.task_id == task_id)
-    if since:
-        conds.append(LLMCall.created_at >= since)
-    if until:
-        conds.append(LLMCall.created_at <= until)
-
     out: Dict[str, Any] = {
         "llm": {"total": 0, "failed": 0, "error_rate": 0.0, "groups": []},
         "tool": {"total": 0, "failed": 0, "error_rate": 0.0, "groups": []},
@@ -506,6 +521,24 @@ async def error_breakdown(
     try:
         factory = get_session_factory()
         async with factory() as db:
+            # session_id = 主会话 + 所有子 agent 子会话；LLM 与工具共用同一组 id。
+            sids = (
+                await _session_subtree_ids(db, session_id)
+                if session_id
+                else None
+            )
+            conds: List[Any] = []
+            if agent_id:
+                conds.append(LLMCall.agent_id == agent_id)
+            if sids is not None:
+                conds.append(LLMCall.session_id.in_(sids))
+            if task_id:
+                conds.append(LLMCall.task_id == task_id)
+            if since:
+                conds.append(LLMCall.created_at >= since)
+            if until:
+                conds.append(LLMCall.created_at <= until)
+
             llm_total = (
                 await db.execute(
                     select(func.count(LLMCall.id)).where(*conds)
@@ -529,8 +562,8 @@ async def error_breakdown(
             tool_conds: List[Any] = []
             if agent_id:
                 tool_conds.append(ToolCall.agent_id == agent_id)
-            if session_id:
-                tool_conds.append(ToolCall.session_id == session_id)
+            if sids is not None:
+                tool_conds.append(ToolCall.session_id.in_(sids))
             if task_id:
                 tool_conds.append(ToolCall.task_id == task_id)
             if since:
@@ -628,18 +661,23 @@ async def ask_rate(
     try:
         from ..store import ReactStep, get_session_factory
 
-        conds: List[Any] = [LLMCall.message_id.is_not(None)]
-        if agent_id:
-            conds.append(LLMCall.agent_id == agent_id)
-        if session_id:
-            conds.append(LLMCall.session_id == session_id)
-        if since:
-            conds.append(LLMCall.created_at >= since)
-        if until:
-            conds.append(LLMCall.created_at <= until)
-
         factory = get_session_factory()
         async with factory() as db:
+            sids = (
+                await _session_subtree_ids(db, session_id)
+                if session_id
+                else None
+            )
+            conds: List[Any] = [LLMCall.message_id.is_not(None)]
+            if agent_id:
+                conds.append(LLMCall.agent_id == agent_id)
+            if sids is not None:
+                conds.append(LLMCall.session_id.in_(sids))
+            if since:
+                conds.append(LLMCall.created_at >= since)
+            if until:
+                conds.append(LLMCall.created_at <= until)
+
             mids = (
                 await db.execute(
                     select(func.distinct(LLMCall.message_id)).where(*conds)
@@ -721,31 +759,39 @@ async def duplicate_calls(
         # 先攒「维度过滤」，再分别拼两种口径：
         #   base      = 维度 + 排除 read（空转率）
         #   base_read = 维度 + 只要 read（追回抖动率）
-        filters: List[Any] = []
-        if agent_id:
-            filters.append(ToolCall.agent_id == agent_id)
-        if session_id:
-            filters.append(ToolCall.session_id == session_id)
-        if task_id:
-            filters.append(ToolCall.task_id == task_id)
-        if message_id:
-            # 「查看详情」传进来的可能是助手消息 id，先回溯到触发本轮的用户消息
-            filters.append(
-                ToolCall.message_id == (await _resolve_round_anchor(message_id))
-            )
-        if since:
-            filters.append(ToolCall.created_at >= since)
-        if until:
-            filters.append(ToolCall.created_at <= until)
-
-        # read 是**设计内**的追回动作（展开被外部化/压缩的内容，见
-        # doc/context-design.md），重复展开同一块不算「绕圈子」，排除掉，
-        # 否则上下文压缩用得越多，空转率虚高得越厉害。
-        base = filters + [ToolCall.tool != "read"]
-        base_read = filters + [ToolCall.tool == "read"]
-
         factory = get_session_factory()
         async with factory() as db:
+            sids = (
+                await _session_subtree_ids(db, session_id)
+                if session_id
+                else None
+            )
+            # 先攒「维度过滤」，再分别拼两种口径：
+            #   base      = 维度 + 排除 read（空转率）
+            #   base_read = 维度 + 只要 read（追回抖动率）
+            filters: List[Any] = []
+            if agent_id:
+                filters.append(ToolCall.agent_id == agent_id)
+            if sids is not None:
+                filters.append(ToolCall.session_id.in_(sids))
+            if task_id:
+                filters.append(ToolCall.task_id == task_id)
+            if message_id:
+                # 「查看详情」传进来的可能是助手消息 id，先回溯到触发本轮的用户消息
+                filters.append(
+                    ToolCall.message_id == (await _resolve_round_anchor(message_id))
+                )
+            if since:
+                filters.append(ToolCall.created_at >= since)
+            if until:
+                filters.append(ToolCall.created_at <= until)
+
+            # read 是**设计内**的追回动作（展开被外部化/压缩的内容，见
+            # doc/context-design.md），重复展开同一块不算「绕圈子」，排除掉，
+            # 否则上下文压缩用得越多，空转率虚高得越厉害。
+            base = filters + [ToolCall.tool != "read"]
+            base_read = filters + [ToolCall.tool == "read"]
+
             total = (
                 await db.execute(select(func.count(ToolCall.id)).where(*base))
             ).scalar() or 0
@@ -853,32 +899,37 @@ async def tool_stats(
     给模型的文本被换成了引用（``block_id``）或截断，该精简输出了。
     """
     try:
-        stmt = select(
-            ToolCall.tool,
-            func.count(ToolCall.id),
-            func.sum(case((ToolCall.ok.is_(False), 1), else_=0)),
-            func.sum(ToolCall.duration_ms),
-            func.avg(ToolCall.duration_ms),
-            func.max(ToolCall.duration_ms),
-            func.avg(ToolCall.output_size),
-            func.max(ToolCall.output_size),
-            func.sum(case((ToolCall.truncated.is_(True), 1), else_=0)),
-        ).group_by(ToolCall.tool)
-        if session_id:
-            stmt = stmt.where(ToolCall.session_id == session_id)
-        if message_id:
-            stmt = stmt.where(ToolCall.message_id == message_id)
-        if task_id:
-            stmt = stmt.where(ToolCall.task_id == task_id)
-        if agent_id:
-            stmt = stmt.where(ToolCall.agent_id == agent_id)
-        if since:
-            stmt = stmt.where(ToolCall.created_at >= since)
-        if until:
-            stmt = stmt.where(ToolCall.created_at <= until)
-
         factory = get_session_factory()
         async with factory() as db:
+            sids = (
+                await _session_subtree_ids(db, session_id)
+                if session_id
+                else None
+            )
+            stmt = select(
+                ToolCall.tool,
+                func.count(ToolCall.id),
+                func.sum(case((ToolCall.ok.is_(False), 1), else_=0)),
+                func.sum(ToolCall.duration_ms),
+                func.avg(ToolCall.duration_ms),
+                func.max(ToolCall.duration_ms),
+                func.avg(ToolCall.output_size),
+                func.max(ToolCall.output_size),
+                func.sum(case((ToolCall.truncated.is_(True), 1), else_=0)),
+            ).group_by(ToolCall.tool)
+            if sids is not None:
+                stmt = stmt.where(ToolCall.session_id.in_(sids))
+            if message_id:
+                stmt = stmt.where(ToolCall.message_id == message_id)
+            if task_id:
+                stmt = stmt.where(ToolCall.task_id == task_id)
+            if agent_id:
+                stmt = stmt.where(ToolCall.agent_id == agent_id)
+            if since:
+                stmt = stmt.where(ToolCall.created_at >= since)
+            if until:
+                stmt = stmt.where(ToolCall.created_at <= until)
+
             rows = (await db.execute(stmt)).all()
 
         out: List[Dict[str, Any]] = []

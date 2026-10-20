@@ -8,6 +8,7 @@ threads / agent_messages 记账。但工具注册表是 keeper 级别的（多�
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Optional
 from ulid import ULID
@@ -33,6 +34,24 @@ def current_session_id() -> Optional[str]:
 def set_session_id(session_id: Optional[str]) -> None:
     """标记当前任务所处的会话。一般在 ChatService.ask 确定 session 后调用。"""
     _current_session_id.set(session_id)
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def override_session_id(session_id: Optional[str]):
+    """临时把归属上下文切到另一个会话（如子 agent 的子会话），退出时还原。
+
+    delegatee 执行期间用它把 ``session_id`` 切到自己的子会话，于是子 agent 的
+    LLM / 工具调用会记到子会话名下，而非主会话；跑完自动还原，主循环后续调用
+    仍归属主会话。基于 ContextVar 的 token 还原，并发任务互不干扰。
+    """
+    token = _current_session_id.set(session_id)
+    try:
+        yield
+    finally:
+        _current_session_id.reset(token)
 
 
 def current_memory_day() -> Optional[str]:
@@ -180,6 +199,33 @@ def set_llm_call_kind(kind: Optional[str]) -> None:
 
 def current_llm_call_kind() -> Optional[str]:
     return _current_llm_kind.get()
+
+
+# 子 agent（delegatee）跑在它被触发的那一步的上下文里：它的多次内部迭代若都沿用
+# 父步的 step_seq，dump 的 step 标签会全部压平成一个（如 step2），看不出内部过程。
+# 这里用 sub_step 记录「这是该父步下的第几次子迭代」，只用于 dump 标签（step{父}.{子}），
+# 绝不写进 LLMCall.step_seq（那列是整数、按父步聚合成本）。
+_current_sub_step: ContextVar[Optional[int]] = ContextVar(
+    "keeper_sub_step", default=None
+)
+
+
+def set_sub_step(seq: Optional[int]) -> None:
+    _current_sub_step.set(seq)
+
+
+def current_sub_step() -> Optional[int]:
+    return _current_sub_step.get()
+
+
+@asynccontextmanager
+async def sub_step(seq: Optional[int]):
+    """临时把「子迭代序号」注入上下文，退出时还原，避免污染后续主循环调用。"""
+    tok = _current_sub_step.set(seq)
+    try:
+        yield
+    finally:
+        _current_sub_step.reset(tok)
 
 
 # 当前请求所属的 agent：日志靠它区分多 agent（同进程装多个时日志会混在一起）。

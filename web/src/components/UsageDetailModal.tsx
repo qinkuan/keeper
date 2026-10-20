@@ -447,6 +447,47 @@ export default function UsageDetailModal({
 
           {/* 空转 / 追回抖动：和 token 曲线放一起才能回答「这轮为什么慢、为什么贵」 */}
           <DuplicateSection d={data?.duplicates} />
+
+          {/* 本轮被委托出去的子 agent：轮次 + token + 成本，单独列出便于核对 */}
+          {data?.subagents && data.subagents.length > 0 && (
+            <div className="mt-5">
+              <div className="mb-1.5 text-[13px] font-semibold text-ink-strong">
+                子 agent 调用
+                <span className="ml-1.5 font-normal text-ink-muted">
+                  （点开「查看 dump」看子 agent 喂给模型的完整 prompt）
+                </span>
+              </div>
+              <div className="space-y-2">
+                {data.subagents.map((s) => (
+                  <div
+                    key={s.session_id}
+                    className="rounded-lg border border-line-soft bg-surface px-3 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px]">
+                      <span className="font-medium text-violet-600 dark:text-violet-400">
+                        {s.label}
+                      </span>
+                      <span className="text-ink-muted">{s.calls} 轮</span>
+                      <span className="text-ink-muted">
+                        模型输入 {fmtTokens(s.prompt_tokens)} · 模型输出{" "}
+                        {fmtTokens(s.completion_tokens)}
+                      </span>
+                      {s.cost != null ? (
+                        <span className="text-ink-muted">
+                          · {fmtCost(s.cost, s.cost_currency)}
+                        </span>
+                      ) : null}
+                      {s.errors > 0 ? (
+                        <span className="text-orange-600 dark:text-orange-300">
+                          · {s.errors} 次失败
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Modal>

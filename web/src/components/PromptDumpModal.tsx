@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 
-import { apiMessageDump } from "../api/client";
-import type { DumpCall } from "../api/types";
-import { fmtDuration, fmtTokens } from "./UsageTag";
+import { apiMessageDump, apiMessageTimeline } from "../api/client";
+import type { DumpCall, SubagentBreakdownItem } from "../api/types";
+import { fmtCost, fmtDuration, fmtTokens } from "./UsageTag";
 import { Modal } from "./ui/Modal";
 import { Collapse } from "./ui/Collapse";
 import { Hint } from "./ui/Page";
@@ -19,9 +19,12 @@ function Pre({ text }: { text: string }) {
   );
 }
 
-/** 人类可读标签：第几步 / 最终总结 / 记忆摘要 */
+/** 人类可读标签：第几步 / 子迭代 / 最终总结 / 记忆摘要 */
 function labelOf(f: DumpCall, i: number): string {
-  if (f.kind === "react_step" && f.step_seq != null) return `第 ${f.step_seq} 步`;
+  if (f.kind === "react_step" && f.step_seq != null)
+    return f.sub_step != null
+      ? `第 ${f.step_seq}.${f.sub_step} 步`
+      : `第 ${f.step_seq} 步`;
   if (f.kind === "final_summary") return "最终总结";
   if (f.kind === "turn_summary") return "记忆摘要";
   return f.kind || `调用 ${i + 1}`;
@@ -116,6 +119,13 @@ export default function PromptDumpModal({
     queryFn: () => apiMessageDump(messageId as string),
     enabled: open && !!messageId,
   });
+  // 同一轮的时间线：用来拿子 agent 的成本汇总（dump 文件里只有 token，没有单价换算）
+  const tlQ = useQuery({
+    queryKey: ["message-timeline", messageId],
+    queryFn: () => apiMessageTimeline(messageId as string),
+    enabled: open && !!messageId,
+  });
+  const subagents: SubagentBreakdownItem[] = tlQ.data?.subagents ?? [];
 
   const files = dumpQ.data?.files ?? [];
   const idx = Math.min(Number(tab) || 0, Math.max(0, files.length - 1));
@@ -142,6 +152,27 @@ export default function PromptDumpModal({
             {dumpQ.data?.dir ? ` · ${dumpQ.data.dir}` : ""}
           </div>
 
+          {/* 子 agent 调用汇总：轮次 + token + 成本（成本来自时间线，dump 文件里只有 token） */}
+          {subagents.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {subagents.map((s) => (
+                <span
+                  key={s.session_id}
+                  className="inline-flex items-center gap-1 rounded-md bg-violet-500/12 px-2 py-1 text-[12px] leading-4 text-violet-600 dark:text-violet-300"
+                >
+                  <b>{s.label}</b>
+                  <span>{s.calls} 轮</span>
+                  <span>
+                    {fmtTokens(s.prompt_tokens + s.completion_tokens)}
+                  </span>
+                  {s.cost != null ? (
+                    <span>· {fmtCost(s.cost, s.cost_currency)}</span>
+                  ) : null}
+                </span>
+              ))}
+            </div>
+          )}
+
           <Tabs
             className="mb-3"
             value={String(idx)}
@@ -155,6 +186,11 @@ export default function PromptDumpModal({
           {cur && (
             <>
               <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-ink-muted">
+                {cur.is_delegatee && cur.subagent_label ? (
+                  <span className="inline-flex rounded-md bg-violet-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-violet-600 dark:text-violet-300">
+                    {cur.subagent_label}
+                  </span>
+                ) : null}
                 <span
                   className={`inline-flex rounded-md px-1.5 py-0.5 text-[11px] leading-4 ${tagClass(
                     cur
@@ -168,6 +204,14 @@ export default function PromptDumpModal({
                   </code>
                 )}
                 <span>模型 {cur.model ?? "—"}</span>
+                {cur.ts ? (
+                  <span title={cur.ts}>
+                    ⏱{" "}
+                    {new Date(cur.ts).toLocaleTimeString("zh-CN", {
+                      hour12: false,
+                    })}
+                  </span>
+                ) : null}
                 <span>{cur.is_stream ? "流式" : "非流式"}</span>
                 <span>耗时 {fmtDuration(cur.duration_ms)}</span>
                 <span>首字 {fmtDuration(cur.ttft_ms)}</span>

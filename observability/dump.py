@@ -206,10 +206,13 @@ def dump_llm_call(
         # 误以为是某一步。这样浏览目录时不用打开就知道每个文件是什么。
         now = datetime.now(timezone.utc)
         seq = ctx.get("step_seq")
+        sub = ctx.get("sub_step")
         kind = ctx.get("llm_kind") or "other"
-        # step{N} 已表明这是第几步，不再缀 -react_step（重复）
-        if kind == "react_step" and seq:
-            label = f"step{seq}"
+        # step{N} 已表明这是第几步，不再缀 -react_step（重复）。子 agent 跑在父步
+        # 上下文里，多次内部迭代会沿用父步的 step_seq；用 .M 标出「父步 N 下的第 M
+        # 次子迭代」，否则 dump 里全是同一个 step2，看不出子 agent 的内部过程。
+        if kind == "react_step" and seq is not None:
+            label = f"step{seq}" + (f".{sub}" if sub is not None else "")
         elif kind == "final_summary":
             label = "final-summary"
         elif kind == "turn_summary":
@@ -234,6 +237,7 @@ def dump_llm_call(
             "session_id": session_id,
             "message_id": message_id,
             "step_seq": ctx.get("step_seq"),
+            "sub_step": ctx.get("sub_step"),
             "system": _system_of(msgs),
             "messages": [_msg_to_dict(m) for m in (msgs or [])],
             # 流式：最后/带 usage 的分片 content 通常是空的（正文在前面的分片里），
@@ -275,37 +279,77 @@ async def read_message_dump(message_id: str) -> Dict[str, Any]:
     if cfg is None or not cfg.enabled:
         return {"enabled": False, "files": []}
     try:
+        from sqlalchemy import select
+
         from ._context import _resolve_round_anchor
-        from ..store import SessionMessage, get_session_factory
+        from ..store import ChatSession, LLMCall, SessionMessage, get_session_factory
 
         factory = get_session_factory()
         async with factory() as db:
             row = await db.get(SessionMessage, message_id)
+            anchor = await _resolve_round_anchor(message_id)
+            # 本轮里被委托出去的子 agent 子会话：它们的 dump 落在各自的 session 目录
+            # 下（与主线目录平级），得单独捞出来标注，否则「查看 dump」里看不到子
+            # agent 到底喂了什么 prompt。
+            sub_rows = (
+                await db.execute(
+                    select(
+                        ChatSession.id,
+                        ChatSession.title,
+                        ChatSession.agent_id,
+                    )
+                    .join(LLMCall, LLMCall.session_id == ChatSession.id)
+                    .where(
+                        LLMCall.message_id == anchor,
+                        ChatSession.kind == "delegatee",
+                    )
+                    .distinct()
+                )
+            ).all()
         if row is None:
             return {"enabled": True, "files": []}
 
         base = Path(os.path.expanduser(cfg.dir))
-        # ① 先按传入的 id 直接找（目录可能就建在它下面，比如点在 user 消息上）
+        # ① 主会话本轮目录（实时写时助手消息还没落库，目录挂在 user 消息 id 下）
         d = base / row.chat_session_id / message_id
         if not d.exists():
-            # ② 再回溯到「触发该轮的用户消息」：dump 是实时写的，那时助手消息
-            #    还没落库（id 不存在），目录只能挂 user 消息 id，所以从助手
-            #    消息点进来必须回退一步才能找到。
-            anchor = await _resolve_round_anchor(message_id)
             d = base / row.chat_session_id / anchor
-        if not d.exists():
-            return {"enabled": True, "dir": str(d), "files": []}
         items = []
-        for f in sorted(d.glob("*.json")):
-            try:
-                items.append(json.loads(f.read_text(encoding="utf-8")))
-            except Exception as e:  # noqa: BLE001
-                # 单个文件读不了不该让整轮 dump 都返回空——跳过它即可。
-                warn_bug_only(e, f"读 dump 文件 {f.name}")
+        if d.exists():
+            for f in sorted(d.glob("*.json")):
+                try:
+                    items.append(json.loads(f.read_text(encoding="utf-8")))
+                except Exception as e:  # noqa: BLE001
+                    warn_bug_only(e, f"读 dump 文件 {f.name}")
+                    continue
+        # ② 子 agent 子会话本轮目录：标注后并入，便于前端区分主 / 子
+        for sid, title, agent_id in sub_rows:
+            sub_dir = base / sid / anchor
+            if not sub_dir.exists():
                 continue
+            name = (
+                (agent_id or "")[len("delegatee:") :]
+                if (agent_id or "").startswith("delegatee:")
+                else (agent_id or sid)
+            )
+            label = (title if title else None) or f"子 agent：{name}"
+            for f in sorted(sub_dir.glob("*.json")):
+                try:
+                    payload = json.loads(f.read_text(encoding="utf-8"))
+                except Exception as e:  # noqa: BLE001
+                    warn_bug_only(e, f"读 dump 文件 {f.name}")
+                    continue
+                payload["session_id"] = sid
+                payload["is_delegatee"] = True
+                payload["subagent_label"] = label
+                items.append(payload)
+        # 跨「主会话 + 各子 agent 子会话」统一按落盘时间升序，还原真实的完整过程序列。
+        # 子 agent 跑在主 agent 某一步的上下文里，step 标签被继承成同一步，靠文件名
+        # 前缀的 001/002 只能保证目录下有序、跨目录会乱，只有 ts 能排清全局先后。
+        items.sort(key=lambda p: p.get("ts") or "")
         return {
             "enabled": True,
-            "dir": str(d),
+            "dir": str(d) if d.exists() else None,
             "count": len(items),
             "files": items,
         }
