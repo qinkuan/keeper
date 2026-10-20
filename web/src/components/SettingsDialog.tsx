@@ -20,6 +20,7 @@ import { NumField, SelectField, TextField, ToggleField } from "./ui/Form";
 import { Modal } from "./ui/Modal";
 import { toast } from "./ui/Toast";
 import { CoreAgentEditor } from "./CoreAgentEditor";
+import { DelegateeSettings } from "./DelegateeSettings";
 
 import {
   apiGetSettings,
@@ -38,7 +39,13 @@ import type {
 } from "../api/types";
 
 /** 可单独打开的设置段 */
-export type SettingsSection = "core" | "context" | "a2a" | "debug" | "auth";
+export type SettingsSection =
+  | "core"
+  | "context"
+  | "a2a"
+  | "debug"
+  | "auth"
+  | "delegatee";
 
 /** 侧栏弹出菜单用它渲染条目（label/描述集中在这里，菜单与标题不会写错） */
 export const SETTINGS_SECTIONS: {
@@ -55,6 +62,11 @@ export const SETTINGS_SECTIONS: {
   { key: "a2a", label: "协作", desc: "调对端时的超时与熔断" },
   { key: "debug", label: "调试", desc: "排查用的 prompt 落盘" },
   { key: "auth", label: "安全", desc: "入站认证（访问令牌）开关" },
+  {
+    key: "delegatee",
+    label: "子 agent",
+    desc: "每个子 agent 独立的模型与插件",
+  },
 ];
 
 /** 表单即整份设置：各段与后端一一对应，保存时整体提交 */
@@ -223,7 +235,11 @@ export function SettingsDialog({
       title={title}
       width={620}
       footer={
-        <>
+        // delegatee 段自带逐项的保存按钮，不需要弹窗底部的统一「保存 / 重新加载」
+        section === "delegatee" ? (
+          <></>
+        ) : (
+          <>
           <button
             type="button"
             disabled={reloadM.isPending}
@@ -246,6 +262,7 @@ export function SettingsDialog({
             保存
           </button>
         </>
+        )
       }
     >
       {settingsQ.isLoading ? (
@@ -760,6 +777,8 @@ export function SettingsDialog({
               </Hint>
             </Stack>
           )}
+
+          {section === "delegatee" && <DelegateeSettings />}
         </div>
       )}
     </Modal>

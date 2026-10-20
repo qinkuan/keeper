@@ -139,6 +139,10 @@ import type {
 
   SessionKind,
 
+  DelegateeListResp,
+  DelegateeUpdate,
+  DelegateeUpdateResp,
+
 } from "./types";
 
 
@@ -2642,6 +2646,16 @@ export function apiDeletePrice(modelId: string, priceId: string) {
 
   return apiDelete<null>(`/manage/models/${modelId}/prices/${priceId}`);
 
+}
+
+// ---- 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件 ----
+
+export function apiListDelegatees() {
+  return apiGet<DelegateeListResp>("/manage/delegatees");
+}
+
+export function apiUpdateDelegatee(name: string, body: DelegateeUpdate) {
+  return apiPut<DelegateeUpdateResp>(`/manage/delegatees/${name}`, body);
 }
 
 export function apiGetAgentModel(agentId: string) {

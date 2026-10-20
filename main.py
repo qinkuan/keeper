@@ -147,6 +147,10 @@ def make_app():
     app.include_router(plugins_router, dependencies=auth_deps)
     # 模型管理（本地维护的模型预设；agent 通过绑定表引用）
     app.include_router(models_router, dependencies=auth_deps)
+    # 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件
+    from keeper.agent.delegatee_api import router as delegatee_router
+
+    app.include_router(delegatee_router, dependencies=auth_deps)
     # 会话回收站：已删除会话（软删除）的列表 + 恢复
     from keeper.chat.api import trash_router
 

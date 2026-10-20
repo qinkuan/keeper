@@ -1412,6 +1412,44 @@ export interface ModelPrice {
   note?: string | null;
 }
 
+// ---- 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件 ----
+
+/** 单个子 agent 的当前配置（GET /manage/delegatees 的数组元素）。 */
+export interface DelegateeConfig {
+  /** delegatee 名（"code" / "video" / ...），与后端 DELEGATEE_TYPES 对齐 */
+  name: string;
+  /** 一句话说明（来自类型注册表） */
+  description: string;
+  /** 是否启用 */
+  enabled: boolean;
+  /** 绑定的模型预设 id；空 = 用主 agent 同款模型 */
+  llm_profile_id: string | null;
+  /** 绑定的预设名（展示用，服务端回填；无绑定则为 null） */
+  profile_name: string | null;
+  /** 插件白名单（按插件目录名匹配工具名前缀）；空 = 不限制 */
+  plugins: string[];
+  /** 工具名白名单（精确匹配）；空 = 不限制 */
+  tools: string[];
+}
+
+export interface DelegateeListResp {
+  delegatees: DelegateeConfig[];
+}
+
+export interface DelegateeUpdate {
+  llm_profile_id: string | null;
+  plugins: string[];
+  tools: string[];
+  enabled: boolean;
+}
+
+export interface DelegateeUpdateResp {
+  ok: boolean;
+  name: string;
+  llm_profile_id: string | null;
+  enabled: boolean;
+}
+
 /** 新增一段价格：改价是「新增一段」而非改旧段，历史成本才不会被重算。 */
 export interface ModelPriceInput {
   effective_from: string;

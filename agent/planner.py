@@ -30,13 +30,13 @@ logger = logging.getLogger(__name__)
 # 写错了"，排查方向会被带偏。
 _NEXT_LABEL = (
     r"(?=\n\s*(?:THOUGHT|ACTION_INPUT|ACTION|OBSERVATION|FINAL|最终回答"
-    r"|ANSWER|ASK|提问|OPTIONS)\s*[:：]|\Z)"
+    r"|ANSWER|ASK|提问|OPTIONS|TASK|TASK_INPUT|TASK_CONTEXT)\s*[:：]|\Z)"
 )
 
 # 「段尾可能混入的其它标签」，用于把 FINAL / THOUGHT / ASK 的正文切干净
 _TAIL_LABEL = (
     r"\n\s*(?:THOUGHT|ACTION_INPUT|ACTION|OBSERVATION|FINAL|最终回答"
-    r"|ANSWER|ASK|提问|OPTIONS)\s*[:：]"
+    r"|ANSWER|ASK|提问|OPTIONS|TASK|TASK_INPUT|TASK_CONTEXT)\s*[:：]"
 )
 
 # 幻觉检测用的行首标签（见 detect_hallucination）。都用 (?m)^ 锚定行首，
@@ -185,6 +185,10 @@ class Decision:
     # 记：成因不同（一个是自编轨迹、一个是格式跑偏），处置也不同——幻觉点破的是
     # 「你以为你做过」，格式点破的是「这样写没用的」。同样走「点破 + 重试」。
     format_error: str = ""
+    # kind == "delegate" 时有效：TASK 动作委托给的子 agent 名 / 任务要求 / 已知信息
+    capability: Optional[str] = None
+    requirement: Optional[str] = None
+    context: Optional[str] = None
 
 
 def _clean_tool_name(raw: str) -> str:
@@ -370,6 +374,7 @@ class ReActPlanner:
         persona: str = "",
         system_extra: str = "",
         memory_hint: str = "",
+        delegatees_desc: str = "",
     ) -> str:
         """拼出 system 提示词。
 
@@ -390,6 +395,8 @@ class ReActPlanner:
         if persona:
             base += "## 你的角色设定\n" + persona.strip() + "\n\n"
         base += "## 可用工具\n" + tools_desc + "\n\n"
+        if delegatees_desc:
+            base += "## 可用子 agent\n" + delegatees_desc + "\n\n"
         if skill_desc:
             base += "## 可用的技能（Skill）\n" + skill_desc + "\n\n"
         base += (
@@ -435,6 +442,15 @@ class ReActPlanner:
             "THOUGHT: 这个问题需要外部信息，我先查一下再回答。\n"
             "ACTION: 上面「可用工具」清单里的某个工具名\n"
             "ACTION_INPUT: {\"参数名\": \"值\"}\n\n"
+            "示例 1b（没有合适工具，委托子 agent 写代码）：\n"
+            "THOUGHT: 没有工具能直接做这件事，交给 code 子 agent 写段代码跑。\n"
+            "TASK: code\n"
+            "TASK_INPUT: 读取 data.xlsx 第一列所有数值求和，返回总和\n\n"
+            "**TASK 与 ACTION 二选一，一次只发一个**：有现成工具走 ACTION；没有"
+            "（需写代码 / 生成视频等多步能力）走 TASK。TASK 后跟子 agent 名"
+            "（当前可用见「可用子 agent」），TASK_INPUT 是自然语言要求（原样写、"
+            "不要 JSON 转义）；如需附带已知信息用 TASK_CONTEXT 补充。子 agent 跑完"
+            "会把结果作为 OBSERVATION 回给你，据此继续或给 FINAL。\n\n"
             "示例 2（问用户）：\n"
             "THOUGHT: 有几种做法会影响结果，用户没说倾向哪一个，需要他定。\n"
             "ASK: 你希望采用哪种方式？\n"
@@ -542,6 +558,30 @@ class ReActPlanner:
             # 去掉末尾可能混入的其它标签
             answer = re.split(_TAIL_LABEL, answer)[0].strip()
             return Decision(kind="final", answer=answer, thought=self._thought(text))
+
+        # 2.4) TASK：把子任务委托给子 agent（与 ACTION 平级）。携带自然语言要求，
+        # 子 agent 自带内部循环（如 code：写代码→跑→看输出→迭代），结果当 OBSERVATION
+        # 回喂主循环。要求原样捕获（到下一个标签为止），不做 JSON 转义。
+        tasm = re.search(r"(?ims)(?:^|\n)\s*TASK\s*[:：]\s*([^\n]+)", text)
+        if tasm:
+            cap = _clean_tool_name(tasm.group(1))
+            tim = re.search(
+                r"(?ims)(?:^|\n)\s*TASK_INPUT\s*[:：]\s*(.*?)" + _NEXT_LABEL, text
+            )
+            req = tim.group(1).strip() if tim else ""
+            tcm = re.search(
+                r"(?ims)(?:^|\n)\s*TASK_CONTEXT\s*[:：]\s*(.*?)" + _NEXT_LABEL, text
+            )
+            ctx = tcm.group(1).strip() if tcm else None
+            if cap and req:
+                return Decision(
+                    kind="delegate",
+                    capability=cap,
+                    requirement=req,
+                    context=ctx,
+                    thought=self._thought(text),
+                    action_count=1,
+                )
 
         # 2) 否则解析 ACTION / ACTION_INPUT
         am = re.search(

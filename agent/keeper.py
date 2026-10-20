@@ -345,6 +345,62 @@ class KeeperAgent:
             # 工具表归 Process 所有：就地整体替换即可，不必重建实例。
             # 快捷模式不持有工具（无 replace_tools），跳过即可。
             p.replace_tools(tools)
+        # 普通模式挂子 agent（Delegatee）：TASK 动作触达，独立于工具注册表。
+        # 仅 normal——simple 不调工具；ptc 模式本身即代码循环，无需再委托。
+        # 每个子 agent 按 delegatee_configs 表造「专属 LLM（独立模型）+ 工具子集」，
+        # 实现「子 agent 作为独立子 agent」；无配置行 / 被禁用则跳过或回退主 agent llm。
+        if mode == "normal":
+            from .delegatee import DelegateeRegistry
+            from .delegatee_types import (
+                DELEGATEE_TYPES,
+                build_delegatee,
+            )
+            from keeper.store import get_session_factory
+            from keeper.store.models import DelegateeConfig, LLMProfile
+            from sqlalchemy import select
+            from keeper.llm.client import get_llm
+
+            reg = DelegateeRegistry()
+            async with get_session_factory()() as db:
+                cfgs = (await db.execute(select(DelegateeConfig))).scalars().all()
+                cfg_map = {c.delegatee: c for c in cfgs}
+                profile_ids = [c.llm_profile_id for c in cfgs if c.llm_profile_id]
+                profiles = (
+                    (await db.execute(
+                        select(LLMProfile).where(LLMProfile.id.in_(profile_ids))
+                    )).scalars().all()
+                    if profile_ids else []
+                )
+                prof_map = {p.id: p for p in profiles}
+
+            for name, cls in DELEGATEE_TYPES.items():
+                cfg = cfg_map.get(name)
+                if cfg is not None and not cfg.enabled:
+                    continue
+                llm = self.llm
+                if cfg is not None and cfg.llm_profile_id:
+                    prof = prof_map.get(cfg.llm_profile_id)
+                    if prof is not None:
+                        # get_llm 造出的 LangChainLLM 自带用量记账，子 agent 与主 agent
+                        # 共用同一套成本/费用统计（按 profile_id 归属）。构造失败则回退
+                        # 主 agent 的 llm，避免一个坏预设拖垮整轮。
+                        try:
+                            built = get_llm(prof.to_llm_dict())
+                        except Exception:  # noqa: BLE001
+                            built = None
+                        if built is not None:
+                            llm = built
+                dtools = None
+                if cfg is not None and (cfg.plugins or cfg.tools):
+                    from .delegatee_types import _parse_list, filter_tool_registry
+
+                    dtools = filter_tool_registry(
+                        tools, _parse_list(cfg.tools), _parse_list(cfg.plugins)
+                    )
+                inst = build_delegatee(name, llm=llm, tools=dtools)
+                if inst is not None:
+                    reg.register(inst)
+            p.delegatees = reg
         return p
 
     async def _collect_tools(self) -> Any:

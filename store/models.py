@@ -678,6 +678,35 @@ class LLMCall(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
 
+class DelegateeConfig(Base):
+    """子 agent（delegatee）的全局配置：每个 delegatee（code / video / ...）各自一套。
+
+    与主 agent 的 ``AgentLLMBinding`` 同构但**全局共享**（不按主 agent 区分）——所有
+    会话的 code 子 agent 都用同一套模型 + 插件。prepare() 读这张表为每个 delegatee 造
+    出**专属 LLM**（独立模型）与**工具子集**，从而实现「子 agent 作为独立子 agent」。
+
+    ``plugins`` / ``tools`` 存 JSON 字符串（白名单）：``tools`` 是工具名精确匹配，
+    ``plugins`` 是插件名前缀匹配（工具名形如 ``插件__server__tool``）。
+    """
+
+    __tablename__ = "delegatee_configs"
+
+    # delegatee 名即主键（"code" / "video" / ...），与 DELEGATEE_TYPES 对齐
+    delegatee: Mapped[str] = mapped_column(String(64), primary_key=True)
+    llm_profile_id: Mapped[Optional[str]] = mapped_column(
+        String(26), ForeignKey("llm_profiles.id"), nullable=True, index=True
+    )
+    # JSON 字符串：插件名白名单（按前缀匹配工具名）
+    plugins: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # JSON 字符串：工具名白名单（精确匹配）
+    tools: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class ModelPrice(Base):
     """模型单价，**按生效时间段**存储（可有多段，覆盖调价历史）。
 

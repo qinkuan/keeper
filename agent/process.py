@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from .context_store import Compactor, clip_observation, ctx_cfg, externalize
+from .delegatee import Ctx, DelegateeRegistry, Requirement
 from .planner import ReActPlanner
 
 if TYPE_CHECKING:  # 仅类型检查时引入，避免运行时循环导入
@@ -298,9 +299,12 @@ class ReactProcess:
         # 这样在设置页改完立即生效，不必重新装载 agent。
         max_steps: Optional[int] = None,
         observation_limit: Optional[int] = None,
+        # 子 agent 注册表（TASK 动作触达），独立于工具注册表。普通模式在 prepare 里挂。
+        delegatees: Optional[DelegateeRegistry] = None,
     ) -> None:
         self.llm = llm
         self.registry = tools
+        self.delegatees = delegatees or DelegateeRegistry()
         # 工具名 + 参数指纹 -> 连续失败次数。用于打断「同参数反复重试」的死循环
         #（实测见过一条 `cat a b > out` 被重发十几次，模型始终没意识到该换思路）。
         # 成功一次就清零：问题可能已被别的动作解决了。
@@ -1222,6 +1226,37 @@ class ReactProcess:
         words = re.findall(r"[A-Za-z_][A-Za-z0-9_\-.]{1,}|[\u4e00-\u9fa5]{2,6}", desc)
         return [w for w in words if len(w) >= 2][:12] + [str(getattr(s, "name", ""))]
 
+    async def _tool_bridge(self, name: str, args: dict) -> str:
+        """内核工具桥：供子 agent（如 code 沙箱里的 kt.call）回调主系统工具。
+
+        只暴露工具、不暴露子 agent，从根上杜绝子 agent 再委托（决策 5：禁止递归）。
+        """
+        tool = self.registry.get(name)
+        if tool is None:
+            return f"[无此工具: {name}]"
+        try:
+            return await tool.execute(args or {})
+        except Exception as e:  # noqa: BLE001
+            return f"[工具 {name} 执行出错: {e}]"
+
+    def _delegate_bridge(self, delg):
+        """子 agent 专属工具桥：用 delegatee 自己的工具子集；未配置则回退宿主表。
+
+        仍只暴露工具、不暴露子 agent——从根上杜绝子 agent 再委托（决策 5：禁止递归）。
+        """
+        reg = getattr(delg, "tools", None) or self.registry
+
+        async def _b(name: str, args: dict) -> str:
+            tool = reg.get(name)
+            if tool is None:
+                return f"[无此工具: {name}]"
+            try:
+                return await tool.execute(args or {})
+            except Exception as e:  # noqa: BLE001
+                return f"[工具 {name} 执行出错: {e}]"
+
+        return _b
+
     def replace_tools(self, tools) -> None:
         """整体替换本轮可用的工具表：registry 对象不变，只换内容。
 
@@ -1436,6 +1471,7 @@ class ReactProcess:
         system = self.planner.system_prompt(
             # 精简清单：内置/零散工具给明细，大组折成一行只列名字（用到时补定义）
             tools_desc=self.registry.describe_brief(_tool_group_min()),
+            delegatees_desc=self.delegatees.describe(),
             skill_desc=self.skill_desc,
             agent_name=self.agent_name,
             persona=self.persona,
@@ -1607,6 +1643,56 @@ class ReactProcess:
                     ask=dec.ask,
                     options=dec.options,
                 )
+
+            # ── delegate：把任务委托给子 agent（TASK 动作）。与 act 平级——子 agent
+            # 有自己的内部循环（如 code：写代码→跑→看输出→迭代），跑完把最终结果当
+            # observation 回喂主循环。子 agent 注册在独立 DelegateeRegistry（不进工具
+            # 清单），且非交互（信息不足时把"要补充什么"以文本冒泡，由主循环自行 ASK）。
+            if dec.kind == "delegate":
+                delg = self.delegatees.get(dec.capability)
+                t_tool = time.perf_counter()
+                if delg is None:
+                    obs = (
+                        f"[没有名为 {dec.capability} 的子 agent，可用："
+                        f"{', '.join(self.delegatees.names())}]"
+                    )
+                    clipped = obs
+                else:
+                    try:
+                        from ..chat.context import current_workspace
+
+                        res = await delg.run(
+                            Requirement(text=dec.requirement or "", context=dec.context),
+                            Ctx(
+                                workspace=current_workspace(),
+                                call_tool=self._delegate_bridge(delg),
+                                budget={},
+                            ),
+                        )
+                        obs = res.answer or ""
+                        if res.ask:
+                            obs = f"[子 agent {dec.capability} 需要补充信息：{res.ask}]"
+                        clipped = clip_observation(obs, self.observation_limit)
+                    except Exception as e:  # noqa: BLE001
+                        obs = f"[子 agent {dec.capability} 执行出错：{e}]"
+                        clipped = obs
+                step = Step(
+                    thought=dec.thought,
+                    tool=dec.capability,
+                    args={"requirement": dec.requirement, "context": dec.context},
+                )
+                step.observation = clipped
+                steps.append(step)
+                if on_step is not None:
+                    await on_step(len(steps), step)
+                messages.append(
+                    {"role": "tool", "name": dec.capability, "content": obs}
+                )
+                if should_stop is not None and await should_stop():
+                    return ProcessResult(
+                        answer="", steps=steps, used_tools=True, paused=True
+                    )
+                continue
 
             # act：执行工具。开关关着时行为与从前完全一致；开着且模型连写了多个
             # ACTION 时才走批量路径（顺带止损：以前第二个以后是被直接丢弃的）。
