@@ -2123,6 +2123,7 @@ class ChatService:
                             "name": "diagram.mmd",
                             "mime": "text/vnd.mermaid",
                             "size": None,
+                            **({"ref": block["ref"]} if block.get("ref") else {}),
                         }
                     )
                 return
@@ -2160,6 +2161,8 @@ class ChatService:
                 art["engine"] = block["engine"]
             if block.get("src"):
                 art["src"] = block["src"]
+            if block.get("ref"):
+                art["ref"] = block["ref"]
             artifacts.append(art)
 
         # 第一遍：有没有显式交付清单 fs.deliver([...])？有就以它为准

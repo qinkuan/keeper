@@ -354,6 +354,13 @@ class ReActPlanner:
             "- 工具名必须一字不差用「可用工具」清单里的；清单外"
             "（如 `fs.write_file` / `fs.list_dir` / `fs.find`）**已废弃**，请改用 `bash`（cat / ls / find / grep）；"
             "`fs.publish` 不存在，交付用 `fs.deliver`。\n"
+            "- 想让图片 / 图表等多模态产物**插在 FINAL 文字中间**（而不是堆在末尾）："
+            "① 先真正把它做出来；② 交给 `fs.deliver` 时给块加 `\"ref\": \"名字\"`；"
+            "③ 在 FINAL 对应位置写 `[[art:名字]]`（ref 字面量两边必须完全一致）。"
+            "**这条只对「你已经生成并交付」的产物有效**——没调 `fs.deliver` 就写 `[[art:...]]` 只会显示成失效占位，等于没图。\n"
+            "  - 流程图 / 架构图 / 时序图：写 `x.mmd` 再 `fs.deliver([{\"kind\":\"mermaid\",\"file\":\"x.mmd\",\"ref\":\"seq\"}])`（时序图用 `sequenceDiagram` 语法）。\n"
+            "  - 真实生成图 / 视频等无现成单步工具的能力：走 `TASK` 派给对应子 agent，由其交付，再用它的 ref 引用。\n"
+            "  - 没被 `[[art:...]]` 引用的产物仍按原样显示在底部。\n"
             "- **绝对不要输出原生工具调用标记**（<function_calls>、<tool_call>、XML/DSML 块等）——"
             "本接口没注册任何工具，那些标记不会执行也不会解析，只会让本轮直接结束。\n"
         )

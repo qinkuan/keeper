@@ -32,6 +32,10 @@ def normalize_block(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     kind = raw.get("kind")
+    # 语义化引用名：agent 在 fs.deliver 里给块起 ref，之后在 FINAL 文字里用
+    # [[art:ref]] 把这块产物插到指定位置（详见 chat/service._capture_artifacts）。
+    ref = raw.get("ref")
+    ref = ref.strip() if isinstance(ref, str) and ref.strip() else None
     if kind == "file":
         path = raw.get("path")
         if not isinstance(path, str) or not path.strip():
@@ -40,6 +44,8 @@ def normalize_block(raw: Any) -> Optional[Dict[str, Any]]:
         rh = raw.get("render")
         if rh in ("inline", "preview", "run", "download", "folder"):
             block["render"] = rh
+        if ref:
+            block["ref"] = ref
         return block
     if kind == "mermaid":
         if not raw.get("file") and not raw.get("src"):
@@ -49,6 +55,8 @@ def normalize_block(raw: Any) -> Optional[Dict[str, Any]]:
             block["file"] = raw["file"].strip()
         if raw.get("src"):
             block["src"] = raw["src"]
+        if ref:
+            block["ref"] = ref
         return block
     if kind in _FILE_REQUIRED_KINDS:
         f = raw.get("file")
@@ -57,6 +65,8 @@ def normalize_block(raw: Any) -> Optional[Dict[str, Any]]:
         block = {"kind": kind, "file": f.strip()}
         if kind == "chart" and raw.get("engine") in ("vega-lite", "echarts"):
             block["engine"] = raw["engine"]
+        if ref:
+            block["ref"] = ref
         return block
     return None
 

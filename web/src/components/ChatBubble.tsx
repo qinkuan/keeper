@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useState } from "react";
+import { lazy, memo, Suspense, useState, useMemo, type ReactNode } from "react";
 import {
   Bot,
   ChevronDown,
@@ -19,7 +19,7 @@ import { attachmentUrl } from "../api/client";
  * 静态引入的话，只要有一条消息带产物，整页历史都要等 monaco 下载完。
  */
 const ArtifactCard = lazy(() => import("./ArtifactCard"));
-import type { ChatMessage } from "../api/types";
+import type { Artifact, ChatMessage } from "../api/types";
 import { StepUsageTag, UsageTag } from "./UsageTag";
 
 /** 截断成一行预览（去掉换行，避免占好几行） */
@@ -140,6 +140,75 @@ function ChatBubble({
   /** 「自主规划过程」的展开态：由这里持有，才好在流式结束时按需变化 */
   const [stepsOpen, setStepsOpen] = useState(false);
 
+  // 内联多模态：FINAL 文字里用 [[art:ref]] 把某块产物插到指定位置就地渲染，
+  // 没被引用的产物仍沉到消息底部（见下方 artifacts 区块）。
+  const artByRef = useMemo(() => {
+    const m = new Map<string, Artifact>();
+    for (const a of msg.artifacts ?? []) if (a.ref) m.set(a.ref, a);
+    return m;
+  }, [msg.artifacts]);
+  const referencedRefs = useMemo(() => {
+    const s = new Set<string>();
+    const re = /\[\[art:([^\]]+)\]\]/g;
+    let mm: RegExpExecArray | null;
+    while ((mm = re.exec(msg.text ?? "")) !== null) s.add(mm[1].trim());
+    return s;
+  }, [msg.text]);
+  const bottomArtifacts = (msg.artifacts ?? []).filter(
+    (a) => !(a.ref && referencedRefs.has(a.ref))
+  );
+  const renderInline = (text: string): ReactNode[] => {
+    const nodes: ReactNode[] = [];
+    if (!text) return nodes;
+    const re = /\[\[art:([^\]]+)\]\]/g;
+    let last = 0,
+      i = 0,
+      m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const before = text.slice(last, m.index);
+      if (before)
+        nodes.push(
+          <MarkdownView
+            key={`t${i++}`}
+            text={before}
+            mode={msg.streaming ? "streaming" : "static"}
+          />
+        );
+      const ref = m[1].trim();
+      const art = artByRef.get(ref);
+      nodes.push(
+        art ? (
+          <div key={`a${i++}`} className="my-2">
+            <ArtifactCard
+              artifact={art}
+              agentId={agentId}
+              messageId={msg.id}
+              isLocal={isLocal}
+            />
+          </div>
+        ) : (
+          <span
+            key={`p${i++}`}
+            className="rounded bg-black/[0.05] px-1 text-[12px] text-ink-faint"
+          >
+            [{ref}]
+          </span>
+        )
+      );
+      last = re.lastIndex;
+    }
+    const tail = text.slice(last);
+    if (tail)
+      nodes.push(
+        <MarkdownView
+          key={`t${i++}`}
+          text={tail}
+          mode={msg.streaming ? "streaming" : "static"}
+        />
+      );
+    return nodes;
+  };
+
   return (
     <div
       className={cn(
@@ -216,10 +285,7 @@ function ChatBubble({
               </div>
             ) : (
               <div>
-                <MarkdownView
-                  text={msg.text}
-                  mode={msg.streaming ? "streaming" : "static"}
-                />
+                {renderInline(msg.text)}
                 {msg.streaming && <span className="kp-caret" />}
               </div>
             )}
@@ -350,7 +416,7 @@ function ChatBubble({
           </div>
         )}
 
-        {msg.role === "assistant" && !!msg.artifacts?.length && (
+        {msg.role === "assistant" && bottomArtifacts.length > 0 && (
           <div className="mt-3 space-y-2">
             <Suspense
               fallback={
@@ -359,7 +425,7 @@ function ChatBubble({
                 </div>
               }
             >
-              {msg.artifacts.map((a) => (
+              {bottomArtifacts.map((a) => (
                 <ArtifactCard
                   key={a.id}
                   agentId={agentId}

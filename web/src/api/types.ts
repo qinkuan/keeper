@@ -126,6 +126,8 @@ export interface Artifact {
   src?: string;
   /** file 块的展示偏好：inline / preview / run / download / folder（没显式给则后端按扩展名补） */
   render?: string;
+  /** 语义化引用名：agent 在 fs.deliver 里给块起的名字，FINAL 文字用 [[art:ref]] 引用它实现内联 */
+  ref?: string;
 }
 
 /**
