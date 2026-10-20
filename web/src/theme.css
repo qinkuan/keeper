@@ -758,3 +758,6 @@ button {
   /* 让浏览器原生控件（滚动条、输入框、日期面板）跟随深色 */
   color-scheme: dark;
 }
+
+/* mermaid 缩放由 BlockView 内的「舞台 + transform: scale」实现，
+   这里不再对 svg 做强约束，避免覆盖其按 viewBox 的自然尺寸。 */

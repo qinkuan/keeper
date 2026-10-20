@@ -14,7 +14,9 @@ import { monacoLangOf } from "../monacoLang";
    配色把 3.9MB 的 monaco 打进自己的包里 —— 见 monacoTheme.ts 的说明。 */
 import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
 import MarkdownView from "./MarkdownView";
-import { isMonacoKind, isUrlKind, opensInNewTab, viewerKindOf } from "./viewers";
+import BlockView from "./BlockView";
+import ImageViewer from "./ImageViewer";
+import { isBlockArtifact, isMonacoKind, isUrlKind, opensInNewTab, viewerKindOf } from "./viewers";
 
 interface ArtifactCardProps {
   artifact: Artifact;
@@ -58,6 +60,32 @@ export function ArtifactCard({
   messageId,
   isLocal,
 }: ArtifactCardProps) {
+  // 非文件块（chart / mermaid / …）整张交给 BlockView 按 kind 渲染；
+  // 文件块才走下面的 Monaco / iframe 逻辑。两者互不干扰。
+  if (isBlockArtifact(artifact)) {
+    return (
+      <BlockView
+        artifact={artifact}
+        agentId={agentId}
+        messageId={messageId}
+        isLocal={isLocal}
+      />
+    );
+  }
+
+  // agent 直接用 fs.write_file 写出的 .mmd / .mermaid 文件（无 kind 标记）：
+  // 同样按 mermaid 渲染。MermaidBlock 在无 src 时会去 fetch 文件内容。
+  if (/\.(mmd|mermaid)$/i.test(artifact.name)) {
+    return (
+      <BlockView
+        artifact={{ ...artifact, kind: "mermaid" }}
+        agentId={agentId}
+        messageId={messageId}
+        isLocal={isLocal}
+      />
+    );
+  }
+
   const previewSrc = artifactUrl(agentId, messageId, artifact.id);
   const downloadSrc = artifactUrl(agentId, messageId, artifact.id, true);
   const [local, setLocal] = useState<boolean | null>(isLocal ?? null);
@@ -170,9 +198,10 @@ export function ArtifactCard({
     }
   })();
   const canInline = kind !== "binary";
-  // html / 图片 / pdf / 视频交给浏览器新窗口：内联在 360px 里没法看，
+  // html / pdf / 视频交给浏览器新窗口：内联在 360px 里没法看；
   // 浏览器自己的查看器能缩放、全屏、另存、还能分享链接。
-  const useNewTab = opensInNewTab(kind);
+  // 图片例外：走内联 PanZoomStage 预览（缩放/平移/双击），更贴合会话列。
+  const useNewTab = opensInNewTab(kind) && kind !== "image";
 
   const isPreviewable =
     artifact.mime.startsWith("image/") ||
@@ -260,6 +289,18 @@ export function ArtifactCard({
               </a>
             )
           )}
+          {kind === "image" && (
+            <a
+              href={previewSrc}
+              target="_blank"
+              rel="noreferrer"
+              title="新窗口打开原图"
+              className={BTN}
+            >
+              <Eye className="h-3 w-3" />
+              新窗口
+            </a>
+          )}
           <a href={downloadSrc} title="下载" className={BTN}>
             <Download className="h-3 w-3" />
             下载
@@ -327,8 +368,10 @@ export function ArtifactCard({
             </div>
           </div>
           <div style={{ borderTop: "1px solid #eee" }}>
-            {/* html / 图片 / pdf / 视频走浏览器新窗口，这里只剩 Markdown 与源码 */}
-            {kind === "markdown" && !showSource ? (
+            {/* 图片：内联缩放/平移预览（PanZoomStage） */}
+            {kind === "image" ? (
+              <ImageViewer src={previewSrc} alt={artifact.name} />
+            ) : kind === "markdown" && !showSource ? (
               <div
                 style={{
                   padding: 16,

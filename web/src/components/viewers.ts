@@ -9,6 +9,34 @@
 // 其实是二进制）交给下面的内容探测兜底。
 
 import { monacoLangOf } from "../monacoLang";
+import type { Artifact } from "../api/types";
+
+/**
+ * 非文件块类型（与后端 keeper.viewer.BLOCK_KINDS 对齐）。
+ * file 不在内——它走 ArtifactCard 原逻辑，不在此列。
+ */
+export type BlockKind = "chart" | "mermaid" | "table" | "map" | "audio";
+
+export const BLOCK_KINDS: BlockKind[] = [
+  "chart",
+  "mermaid",
+  "table",
+  "map",
+  "audio",
+];
+
+/**
+ * 这是否是一个需要 BlockView（而非普通文件卡片）渲染的非文件块。
+ * 集中在这里：ChatBubble / ArtifactCard / 将来别处想判断都用它，避免散落。
+ */
+export function isBlockArtifact(a: { kind?: string } | null | undefined): a is Artifact & { kind: BlockKind } {
+  return (
+    !!a &&
+    !!a.kind &&
+    a.kind !== "file" &&
+    (BLOCK_KINDS as string[]).includes(a.kind)
+  );
+}
 
 export type ViewerKind =
   | "markdown" // 渲染后的文档（可切源码）

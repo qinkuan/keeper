@@ -34,7 +34,7 @@ from ..agent.keeper import (
 )
 from ..store import SessionMessage, get_session_factory, new_id
 from ..plugin import agent_plugins_dir, scan_library
-from .artifacts import ArtifactResolutionError, resolve_artifact_uri
+from .artifacts import ArtifactResolutionError, ArtifactSource, resolve_artifact_uri
 from .context import set_agent, set_task_id, set_task_item
 from .hub import (
     snapshot as hub_snapshot,
@@ -1678,8 +1678,17 @@ async def _load_artifact(agent, message_id: str, artifact_id: str):
     if art is None:
         raise HTTPException(status_code=404, detail="产物不存在")
     # path 是带 scheme 的 URI（file:// 本机 / http(s):// 远程），按 scheme 解析。
+    # 内联内容块（如 mermaid 的 src）没有 path：直接以 src 返回，避免 KeyError → 500；
+    # 前端本来也会优先用 src 渲染，这里兜底保证任何 fetch 都拿到内容而非炸。
+    path = art.get("path")
+    if not path:
+        src = art.get("src")
+        if src is None:
+            raise HTTPException(status_code=404, detail="产物没有可读取的文件或内联内容")
+        data = src.encode("utf-8")
+        return art, ArtifactSource(kind="bytes", data=data, size=len(data))
     try:
-        source = await resolve_artifact_uri(art["path"])
+        source = await resolve_artifact_uri(path)
     except ArtifactResolutionError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return art, source
@@ -3128,14 +3137,14 @@ def _item_prompt(
             parts.append(line)
         parts += [
             "",
-            "  （需要查看已有文件内容时用 fs.read_file / fs.list_dir，不要凭记忆重写。）",
+            "  （需要查看已有文件内容时用 `bash`（cat / less 等）或 `fs.list_dir`，不要凭记忆重写。）",
         ]
     parts += [
         "",
         "要求：",
         "1. 只专注完成当前这一步；",
-        "2. 这一步要产出代码 / 文档 / 文件时：**必须先用 fs.write_file 写成文件，"
-        "再用 fs.publish 挂出**，让用户能直接预览、下载、复制。"
+        "2. 这一步要产出代码 / 文档 / 文件时：**必须先用 bash 把内容写成文件（cat 重定向 / 编辑器命令），"
+        "收尾前用 fs.deliver([...]) 把要交付的**最终文件**列成清单**，让用户能直接预览、下载、复制。"
         "若任务描述写了「输出完整代码 / 可直接运行的代码」，那是指**产出这个文件**"
         "——把代码写进文件并挂出即可，**严禁**把完整代码粘贴到回复正文里，"
         "回复里只说明写了哪个文件、怎么运行；",
@@ -3146,7 +3155,7 @@ def _item_prompt(
         "4. **临时文件（测试脚本、调试脚本、抽取脚本等）一律用 `@tmp/` 前缀写**，"
         "如 `@tmp/check.py`、`@tmp/test_a.js` —— 它落在本会话私有的临时目录，"
         "不会把用户工作区弄脏。**只有要交付给用户的文件才直接写在工作区里**"
-        "（fs.write_file 的回执会告诉你临时文件的真实绝对路径，"
+        "（② 临时工作区的绝对路径已在上面的「工作区」说明里给出，"
         "bash 命令里请用那个绝对路径）；",
         "5. 缺少必要信息（如预算、偏好）无法继续时，提问问用户，不要瞎猜；",
         "6. 只做这一步，做完即停，不要顺带做后面的步骤。",

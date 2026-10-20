@@ -21,6 +21,7 @@ from typing import List, Optional
 
 from ..base import ProcessorTool
 from .sandbox import TMP_PREFIX, PathEscape, resolve_path
+from ...viewer import parse_blocks, block_file_ref, validate_chart_spec
 
 # 单次读取的最大字节数：只取文件头部，避免大文件把内存撑爆 / 阻塞事件循环
 # （约对应 20 万 ASCII 字符，或约 6 万汉字；超出部分截断）。
@@ -183,7 +184,7 @@ def make_read_file(root: Path, read_only: bool) -> ProcessorTool:
         description=(
             "读取工作空间内文本文件的内容，**仅供你（agent）自己处理 / 分析 / 引用**，"
             "不会在对话里给用户展示文件。注意：若用户只是想*看到*某个文件本身"
-            "（「看看 / 看下 X 文件」「把 X 给我看下」），请用 **fs.publish** 生成可预览卡片，"
+            "（「看看 / 看下 X 文件」「把 X 给我看下」），请用 **fs.deliver** 交付文件清单，"
             "而不要用本工具把文件内容直接贴进你的回答——那样既无高亮也不美观。"
         ),
         parameters={"path": f"相对用户工作区的文件路径；{TMP_PREFIX}/ 前缀表示会话临时工作区"},
@@ -206,7 +207,7 @@ def _write_too_long(rel: str, n: int) -> str:
         "  1. 分几次用 fs.write_file 写 @tmp/part1.txt、@tmp/part2.txt…"
         "（每次一两千字符）；\n"
         "  2. 用一条 bash 命令（cat / 顺序拼接）把它们合成目标文件；\n"
-        "  3. 对目标文件调用 fs.write_file 或 fs.publish 挂载。\n"
+        "  3. 对目标文件调用 fs.deliver 交付（列入交付清单）。\n"
         "（@tmp/ 下的分片文件不受此限制。）"
     )
 
@@ -233,7 +234,7 @@ def _write_arg_missing(content: str) -> str:
         "每次只写一两千字符（仍用 @tmp/ 前缀，它是会话私有目录，不会出现在交付物里）；\n"
         "2. 全部写完后用一条 bash 命令把它们按顺序拼起来，"
         "写到用户工作区里的目标文件名；\n"
-        "3. 对那个目标文件调用 fs.publish，用户才能看到可点开的产物卡片。"
+        "3. 对那个目标文件调用 fs.deliver 交付，用户才能看到可点开的产物卡片。"
         + ("" if got_content else "\n（另外这次连 content 也是空的，说明整个 ACTION 都没解析出来。）")
     )
 
@@ -290,7 +291,7 @@ def make_write_file(root: Path, read_only: bool) -> ProcessorTool:
             "而截断后的 JSON 常常**勉强闭合**，结果是「写成功了」但内容缺尾巴。\n"
             "长文件必须**分段写**：先用本工具分几次写 `@tmp/part1.txt`、"
             "`part2.txt`…（每次一两千字符），再用一条 bash 命令把它们"
-            "按顺序拼成目标文件，最后对目标文件调用 fs.publish 挂载。"
+            "按顺序拼成目标文件，最后对目标文件调用 fs.deliver 交付。"
             "（`@tmp/` 下的分片文件本身不受此限制。）"
             "\n\n【写完会自动体检】写入后会按扩展名粗检一遍内容完整性"
             "（HTML 是否闭合、JSON/Python 能否解析、括号是否配对），"
@@ -341,7 +342,7 @@ def _is_binary(data: bytes) -> bool:
 def _not_editable_reason(p: Path, rel: str) -> Optional[str]:
     """返回「为什么不能编辑这个文件」，可以编辑则返回 ``None``。"""
     if not p.is_file():
-        return f"[文件不存在] {rel} —— 新建文件请用 fs.write_file，编辑只针对已有文件"
+        return f"[文件不存在] {rel} —— 新建文件请用 bash 写（如 cat > file），编辑只针对已有文件"
     parts = {part.lower() for part in p.parts}
     if parts & _SKIP_DIR_PARTS:
         hit = sorted(parts & _SKIP_DIR_PARTS)[0]
@@ -419,7 +420,7 @@ def _diff_summary(old_text: str, new_text: str) -> str:
 def make_edit_file(root: Path, read_only: bool) -> ProcessorTool:
     """精确替换文件中的一段文本（编辑已有文件）。
 
-    为什么要它：``fs.write_file`` 的 ``content`` 是**全量**的，改 500 行文件里的
+    为什么要它：整体重写（``bash`` 整体写）是**全量**的，改 500 行文件里的
     3 行也要把另 497 行逐字重写一遍（几千 token）。编辑只传改动片段，省一个量级。
 
     它**只保证机械正确**（改的是你指的那处），保证不了语义正确（改完逻辑对不对）。
@@ -469,8 +470,8 @@ def make_edit_file(root: Path, read_only: bool) -> ProcessorTool:
             return "[无意义改动] old_string 与 new_string 相同"
         if old.strip() == original.strip() and old != original:
             return (
-                "[请用 fs.write_file] old_string 基本等于整个文件，这是整体重写，"
-                "用 fs.write_file 一次性写完省 token 也更可靠"
+                "[请用 bash 整体写] old_string 基本等于整个文件，这是整体重写，"
+                "用 bash 一次性写完省 token 也更可靠"
             )
 
         count = original.count(old)
@@ -543,16 +544,16 @@ def make_edit_file(root: Path, read_only: bool) -> ProcessorTool:
         name="fs.edit_file",
         description=(
             "编辑**已有**文件：用 new_string 精确替换 old_string，"
-            "改几行只需传那几行，不必像 fs.write_file 那样重写整个文件（省 token）。"
+            "改几行只需传那几行，不必像整体重写那样重写整个文件（省 token）。"
             "\n\n【怎么用】"
-            "1. 先 fs.read_file 看清当前内容；"
+            "1. 先用 bash（cat 等）看清当前内容；"
             "2. old_string **原样照抄**（缩进、空行、换行都要一致），"
             "并带上足够上下文使其在文件中唯一；"
             "3. 删除某段就把 new_string 传空字符串。"
             "\n\n【什么时候别用它】"
-            "新建文件 → fs.write_file；"
-            "整体重构 / 小文件大改（改动超过三成）→ fs.write_file 整体重写更可靠；"
-            "改完一定要 fs.publish 挂成产物，否则用户看不到可点开的卡片。"
+            "新建文件 → 用 bash 写（如 ``cat > file``）；"
+            "整体重构 / 小文件大改（改动超过三成）→ 用 bash 整体重写更可靠；"
+            "改完若要把结果交付给用户，收尾时用一次 fs.deliver([...]) 列出**最终文件**（只在交付最终结果时调用，中间文件不要交付）。"
             "\n\n【改完必须验证】"
             "改完代码后必须调用 bash__run 实际运行（pytest / node test.js / 跑一遍），"
             "以真实输出为准；不许凭空声称「已验证通过」。"
@@ -595,14 +596,14 @@ def _no_match_hint(rel: str, original: str, old: str) -> str:
     return (
         f"[没找到匹配] old_string 不在 {rel} 当前内容里。{hint}\n"
         "常见原因：缩进/空行不一致、文件已被改过、或你凭记忆写的原文。"
-        "请重新 fs.read_file 拿到当前内容，再原样截取要改的那段（务必包含缩进）。"
+        "请重新用 bash（cat 等）拿到当前内容，再原样截取要改的那段（务必包含缩进）。"
     )
 
 
 def make_find(root: Path, read_only: bool) -> ProcessorTool:
     """按文件名 glob 在工作空间内（含子目录）搜索已存在的文件。
 
-    用于「帮我找 xx 文件」类请求：agent 先定位到具体文件，再交给 ``fs.publish``
+    用于「帮我找 xx 文件」类请求：agent 先定位到具体文件，再交给 ``fs.deliver``
     登记为产物展示给用户——而不是把工作空间里所有文件都挂上。
     """
     async def run(args: dict) -> str:
@@ -649,7 +650,7 @@ def make_find(root: Path, read_only: bool) -> ProcessorTool:
         description=(
             "当用户要你「找某个文件」（如「帮我找录取通知书」「有没有 travel 相关的 pdf」）时，"
             "按文件名 glob 在指定目录内（含子目录）搜索，返回匹配文件的相对路径列表，例如 "
-            "pattern='*录取*' 或 '*.pdf'。找到后通常紧接着用 fs.publish 让该文件出现在对话里供用户查看。"
+            "pattern='*录取*' 或 '*.pdf'。找到后通常紧接着用 fs.deliver 把该文件列入交付清单，出现在对话里供用户查看。"
             f"（用 path='{TMP_PREFIX}/' 可以搜会话临时工作区）"
         ),
         parameters={
@@ -664,74 +665,112 @@ def make_find(root: Path, read_only: bool) -> ProcessorTool:
     )
 
 
-def make_publish(root: Path, read_only: bool) -> ProcessorTool:
-    """把工作空间内**已存在**的文件登记为对话产物（不复制 / 不重写）。
+def make_deliver(root: Path, read_only: bool) -> ProcessorTool:
+    """把工作空间内**已存在**的文件（或结构化内容），作为本次对话的交付清单推给用户
+    （不复制 / 不重写）。
 
-    与 ``fs.write_file`` 不同：它不写内容，只是「展示已有文件」。捕获逻辑
-    （``service._capture_artifacts``）会扫 ``react_steps`` 里的 ``fs.publish`` 调用，
-    把该文件挂成 artifact，从而复用现有预览 / 打开文件夹 / 下载。
+    它不写内容（文件用 ``bash`` 生成），只是「声明本次交付了哪些块」。捕获逻辑
+    （``service._capture_artifacts``）会扫 ``react_steps`` 里的 ``fs.deliver`` 调用，
+    把每个块挂成 artifact，前端按块的 ``kind`` 选渲染器（图片预览、HTML 沙箱、代码高亮、
+    图表、表格、流程图…）。
+
+    这是文件 / 多模态交付的**唯一正式入口**：agent 用 ``bash`` 把内容写进工作空间后，
+    末尾用一次 ``fs.deliver([...])`` 列出要交付的**块**即可，不必为单个文件反复调用。
     """
     async def run(args: dict) -> str:
         eff_root, _, tmp_root = _effective(root, read_only)
-        rel = args.get("path") or ""
-        if not rel:
-            return "[缺少参数 path]"
-        # 临时工作区的文件**不作为产物**（捕获层会跳过它们）。这里必须显式拒绝而不是
-        # 默默接受：否则模型以为卡片已经展示给用户了，实际什么都没出现——静默失败
-        # 比报错难查得多。要给用户看，就先复制到用户工作区再 publish。
-        _r = rel.strip().lstrip("/")
-        if _r == TMP_PREFIX or _r.startswith(TMP_PREFIX + "/"):
+        blocks = parse_blocks(args)
+        if not blocks:
             return (
-                f"[拒绝] {TMP_PREFIX}/ 是会话临时工作区，里面的文件不作为产物展示给用户"
-                f"（测试脚本、中间产物这类过程文件本来就不该给用户看）。"
-                f"请先用 fs.read_file 读出内容、再用 fs.write_file 写进用户工作区，"
-                f"然后对本工具用用户工作区里的那个路径。"
+                "[缺少有效交付] 请传入块列表 blocks，如 "
+                "[{\"kind\":\"file\",\"path\":\"report.html\"}]；"
+                "兼容旧写法 paths=[\"report.html\"]"
             )
-        try:
-            p = resolve_path(eff_root, tmp_root, rel)
-        except PathEscape as e:
-            return f"[拒绝] {e}"
-        if not p.is_file():
-            return f"[文件不存在] {rel}"
-        # 挂载前体检：产物卡片是用户**直接看到**的东西，一个缺尾标签的残片挂上去
-        # 比不挂更糟（用户点开发现是坏的，模型却已经宣称「点开就能跑」）。
-        # 这里复用写入时的同一套粗检，不通过就拒绝挂载并说清原因。
-        try:
-            body = p.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            return f"[读取失败] {rel}：{e}"
-        hint = _integrity_hint(rel, body)
-        if hint:
-            return (
-                f"[拒绝挂载] {hint}\n"
-                f"文件确实存在，但内容看起来不完整。挂上去用户点开会看到坏文件，"
-                f"比不挂更糟。请先用 fs.read_file 检查结尾，修正或分段重写后再 publish。"
-            )
-        return f"已登记为产物 {rel}"
+        ok, skip = [], []
+        for b in blocks:
+            rel = block_file_ref(b)
+            if rel is None:
+                # 内联 mermaid 等无文件块：src 已齐，直接通过
+                if b.get("src"):
+                    ok.append(b)
+                else:
+                    skip.append(f"{b.get('kind')}（既无 file 也无 src）")
+                continue
+            rel = rel.strip().strip("/")
+            if rel == TMP_PREFIX or rel.startswith(TMP_PREFIX + "/"):
+                skip.append(f"{rel}（临时目录，不作为交付）")
+                continue
+            try:
+                p = resolve_path(eff_root, tmp_root, rel)
+            except PathEscape as e:
+                skip.append(f"{rel}（越界：{e}）")
+                continue
+            if not p.is_file():
+                skip.append(f"{rel}（文件不存在）")
+                continue
+            # 体检：file 块校验内容完整性；chart 块校验 spec 可解析
+            if b["kind"] == "file":
+                try:
+                    body = p.read_text(encoding="utf-8", errors="replace")
+                except OSError as e:
+                    skip.append(f"{rel}（读取失败：{e}）")
+                    continue
+                hint = _integrity_hint(rel, body)
+                if hint:
+                    skip.append(f"{rel}（{hint}）")
+                    continue
+            elif b["kind"] == "chart":
+                try:
+                    body = p.read_text(encoding="utf-8")
+                except OSError as e:
+                    skip.append(f"{rel}（读取失败：{e}）")
+                    continue
+                err = validate_chart_spec(body, b.get("engine") or "vega-lite")
+                if err:
+                    skip.append(f"{rel}（{err}）")
+                    continue
+            ok.append(b)
+        if not ok:
+            detail = "；".join(skip) if skip else "清单为空"
+            return f"[无有效交付] {detail}"
+        tail = f"；跳过 {len(skip)} 个：{'，'.join(skip)}" if skip else ""
+        summary = ", ".join(f"{b['kind']}:{block_file_ref(b) or 'inline'}" for b in ok)
+        return f"已交付 {len(ok)} 个块：{summary}{tail}"
 
     return ProcessorTool(
-        name="fs.publish",
+        name="fs.deliver",
         description=(
-            "把工作空间里**已经存在**的文件，作为一张产物卡片推到当前对话里，让用户直接在对话中查看。"
-            "文件的展示方式由聊天界面按类型自动处理，与你无关：图片 / 文档可预览，代码（.py/.java…）"
-            "可内联高亮查看，其余可下载，本机部署还能「打开文件夹」。**任何类型的文件都统一走这个入口**。"
-            "它与 fs.read_file 的区别：read_file 是把内容读给你（agent）自己处理、会作为纯文本出现在你的"
-            "回答里；本工具是给用户看的展示卡片。一句话——**用户想*看文件*，就用 publish，别用 read_file**。"
+            "**文件 / 多模态交付的唯一正式入口**：把本次要交付给用户的「块（block）」用一次调用"
+            "列成清单推到对话里。块是带类型的——文件只是块的一种，图表 / 表格 / 地图 / 流程图"
+            "是另外的 kind，前端按 kind 渲染成可交互内容。\n"
+            "先在工作空间里用 ``bash`` 把文件内容写好（如 ``cat > file``、编辑器命令、或 ``cat a > b``/"
+            "``npm run build`` 生成），末尾调本工具，参数 ``blocks`` 填块列表。\n"
+            "**块声明与内容分离**：重内容（图表 spec、数据）先写进文件，块只描述「怎么渲染这个文件」，"
+            "几行 JSON 即可，不要把巨型 spec 塞进工具参数（会超输出上限且易错）。\n"
+            "块的写法（kind 必填）：\n"
+            "- ``{\"kind\":\"file\",\"path\":\"x.png\",\"render\":\"preview|run|inline|folder\"}``：普通文件；"
+            "render 不写则按扩展名默认（图片/视频/PDF→浏览器打开，HTML→沙箱运行，代码/文档→内联，其余→文件夹按钮）。\n"
+            "- ``{\"kind\":\"chart\",\"file\":\"x.vg.json\",\"engine\":\"vega-lite\"}``：图表（spec 写进 *.vg.json）。\n"
+            "- ``{\"kind\":\"mermaid\",\"src\":\"graph TD;A-->B\"}`` 或 ``{\"kind\":\"mermaid\",\"file\":\"x.mmd\"}``：流程图。\n"
+            "- ``{\"kind\":\"table\",\"file\":\"d.csv\"}``：可排序表格。\n"
+            "- ``{\"kind\":\"map\",\"file\":\"m.geojson\"}``：地图。\n"
+            "- ``{\"kind\":\"audio\",\"file\":\"a.mp3\"}``：音频。\n"
+            "兼容旧写法：传 ``paths=[\"report.html\",\"a.png\"]`` 等价于一列 file 块。\n"
+            "\n"
+            "【只交付、不读取】如果你自己只是想分析某个文件的内容，用 ``bash``（cat / less 等）"
+            "读取即可，不要把文件内容贴进你的回答；本工具是把文件**交付给用户**看的卡片。"
+            "一句话——**用户想*看 / 拿到文件*，就用 deliver，自己分析用 bash**。"
             "\n\n"
-            "【场景】用户想在对话里直接看到 / 打开工作空间里的某个文件时。例如用户说"
-            "「想看看我的个人大头照」「我想看看 add.py」或「把那段代码给我看下」，而历史记忆 / fs.find"
-            "指向工作空间里的某个文件（之前常因「无法渲染图片 / 只能读取文本」而没展示成功）——这时就该用它，"
-            "**不要**说你无法展示文件，也**不要**用 fs.read_file 把文件内容贴进回答，交给卡片去呈现即可。"
+            "【场景】用户想在对话里直接看到 / 打开工作空间里的文件时。例如「想看看我最近的照片」"
+            "（先 fs.find 搜到图片，再交付 ``{\"kind\":\"file\",\"path\":...,\"render\":\"preview\"}``）、"
+            "「帮我写个 html 小游戏」（写完后交付 ``{\"kind\":\"file\",\"path\":\"game.html\",\"render\":\"run\"}``，"
+            "用户能在对话里直接玩）。**不要**说你无法展示文件，交给交付卡片去呈现即可。"
             "\n\n"
-            "【怎么用】\n"
-            "1) 先确认文件存在：路径已知（来自记忆、之前的 fs.find 返回、或你刚写的文件）就直接用；\n"
-            "   不确定文件在哪，先调 fs.find 按文件名 glob 搜（如 `*大头照*`、`*.py`），拿到相对路径；\n"
-            "2) 调用本工具，参数 path 填该文件的**相对工作空间路径**（如 `个人大头照.png`、`main.py`）；\n"
-            "3) 不要在回复里说「我无法显示图片 / 只能读取文本」这类话——展示由卡片负责。"
-            "\n\n"
-            "【效果】该文件作为一张产物卡片出现在对话流中；图片 / 文档可预览、代码可内联高亮、"
-            "其余可下载，本机部署还能「打开文件夹」。它**不写内容、不复制文件**，只登记已有文件的展示入口。"
+            "【注意】``@tmp/`` 临时目录里的文件（测试脚本、中间产物）**不要**放进交付清单——"
+            "它会被跳过，且本就不该给用户看。"
         ),
-        parameters={"path": "相对用户工作区的文件路径（只能是用户工作区里的文件）"},
+        parameters={
+            "blocks": "要交付的块列表；每个块是带 kind 的字典（见上方写法），或兼容地传 paths/路径字符串列表",
+        },
         run=run,
     )

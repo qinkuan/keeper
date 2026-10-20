@@ -13,10 +13,10 @@
 都限制在它之内——工具自己不找目录、也不认识工作空间以外的路径。
 """
 from .fs import (
+    make_deliver,
     make_edit_file,
     make_find,
     make_list_dir,
-    make_publish,
     make_read_file,
     make_write_file,
 )
@@ -28,6 +28,6 @@ __all__ = [
     "make_write_file",
     "make_edit_file",
     "make_find",
-    "make_publish",
+    "make_deliver",
     "make_mark_item_done",
 ]

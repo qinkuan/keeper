@@ -718,7 +718,7 @@ class ReactProcess:
         ----------
         模型**全程不知道自己在第几步**，也没有"快到上限了"的概念。实测写一个
         HTML 游戏的会话里，它第 28 步还在开新一轮调试脚本，最后撞上上限被强制
-        总结——产物既没 ``fs.publish``（前端拿不到卡片），总结也是仓促拼的。
+        总结——产物既没 ``fs.deliver``（前端拿不到卡片），总结也是仓促拼的。
         给它看到进度，并在最后几步明确要求「先交付再继续」，是最便宜的止损。
         """
         total = int(self.max_steps or 0)
@@ -731,7 +731,7 @@ class ReactProcess:
         if left <= 3:
             return (
                 head + f"，只剩 {left} 步]"
-                "\n请立刻收尾：先用 `fs.publish` 挂载产物，再给 FINAL；"
+                "\n请立刻收尾：先调用 `fs.deliver([...])` 交付产物清单，再给 FINAL；"
                 "不要开启新的验证 / 调试（写了也跑不完）。"
             )
         return head + "]"
@@ -770,7 +770,7 @@ class ReactProcess:
             f"原样重发不会有不同结果，请换思路：换一个路径/工具，"
             f"或把这一步拆成更小的步骤。"
             f"如果连着失败是因为依赖的东西还没准备好，"
-            f"先用 fs.list_dir / fs.read_file 确认它真的存在，再继续。"
+            f"先用 `bash`（`ls` / `test -f` 等）或 `fs.list_dir` 确认它真的存在，再继续。"
         )
 
     def _guard_check(

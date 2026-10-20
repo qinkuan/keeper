@@ -26,6 +26,7 @@ from ..tools.builtin.sandbox import (
     TMP_PREFIX,
     safe_path,
 )
+from ..viewer import block_file_ref, default_render_hint, parse_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -904,8 +905,8 @@ class ChatService:
             await self._write_memory(
                 session_id, anchor_message_id, anchor_question, result
             )
-            # 产物捕获：与记忆同时机（最终完成才登记）。覆盖两类动作：
-            # 1) 本轮 fs.write_file 生成的；2) agent 用 fs.publish 挂载的工作空间已有文件
+            # 产物捕获：与记忆同时机（最终完成才登记）。优先用 agent 末尾的
+            # fs.deliver([...]) 交付清单；没调 deliver 时退回捕获本轮 fs.write_file 生成的。
             captured = await self._capture_artifacts(
                 result, assistant_message_id, session_id
             )
@@ -2007,16 +2008,17 @@ class ChatService:
 
         为什么需要
         ----------
-        `_capture_artifacts` 只认 ``fs.write_file`` 与 ``fs.publish`` 两步动作。
+        `_capture_artifacts` 优先认 ``fs.deliver([...])`` 交付清单；没调时退回认
+        ``fs.write_file`` 写出的文件。
         但文件经常是**别的动作**造出来的：``cp a b``、``cat a > b``、``npm run build``。
         这类文件真实存在、模型也在回答里说了名字，却因为没有对应的那两个动作
         而**不产生产物卡片**——用户只看到一句「文件在工作区」，点不开。
         实测一轮 30 步写 HTML 游戏就是这么结束的：``cp`` 生成了 down100.html，
-        模型忙着调自设的测试指标，``fs.publish`` 从头到尾没发过。
+        模型忙着调自设的测试指标，``fs.deliver`` 从头到尾没发过。
 
         为什么限定「零产物」才扫
         ------------------------
-        模型按规则 publish 过就不干预——那时它自己对「哪个是交付物」做过判断，
+        模型按规则 deliver 过就不干预——那时它自己对「哪个是交付物」做过判断，
         比按 mtime 扫出来的准。只在它一个都没登记时才兜底。
 
         为什么按 mtime 扫而不是解析命令
@@ -2068,7 +2070,7 @@ class ChatService:
                 )
                 await db.commit()
             logger.info(
-                "本轮无 fs.publish，兜底登记 %s 个产物: %s",
+                "本轮无 fs.deliver，兜底登记 %s 个产物: %s",
                 len(artifacts),
                 "、".join(a["name"] for a in artifacts),
             )
@@ -2080,12 +2082,17 @@ class ChatService:
     async def _capture_artifacts(
         self, result, assistant_message_id: str, session_id: str
     ) -> list:
-        """扫本轮 ReAct 步骤，把成功写入 / 成功发布的**交付物**登记为产物。
+        """扫本轮 ReAct 步骤，把交付物登记为产物。
 
-        零解析文本、零改工具：完全依赖结构化的 react_steps。捕获两类动作：
-        - ``fs.write_file``：agent 本轮新写出的文件；
-        - ``fs.publish``：agent 把工作空间里**已存在**的文件登记为产物（用于「帮我找
-          xx 文件并展示」——agent 先用 ``fs.find`` 定位，再 ``fs.publish`` 挂载）。
+        零解析文本、零改工具：完全依赖结构化的 react_steps。文件交付契约：
+
+        - **``fs.deliver([...])``（首选，唯一正式入口）**：agent 在末尾用一次调用列出
+          本次要交付的所有**块**（文件 / 图表 / 表格 / 地图 / 流程图…，每个块带
+          ``kind``），后端把每个块挂成 artifact（写入 kind 与块特有字段）。以它为准——
+          只要调过 deliver，产物就是清单里的那些，不夹带其它文件。
+        - **``fs.write_file``（兜底）**：只在**本轮完全没调过 ``fs.deliver``** 时启用，
+          把本轮新写出的文件都登记为产物。这是为了兼容「忘了列清单」的旧行为、避免回归；
+          理想情况下 agent 应该显式 ``fs.deliver``。
 
         **``@tmp/`` 开头的一律不登记**：那是会话私有临时目录，放的是临时测试脚本、补丁
         脚本、同一文件的中间版本——属于**过程**而不是交付。登记它们只会让会话里堆满
@@ -2094,12 +2101,12 @@ class ChatService:
         记录即可，文件本身也还在临时目录里。
 
         失败 / 拒绝的动作（observation 以 ``[`` 开头）不登记。每条产物的 ``path`` 直接
-        存**写入 / 发布时刻的绝对路径**（``safe_path`` 解析并校验过，杜绝 ``../`` 穿越）：
+        存**写入 / 交付时刻的绝对路径**（``safe_path`` 解析并校验过，杜绝 ``../`` 穿越）：
         这样即使会话后来切换了工作空间、或工作空间整体换了目录，旧产物仍能按当时的
         真实绝对路径定位。``path`` 仅存 DB 内部，对外响应经 ``_public_artifacts`` 剥离，
         前端拿不到绝对路径。
         """
-        # 写入 / 发布时刻的真实根：以 (会话, agent) 解析，与 fs 工具实际生效的根一致。
+        # 写入 / 交付时刻的真实根：以 (会话, agent) 解析，与 fs 工具实际生效的根一致。
         # 剔掉 ``@tmp/`` 后剩下的都是工作空间内的相对路径，故用 ``safe_path`` 即可
         # （``@tmp/`` 会解析到工作空间外的 agent_space，是另一套边界检查，不适用）。
         try:
@@ -2108,43 +2115,95 @@ class ChatService:
             write_root = None
         artifacts: list = []
         seen: set = set()
-        for step in result.steps:
-            if getattr(step, "tool", None) not in ("fs.write_file", "fs.publish"):
-                continue
-            rel = (step.args or {}).get("path")
-            obs = step.observation or ""
-            if not rel or obs.startswith("["):
-                # 缺参数 / 拒绝 / 只读限制等错误均以 [ 开头
-                continue
+
+        def _add_block(block: dict, obs: str = "") -> None:
+            """把一个块登记为产物（失败 / 临时目录 / 越界 / 重复则跳过）。
+
+            块带 kind：file 块引用 path，chart/table/map/audio 引用 file，
+            mermaid 可内联 src 或引用 file。产物字典写入 kind 及块特有字段
+            （render / engine / src），前端按 kind 选渲染器。
+            """
+            if (obs or "").startswith("["):
+                return  # 缺参数 / 拒绝 / 只读限制等错误均以 [ 开头
+            rel = block_file_ref(block)
+            if rel is None:
+                # 内联 mermaid：没有文件，直接以 src 登记
+                if block.get("src"):
+                    aid = hashlib.sha1(
+                        f"{assistant_message_id}:mermaid:{block['src'][:200]}".encode()
+                    ).hexdigest()[:12]
+                    if aid in seen:
+                        return
+                    seen.add(aid)
+                    artifacts.append(
+                        {
+                            "id": aid,
+                            "kind": "mermaid",
+                            "src": block["src"],
+                            "name": "diagram.mmd",
+                            "mime": "text/vnd.mermaid",
+                            "size": None,
+                        }
+                    )
+                return
             rel = rel.strip().strip("/")
-            if not rel:
-                continue
-            # 临时目录里的东西不是交付物，不登记为产物
-            if rel == TMP_PREFIX or rel.startswith(TMP_PREFIX + "/"):
-                continue
+            if not rel or rel == TMP_PREFIX or rel.startswith(TMP_PREFIX + "/"):
+                return
             aid = hashlib.sha1(f"{assistant_message_id}:{rel}".encode()).hexdigest()[:12]
             if aid in seen:
-                continue
+                return
             seen.add(aid)
             name = Path(rel).name or rel
             # 解析成绝对路径并校验不越界（写入侧兜底）；解析失败则退回相对路径。
-            # 存为file:// scheme 的 URI（与产物 URI 设计一致；旧裸路径数据默认按 file 处理）。
             if write_root:
                 try:
                     abs_path = "file://" + str(safe_path(write_root, rel))
                 except PathEscape:
-                    continue
+                    return
             else:
                 abs_path = rel
-            artifacts.append(
-                {
-                    "id": aid,
-                    "name": name,
-                    "path": abs_path,
-                    "mime": _guess_mime(name),
-                    "size": None,
-                }
-            )
+            art = {
+                "id": aid,
+                "kind": block.get("kind", "file"),
+                "name": name,
+                "path": abs_path,
+                "mime": _guess_mime(name),
+                "size": None,
+            }
+            # 透传块特有字段；file 块没显式 render 时给默认（贴合展示策略）
+            if art["kind"] == "file" and not block.get("render"):
+                art["render"] = default_render_hint(name)
+            if block.get("render"):
+                art["render"] = block["render"]
+            if block.get("engine"):
+                art["engine"] = block["engine"]
+            if block.get("src"):
+                art["src"] = block["src"]
+            artifacts.append(art)
+
+        # 第一遍：有没有显式交付清单 fs.deliver([...])？有就以它为准
+        deliver_called = False
+        for step in result.steps:
+            if getattr(step, "tool", None) != "fs.deliver":
+                continue
+            deliver_called = True
+            obs = step.observation or ""
+            if obs.startswith("["):
+                # 整个调用失败（如「缺少有效交付」），跳过
+                continue
+            for b in parse_blocks(step.args or {}):
+                _add_block(b)
+
+        # 没显式交付时，退回旧行为：把本轮 fs.write_file 写出的文件都登记
+        if not deliver_called:
+            for step in result.steps:
+                if getattr(step, "tool", None) != "fs.write_file":
+                    continue
+                rel = (step.args or {}).get("path") or ""
+                if not rel:
+                    continue
+                _add_block({"kind": "file", "path": rel}, step.observation or "")
+
         if not artifacts:
             return []
         factory = get_session_factory()

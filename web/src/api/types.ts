@@ -106,14 +106,26 @@ export interface AgentPluginsResp {
 }
 
 // ---- 聊天消息（前端本地状态）----
-/** 一条产物引用：agent 本轮通过 fs.write_file 产出的文件。 */
+/** 一条产物引用：agent 本轮通过 fs.deliver 交付的「块」（文件只是块的一种）。 */
 export interface Artifact {
   id: string;
-  /** 文件名 */
+  /** 文件名（内联块如 mermaid 为占位名 diagram.mmd） */
   name: string;
   /** MIME，用于决定预览 / 下载 / 展示方式 */
   mime: string;
   size?: number | null;
+  /**
+   * 块类型：file=普通文件（走 ArtifactCard 原逻辑）；
+   * chart / mermaid / table / map / audio=非文件模态，交给 BlockView 按 kind 渲染。
+   * 旧产物（库里没有 kind 字段）一律按 file 处理，向后兼容。
+   */
+  kind?: "file" | "chart" | "mermaid" | "table" | "map" | "audio";
+  /** chart 块用的引擎（vega-lite / echarts）；其余块忽略 */
+  engine?: string;
+  /** 内联内容（如 mermaid 源码）；有则不必再取文件 */
+  src?: string;
+  /** file 块的展示偏好：inline / preview / run / download / folder（没显式给则后端按扩展名补） */
+  render?: string;
 }
 
 /**
