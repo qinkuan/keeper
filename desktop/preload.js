@@ -38,6 +38,39 @@ contextBridge.exposeInMainWorld('keeperHost', {
       return '';
     }
   })(),
+
+  /**
+   * 读系统剪贴板里被复制的文件 / 文件夹路径列表（桌面壳专有）。
+   * 返回 string[]；若当前不是桌面壳（纯 Web 版）则不存在，前端据此降级。
+   * 主进程实现见 main.js 的 readClipboardFiles。
+   */
+  readClipboardFiles: () => ipcRenderer.invoke('keeper:clipboard-files'),
+});
+
+/**
+ * 「我的空间」文件操作（桌面原生）。只给前端用，不暴露 ipcRenderer 本身。
+ * 每个方法第一个参数都是 root（「我的空间」根绝对路径，由前端从内核可信取来再传入），
+ * 主进程据此把路径锁在空间内（见 desktop/spaceFs.js 的 resolveSpacePath）。
+ * 纯 Web 版没有这个对象，前端应回退到 HTTP 端点。
+ */
+contextBridge.exposeInMainWorld('keeperSpace', {
+  list: (root, dir) => ipcRenderer.invoke('space:list', root, dir),
+  read: (root, file) => ipcRenderer.invoke('space:read', root, file),
+  mkdir: (root, parent, name) =>
+    ipcRenderer.invoke('space:mkdir', root, parent, name),
+  rename: (root, file, newName) =>
+    ipcRenderer.invoke('space:rename', root, file, newName),
+  remove: (root, file) => ipcRenderer.invoke('space:delete', root, file),
+  copy: (root, src, dstDir) =>
+    ipcRenderer.invoke('space:copy', root, src, dstDir),
+  import: (root, src, dstDir) =>
+    ipcRenderer.invoke('space:import', root, src, dstDir),
+  reveal: (file) => ipcRenderer.invoke('space:reveal', file),
+  pickFolder: () => ipcRenderer.invoke('space:pick-folder'),
+  pickFile: (multi) => ipcRenderer.invoke('space:pick-file', multi),
+  /** 右键菜单：让主进程弹原生 Menu，返回用户选中的动作 */
+  contextMenu: (key, isDir, canPaste) =>
+    ipcRenderer.invoke('space:context-menu', { key, isDir, canPaste }),
 });
 
 contextBridge.exposeInMainWorld('keeperBrowser', {

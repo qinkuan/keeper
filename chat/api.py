@@ -1343,42 +1343,10 @@ async def list_user_spaces() -> Dict[str, Any]:
 
 @user_space_router.get("/browse")
 async def browse_dir(path: str = "") -> Dict[str, Any]:
-    """浏览服务器本机目录，供前端在选择工作目录时挑选文件夹。
+    """浏览服务器本机目录，供前端在选择工作目录时挑选文件夹。逻辑见 zonefilesystem.browse。"""
+    from ..zonefilesystem.browse import browse_directory
 
-    只读列目录，返回目录与文件两类条目（目录可进入/选择，文件仅展示），
-    每条带 size（字节，目录为 null）与 mtime（修改时间，epoch 秒）。
-    不落库、不写盘。
-    """
-    # Linux/macOS 从用户 home 目录开始浏览；Windows 回退到系统盘根。
-    _default_root = Path.home() if os.name != "nt" else Path("/")
-    root = Path(path).expanduser() if path else _default_root
-    if not root.is_absolute():
-        root = _default_root
-    # 不存在或不是目录：回退到父目录（再不行就用 home）
-    if not root.is_dir():
-        root = root.parent if root.parent != root else Path.home()
-
-    def _info(e: Path) -> Dict[str, Any]:
-        info: Dict[str, Any] = {"name": e.name, "path": str(e)}
-        try:
-            st = e.stat()
-            info["size"] = st.st_size if e.is_file() else None
-            info["mtime"] = int(st.st_mtime)
-        except OSError:
-            info["size"] = None
-            info["mtime"] = None
-        return info
-
-    try:
-        entries = sorted(root.iterdir(), key=lambda e: e.name.lower())
-    except PermissionError:
-        return {"path": str(root), "parent": None, "dirs": [], "files": [], "error": "无权限访问该目录"}
-    except OSError as e:  # noqa: BLE001
-        return {"path": str(root), "parent": None, "dirs": [], "files": [], "error": f"无法读取目录: {e}"}
-    dirs = [_info(e) for e in entries if e.is_dir()]
-    files = [_info(e) for e in entries if e.is_file()]
-    parent = str(root.parent) if root != root.parent else None
-    return {"path": str(root), "parent": parent, "dirs": dirs, "files": files, "error": None}
+    return browse_directory(path)
 
 
 # 「我的空间」：单一用户空间，路径存在 settings.yaml（user_space.path），不再走数据库。
@@ -1419,9 +1387,9 @@ async def get_my_space_file(
 ) -> Dict[str, Any]:
     """读取「我的空间」内某文件的内容（受限：只能读配置目录内的文件）。
 
-    越界防护与文件读取逻辑见 filesystem.space_ops.read_space_file。
+    越界防护与文件读取逻辑见 zonefilesystem.space_ops.read_space_file。
     """
-    from ..filesystem.space_ops import read_space_file
+    from ..zonefilesystem.space_ops import read_space_file
 
     return read_space_file(path)
 
@@ -1431,7 +1399,7 @@ async def get_my_space_file(
 @user_space_router.post("/mine/open")
 async def open_my_space_in_explorer(body: Dict[str, Any]) -> Dict[str, Any]:
     """在系统文件管理器里打开（定位到）本空间 / 某文件（等同 PyCharm 的 Reveal）。"""
-    from ..filesystem.space_ops import open_in_explorer
+    from ..zonefilesystem.space_ops import open_in_explorer
 
     return open_in_explorer(
         str(body.get("path") or ""), bool(body.get("allow_dir", False))
@@ -1444,7 +1412,7 @@ async def upload_to_my_space(
     dir: str = Form(""),
 ) -> Dict[str, Any]:
     """把文件写入「我的空间」（拷入）。dir 为相对空间根的子目录，缺省为根。"""
-    from ..filesystem.space_ops import upload_to_space
+    from ..zonefilesystem.space_ops import upload_to_space
 
     data = await file.read()
     return upload_to_space(file.filename or "", data, dir)
@@ -1453,7 +1421,7 @@ async def upload_to_my_space(
 @user_space_router.get("/mine/download")
 async def download_from_my_space(path: str = Query(...)) -> "Response":
     """从「我的空间」下载文件（拷出）。"""
-    from ..filesystem.space_ops import download_from_space
+    from ..zonefilesystem.space_ops import download_from_space
 
     return download_from_space(path)
 
@@ -1461,7 +1429,7 @@ async def download_from_my_space(path: str = Query(...)) -> "Response":
 @user_space_router.delete("/mine/file")
 async def delete_in_my_space(path: str = Query(...)) -> Dict[str, Any]:
     """删除「我的空间」内的文件或目录。"""
-    from ..filesystem.space_ops import delete_in_space
+    from ..zonefilesystem.space_ops import delete_in_space
 
     return delete_in_space(path)
 
@@ -1469,7 +1437,7 @@ async def delete_in_my_space(path: str = Query(...)) -> Dict[str, Any]:
 @user_space_router.post("/mine/rename")
 async def rename_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
     """重命名「我的空间」内的文件或目录（不可重命名根）。"""
-    from ..filesystem.space_ops import rename_in_space
+    from ..zonefilesystem.space_ops import rename_in_space
 
     return rename_in_space(
         str(body.get("path") or ""), str(body.get("name") or "")
@@ -1479,11 +1447,38 @@ async def rename_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
 @user_space_router.post("/mine/mkdir")
 async def mkdir_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
     """在指定父目录下新建子文件夹。"""
-    from ..filesystem.space_ops import mkdir_in_space
+    from ..zonefilesystem.space_ops import mkdir_in_space
 
     return mkdir_in_space(
         str(body.get("path") or ""), str(body.get("name") or "")
     )
+
+
+@user_space_router.get("/mine/file/raw")
+async def my_space_file_raw(
+    path: str = Query(..., description="文件绝对路径，必须位于「我的空间」目录内"),
+    dl: int = Query(0, description="1 = 作为附件下载，0 = 内联预览"),
+) -> "Response":
+    """返回「我的空间」内文件的原始字节，供前端内联预览（图片 / PDF / 视频）或下载。逻辑见 zonefilesystem.space_ops.raw_from_space。"""
+    from ..zonefilesystem.space_ops import raw_from_space
+
+    return raw_from_space(path, dl)
+
+
+@user_space_router.post("/mine/copy")
+async def copy_in_my_space(body: Dict[str, Any]) -> Dict[str, Any]:
+    """在「我的空间」内把文件/目录（递归）复制到另一个目录。逻辑见 zonefilesystem.space_ops.copy_in_space。"""
+    from ..zonefilesystem.space_ops import copy_in_space
+
+    return copy_in_space(str(body.get("src") or ""), str(body.get("dst") or ""))
+
+
+@user_space_router.post("/mine/import")
+async def import_from_local(body: Dict[str, Any]) -> Dict[str, Any]:
+    """把本机文件/目录（递归）复制到「我的空间」某目录内（源不限位置，目标必须位于空间内）。逻辑见 zonefilesystem.space_ops.copy_from_local。"""
+    from ..zonefilesystem.space_ops import copy_from_local
+
+    return copy_from_local(str(body.get("src") or ""), str(body.get("dst") or ""))
 
 
 @user_space_router.post("")

@@ -316,7 +316,7 @@ class ReActPlanner:
         )
         if persona:
             base += "## 你的角色设定\n" + persona.strip() + "\n\n"
-        base += "## 可用工具\n" + tools_desc + "\n\n"
+        base += "## 可用工具(通过ACTION使用)\n" + tools_desc + "\n\n"
         if delegatees_desc:
             base += "## 可用子 agent\n" + delegatees_desc + "\n\n"
         if skill_desc:

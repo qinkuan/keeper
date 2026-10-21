@@ -5,6 +5,7 @@
 只负责解析请求、再把活儿交给这里。
 """
 import mimetypes
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from ..setting import get_user_space_path
 
@@ -174,3 +175,101 @@ def mkdir_in_space(path: str, name: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="非法名称（越界）")
     new_dir.mkdir(parents=True, exist_ok=True)
     return {"ok": True, "path": str(new_dir), "name": name}
+
+
+def raw_from_space(path: str, dl: int = 0) -> FileResponse | Response:
+    """返回「我的空间」内某文件的原始字节，供前端按类型内联预览（图片 / PDF / 视频）
+    或作为附件下载。
+
+    越界 / 不存在防护走 resolve_target；text/html 套与产物预览同一套 CSP（agent 写进
+    空间的 HTML 属低可信内容，必须挡住脚本外联）。与 workspace_file_raw 保持同款行为。
+    """
+    target = resolve_target(path)  # 越界 / 不存在 / 是目录都会报错
+    mime, _ = mimetypes.guess_type(str(target))
+    # 未知类型不让浏览器去"猜"，一律当附件，避免内联渲染出奇怪行为
+    if not mime:
+        dl = 1
+    # HTML 兜底 CSP：挡住脚本 / 连接外联，只允许内联样式与同源图片字体
+    if mime == "text/html":
+        return Response(
+            target.read_bytes(),
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline' 'self' data:; "
+                    "img-src 'self' data: https: http:; "
+                    "font-src 'self' data:; "
+                    "connect-src 'none';"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    return FileResponse(
+        str(target),
+        media_type=mime or "application/octet-stream",
+        filename=target.name,
+        content_disposition_type="attachment" if dl else "inline",
+    )
+
+
+def _unique_name(dst_dir: Path, name: str) -> str:
+    """目标目录已存在同名时自动加 (1)/(2)… 后缀，避免覆盖已有文件。"""
+    if not (dst_dir / name).exists():
+        return name
+    stem, dot, ext = name.rpartition(".")
+    base = stem if dot else name
+    suffix = (dot + ext) if dot else ""
+    i = 1
+    while True:
+        new = f"{base} ({i}){suffix}"
+        if not (dst_dir / new).exists():
+            return new
+        i += 1
+
+
+def copy_in_space(src: str, dst_dir: str) -> Dict[str, Any]:
+    """在「我的空间」内把文件或目录（递归）复制到另一个目录。
+
+    源与目标都必须位于「我的空间」内（越界防护走 resolve_target）；目标是目录，
+    且同名时自动改名（加 (1)/(2)…），不覆盖。不能复制到自身或其子目录内。
+    返回新路径与文件名。
+    """
+    s = resolve_target(src, allow_dir=True)
+    d = resolve_target(dst_dir, allow_dir=True)
+    if not d.is_dir():
+        raise HTTPException(status_code=400, detail="目标必须是一个目录")
+    if str(d) == str(s) or str(d).startswith(str(s) + os.sep):
+        raise HTTPException(status_code=400, detail="不能复制到自身或其子目录内")
+    name = _unique_name(d, s.name)
+    dst = d / name
+    if s.is_dir():
+        shutil.copytree(str(s), str(dst))
+    else:
+        shutil.copy2(str(s), str(dst))
+    return {"ok": True, "path": str(dst), "name": name}
+
+
+def copy_from_local(src: str, dst_dir: str) -> Dict[str, Any]:
+    """把本机任意路径的文件或目录（递归）复制到「我的空间」某目录内。
+
+    源是用户本机文件（桌面形态下与内核同机），位置不限；目标必须位于「我的空间」内
+    （resolve_target(allow_dir=True) 越界防护）。同名自动改名，不覆盖；不能复制到
+    自身或其子目录内。
+    """
+    s = Path(src).expanduser().resolve()
+    if not s.exists():
+        raise HTTPException(status_code=404, detail="源文件不存在")
+    d = resolve_target(dst_dir, allow_dir=True)
+    if not d.is_dir():
+        raise HTTPException(status_code=400, detail="目标必须是一个目录")
+    if str(d) == str(s) or str(d).startswith(str(s) + os.sep):
+        raise HTTPException(status_code=400, detail="不能复制到自身或其子目录内")
+    name = _unique_name(d, s.name)
+    dst = d / name
+    if s.is_dir():
+        shutil.copytree(str(s), str(dst))
+    else:
+        shutil.copy2(str(s), str(dst))
+    return {"ok": True, "path": str(dst), "name": name}

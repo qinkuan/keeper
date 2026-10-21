@@ -390,16 +390,16 @@ async def _migrate_strip_tmp_artifacts(conn) -> None:
     from ..agent.config import WORKSPACE_ROOT
     from ..tools.builtin.sandbox import TMP_PREFIX
 
-    session_root = str(Path(WORKSPACE_ROOT) / "session")
-    # 两种形态都要捞出来：路径里带 `@tmp/` 段的，以及已被修成真实 agent_space
-    # 绝对路径（`.../workspace/session/<sid>/<aid>/`）的——后者字面量里已经没有
-    # `@tmp` 了，只按 `@tmp` 过滤会漏掉它们。
+    # 只捞路径里带 `/@tmp/` 段的（真正的会话临时目录）；其余一律不动。
+    # 注意：合法产物（mermaid/.mmd/图片/…）就存放在 workspace/session/<sid>/ 下，
+    # 若在此按 session_root 整段剔除了，会把所有正常产物误删——这正是「重启后
+    # artifacts 全空」的根因。临时文件只会出现在 `@tmp/` 子目录里。
     rows = (
         await conn.exec_driver_sql(
             "SELECT id, artifacts FROM session_messages "
             "WHERE artifacts IS NOT NULL AND artifacts != '' "
-            "AND (artifacts LIKE ? OR artifacts LIKE ?)",
-            ("%" + "/" + TMP_PREFIX + "/%", "%" + session_root + "/%"),
+            "AND artifacts LIKE ?",
+            ("%" + "/" + TMP_PREFIX + "/%",),
         )
     ).fetchall()
 
@@ -414,13 +414,10 @@ async def _migrate_strip_tmp_artifacts(conn) -> None:
         for a in arts:
             if isinstance(a, dict):
                 p = a.get("path") or ""
-                # 形态一：路径里带 @tmp/ 段；形态二：落在 workspace/session/ 下（即 agent_space）
-                # 用子串判断而非 startswith，兼容早期没带 file:// scheme 的裸绝对路径
-                is_tmp = (
-                    ("/" + TMP_PREFIX + "/") in p
-                    or (session_root + "/") in p
-                )
-                if is_tmp:
+                # 只剔除以 `/@tmp/` 段出现的会话临时目录；合法产物（mermaid/.mmd/图片…）
+                # 位于 workspace/session/<sid>/ 下，必须保留，否则重启后 artifacts 全空。
+                # 用子串判断而非 startswith，兼容早期没带 file:// scheme 的裸绝对路径。
+                if ("/" + TMP_PREFIX + "/") in p:
                     continue
             kept.append(a)
         if len(kept) == len(arts):

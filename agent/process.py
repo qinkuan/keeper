@@ -66,6 +66,9 @@ def _fit_observation(tool: str, raw: str, limit: int) -> tuple[str, int]:
 
     返回 ``(给模型的文本, 工具原始输出长度)``。
     """
+    if tool == "load_capabilities" or tool == "recall" or tool == "read":
+        return raw, len(raw)
+
     raw_len = len(raw)
     if limit > 0 and raw_len > limit:
         # 阈值用 limit（不是 externalize_min_chars）：超过硬截断线就必须给

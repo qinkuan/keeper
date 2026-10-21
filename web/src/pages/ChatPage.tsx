@@ -3,6 +3,7 @@ import type { DragEvent } from "react";
 
 import {
   ArrowUp,
+  FileText,
   List,
   ListChecks,
   Loader2,
@@ -54,6 +55,7 @@ import {
   type MentionConfig,
   type MentionItem,
 } from "../lib/mention";
+import { ADD_QUOTE_EVENT, type ChatQuote } from "../lib/quote";
 import type { UsageSummary } from "../api/types";
 
 
@@ -431,6 +433,21 @@ export default function ChatPage({
    * 所以两者是「一个动作的两个投影」：上传时一起加，删除时一起删。
    */
   const [pendingFiles, setPendingFiles] = useState<Attachment[]>([]);
+  // 从「我的空间」预览"添加"进来的引用片段（文件路径 + 选中内容）
+  const [pendingQuotes, setPendingQuotes] = useState<ChatQuote[]>([]);
+  useEffect(() => {
+    const onAdd = (e: Event) => {
+      const q = (e as CustomEvent<ChatQuote>).detail;
+      if (!q?.path || !q.text) return;
+      setPendingQuotes((prev) =>
+        prev.some((p) => p.path === q.path && p.text === q.text)
+          ? prev
+          : [...prev, q]
+      );
+    };
+    window.addEventListener(ADD_QUOTE_EVENT, onAdd);
+    return () => window.removeEventListener(ADD_QUOTE_EVENT, onAdd);
+  }, []);
   /** 附件上传中：按钮转圈，并挡住重复点击（同一次会话只让一个在上传） */
   const [uploading, setUploading] = useState(false);
   /** 整块聊天面板是否正处于「拖文件悬停」态（用于显示高亮遮罩） */
@@ -1497,6 +1514,13 @@ export default function ChatPage({
   const send = async (raw?: string, stepId?: string) => {
     const rawInput = raw ?? input;
     const q = expandMentions(rawInput).trim();
+    // 引用片段：拼成「文件的绝对路径: …\n选中内容」，追加到本轮正文
+    const quoteBlock = pendingQuotes.length
+      ? pendingQuotes
+          .map((qq) => `文件的绝对路径: ${qq.path}\n${qq.text}`)
+          .join("\n\n")
+      : "";
+    const sendText = (q + (q ? "\n\n" : "") + quoteBlock).trim();
     // 气泡展示用：把 @标签 连同它解析出的内容（如绝对路径）一起存下来，供 ChatBubble 渲染成 chip
     const mentionRanges = computeMentions(rawInput);
     const userSpacePath = mySpacePath || workspace?.user_space?.path || "";
@@ -1509,7 +1533,7 @@ export default function ChatPage({
     const mentionRaw = mentionRanges.length ? rawInput : undefined;
     // 仅发附件（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
     // 这种消息 q 为空，但 pendingFiles 非空，应当照常发出。
-    if ((!q && pendingFiles.length === 0) || sending) return;
+    if ((!q && pendingFiles.length === 0 && pendingQuotes.length === 0) || sending) return;
     // 标记本地正在流式：让那条 3 秒一探的 effect 跳过 loadMessages，
     // 否则它会把刚发上去、还在流式中的这一轮又拉一遍，和服务端回灌的 user 重复显示。
     localStreamingRef.current = true;
@@ -1608,7 +1632,7 @@ export default function ChatPage({
     try {
       await apiChatStream(
         agentId,
-        q,
+        sendText,
         {
           sessionId: targetSid,
           stepId,
@@ -1788,6 +1812,7 @@ export default function ChatPage({
       // （失败路径也清——附件是独立上传的，file_id 已经拿到，重发时重新选一次
       //  比让一个来路不明的旧附件混进下一轮更可预期。）
       setPendingFiles([]);
+      setPendingQuotes([]);
       // 本轮产生了新用量：刷新整会话累计
       qc.invalidateQueries({ queryKey: ["session-usage", activeSessionId] });
       // 侧栏会话列表也要刷：**首条用户消息落库后后端会自动派生出标题**，
@@ -2104,6 +2129,32 @@ export default function ChatPage({
                 ))}
               </div>
             )}
+            {pendingQuotes.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {pendingQuotes.map((qq, i) => (
+                  <div
+                    key={i}
+                    className="group flex max-w-[300px] items-center gap-1.5 rounded-full border border-brand/20 bg-brand/10 py-1 pl-1.5 pr-1 text-[12px] text-ink"
+                    title={`${qq.path}\n\n${qq.text}`}
+                  >
+                    <FileText className="h-3.5 w-3.5 shrink-0 text-brand" />
+                    <span className="truncate">
+                      {qq.path.split(/[\\/]/).pop()} · 引用 {qq.text.length} 字
+                    </span>
+                    <button
+                      type="button"
+                      title="移除"
+                      onClick={() =>
+                        setPendingQuotes((prev) => prev.filter((_, j) => j !== i))
+                      }
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/10 hover:text-ink dark:hover:bg-white/20"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* 正文输入：无边无底色，融进浮块 */}
             {/* @ 快捷项弹出：出现在输入框上方（bottom-full），不挡住正在输入的光标 */}
             {mention && filteredMentions.length > 0 && (
@@ -2287,7 +2338,7 @@ export default function ChatPage({
                   <button
                     type="button"
                     onClick={() => send()}
-                    disabled={!expandMentions(input).trim()}
+                    disabled={!expandMentions(input).trim() && pendingQuotes.length === 0}
                     title="发送（Enter）"
                     className={cn(
                       "flex h-[30px] w-[30px] items-center justify-center rounded-full transition-all duration-150 ease-apple active:scale-95",

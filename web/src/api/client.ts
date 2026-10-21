@@ -2211,6 +2211,13 @@ export async function apiDownloadMySpace(path: string) {
   URL.revokeObjectURL(url);
 }
 
+/** 「我的空间」：文件原始字节 URL，直接塞进 img / video / iframe（带 keepertoken 查询参数鉴权，无需 header）。 */
+export function apiMySpaceFileRawUrl(path: string, dl = 0): string {
+  return withToken(
+    `${BASE}/user-spaces/mine/file/raw?path=${encodeURIComponent(path)}${dl ? "&dl=1" : ""}`
+  );
+}
+
 /** 「我的空间」：重命名文件或目录。 */
 export function apiRenameMySpace(path: string, name: string) {
   return apiPost<{ ok: boolean; path: string; name: string }>(
@@ -2224,6 +2231,22 @@ export function apiMkdirMySpace(path: string, name: string) {
   return apiPost<{ ok: boolean; path: string; name: string }>(
     "/user-spaces/mine/mkdir",
     { path, name }
+  );
+}
+
+/** 「我的空间」：把空间内的文件/目录复制到另一个目录（递归，目标同名自动改名）。 */
+export function apiCopyInMySpace(src: string, dst: string) {
+  return apiPost<{ ok: boolean; path: string; name: string }>(
+    "/user-spaces/mine/copy",
+    { src, dst }
+  );
+}
+
+/** 「我的空间」：把本机文件/目录复制到空间内某目录（源不限位置，目标必须位于空间内）。 */
+export function apiCopyFromLocal(src: string, dst: string) {
+  return apiPost<{ ok: boolean; path: string; name: string }>(
+    "/user-spaces/mine/import",
+    { src, dst }
   );
 }
 

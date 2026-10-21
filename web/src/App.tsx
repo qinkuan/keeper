@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   Bot,
@@ -60,6 +60,44 @@ import { Stat } from "./components/ui/Stat";
  * 低频配置（设置 / 可观测 / 回收站 / 模型管理）收在底部 Keeper 菜单；
  * 「我的空间」是高频入口，提升为顶部主导航项（与「浏览器」并列）。
  */
+/** 可拖拽竖分隔条：拖动时按水平位移回调，父级据此调整右栏宽度。 */
+function HResizer({ onResize }: { onResize: (dx: number) => void }) {
+  const dragging = useRef(false);
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      if (dragging.current) onResize(e.movementX);
+    };
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [onResize]);
+  return (
+    <div
+      onMouseDown={() => {
+        dragging.current = true;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      style={{
+        width: 6,
+        flex: "0 0 auto",
+        cursor: "col-resize",
+        background: "var(--kp-border-soft)",
+      }}
+      className="transition-colors hover:bg-brand/40"
+    />
+  );
+}
+
 const NAV_MAIN = [
   { key: "chat", label: "对话", icon: MessageSquare },
   { key: "agents", label: "智能体", icon: Bot },
@@ -101,6 +139,19 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(
     null
   );
+
+  /* 「我的空间」右侧常驻对话面板的宽度（可拖拽调节，落 localStorage）。 */
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("keeper_chat_dock_width"));
+    return saved >= 300 && saved <= 720 ? saved : 400;
+  });
+  const onChatResize = useCallback(
+    (dx: number) => setChatWidth((w) => Math.max(300, Math.min(720, w - dx))),
+    []
+  );
+  useEffect(() => {
+    localStorage.setItem("keeper_chat_dock_width", String(chatWidth));
+  }, [chatWidth]);
 
   /* 核心 agent = 新建会话的默认落点。它的 id 由后端从配置里解析
    （config.yaml 的 core_agent.id，默认 "core"），所以一定有值——除非
@@ -470,8 +521,30 @@ export default function App() {
             </div>
           )}
           {route.page === "user-spaces" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
-              <UserSpacePage />
+            <div className="flex h-full animate-fade-up">
+              {/* 左：我的空间（文件树 + 预览） */}
+              <div className="min-w-0 flex-1 overflow-auto px-7 py-6">
+                <UserSpacePage />
+              </div>
+              <HResizer onResize={onChatResize} />
+              {/* 右：常驻对话面板 */}
+              <div
+                className="flex shrink-0 flex-col border-l border-line-soft"
+                style={{ width: chatWidth }}
+              >
+                <div className="flex h-9 shrink-0 items-center border-b border-line-soft px-3 text-[13px] font-medium text-ink-strong">
+                  对话
+                </div>
+                <div className="min-h-0 flex-1">
+                  {coreAgentId ? (
+                    <ChatPage agentId={coreAgentId} />
+                  ) : (
+                    <div className="flex h-full items-center justify-center px-4 text-center text-[12px] leading-5 text-ink-muted">
+                      请先在「智能体」页装载一个智能体，才能开始对话
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           {route.page === "observability" && (

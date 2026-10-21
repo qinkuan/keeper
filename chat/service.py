@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from sqlalchemy import delete, func, select, update
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ..tools.builtin.sandbox import (
     PathEscape,
@@ -886,9 +887,6 @@ class ChatService:
 
         # 记忆只在「最终完成」时落盘：被用户叫停（canceled）或仍在追问则跳过，
         # 不写、不摘要（见 doc/memory.md 7.5.4）
-        captured: list = []
-        # 预算触顶收尾的轮次不写记忆：摘要本身还要再调一次 LLM，那就等于
-        # 拦完又超支（验收口径是「实际消耗不超过上限」）。
         if (
             not result.ask
             and not getattr(result, "canceled", False)
@@ -900,8 +898,16 @@ class ChatService:
             await self._write_memory(
                 session_id, anchor_message_id, anchor_question, result
             )
-            # 产物捕获：与记忆同时机（最终完成才登记）。优先用 agent 末尾的
-            # fs.deliver([...]) 交付清单；没调 deliver 时由 _capture_unpublished_files 按 mtime 兜底扫描本轮新建的文件。
+
+        # 产物捕获与「记忆落盘」解耦：只要这条助手消息落了库，就登记本轮产物，
+        # 不再受「是否追问 / 叫停 / 触顶」影响——否则 agent「交付完图又追问」、
+        # 或用户「生成到一半点了停」这类轮次，产物整段被跳过，重启后历史里图全丢
+        # （文件还在磁盘，只是没被登记）。仅「追问的答案」不登记（它属于上一轮，
+        # 产物应挂在原轮助手消息上）。
+        # 优先用 agent 末尾的 fs.deliver([...]) 交付清单；没调 deliver 时由
+        # _capture_unpublished_files 按 mtime 兜底扫描本轮新建的文件。
+        captured: list = []
+        if not result.ask and assistant_message_id:
             captured = await self._capture_artifacts(
                 result, assistant_message_id, session_id
             )
@@ -910,7 +916,7 @@ class ChatService:
             # 「一个都没有」是唯一可靠的触发条件：登记过说明模型按规则 publish 了，
             # 不干预；一个都没有而文件又真实存在，说明文件是 bash 生成的、或模型
             # 撞上步数上限来不及 publish——两种情况下用户都拿不到卡片。
-            if not captured and assistant_message_id:
+            if not captured:
                 captured = await self._capture_unpublished_files(
                     assistant_message_id,
                     session_id,
@@ -2185,6 +2191,26 @@ class ChatService:
                 art["engine"] = block["engine"]
             if block.get("src"):
                 art["src"] = block["src"]
+            # 文本型块（mermaid / chart / table，以及 .mmd 流程图）在捕获时把原文
+            # 内联进 DB 的 src：这样历史产物自带内容，不再依赖磁盘上的 .mmd/.json/.csv
+            # 是否还在——工作区文件被清理、或会话工作区整体迁移后，重启仍能正常渲染。
+            if (
+                not art.get("src")
+                and abs_path.startswith("file://")
+                and (
+                    art["kind"] in ("mermaid", "chart", "table")
+                    or name.lower().endswith(".mmd")
+                )
+            ):
+                try:
+                    _fp = Path(urlparse(abs_path).path)
+                    if _fp.is_file():
+                        _text = _fp.read_text(encoding="utf-8", errors="replace")
+                        # 控制体积：过大的不内联，退回按 path 取（避免撑大 DB）
+                        if len(_text) <= 200_000:
+                            art["src"] = _text
+                except Exception:
+                    pass
             if block.get("ref"):
                 art["ref"] = block["ref"]
             artifacts.append(art)

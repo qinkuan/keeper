@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import {
   ChevronRight,
-  Download,
+  Copy,
   File as FileIcon,
+  Plus,
   FileText,
   Folder,
   FolderOpen,
@@ -14,24 +15,19 @@ import {
   Upload,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  apiBrowseDir,
-  apiDeleteMySpaceFile,
-  apiDownloadMySpace,
-  apiGetMySpace,
-  apiMkdirMySpace,
-  apiMySpaceFile,
-  apiOpenMySpace,
-  apiRenameMySpace,
-  apiSetMySpace,
-  apiUploadMySpace,
-} from "../api/client";
-import type { DirBrowseResp, MySpaceFile } from "../api/types";
-import { Hint, PageHeader } from "../components/ui/Page";
-import { Modal } from "../components/ui/Modal";
+import { apiGetMySpace, apiSetMySpace } from "../api/client";
+import type { MySpaceFile } from "../api/types";
+import { makeSpaceApi, spaceFileUrl, type SpaceApi } from "../api/spaceNative";
+import { Hint } from "../components/ui/Page";
 import { toast } from "../components/ui/Toast";
 import { cn } from "../lib/utils";
 import MarkdownView from "../components/MarkdownView";
+import { addQuoteToChat } from "../lib/quote";
+import ImageViewer from "../components/ImageViewer";
+import Editor from "@monaco-editor/react";
+import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
+import { monacoLangOf } from "../monacoLang";
+import { viewerKindOf } from "../components/viewers";
 
 /** 树节点：既能是目录（可展开）也能是文件（叶子）。 */
 interface TNode {
@@ -71,64 +67,17 @@ function injectChildren(nodes: TNode[], key: string, children: TNode[]): TNode[]
   );
 }
 
-/** 拉取某目录的子项（目录 + 文件，目录在前、按名排序），用于左侧树。 */
-async function loadChildren(p: string): Promise<TNode[]> {
-  const r = await apiBrowseDir(p);
-  const dirs: TNode[] = r.dirs.map((d) => ({
-    title: d.name,
-    key: d.path,
-    isDir: true,
+/** 拉取某目录的子项（目录 + 文件，目录在前、按名排序），用于左侧树。走桌面原生层。 */
+async function loadChildren(space: SpaceApi, p: string): Promise<TNode[]> {
+  const r = await space.list(p);
+  return r.items.map((it) => ({
+    title: it.name,
+    key: it.path,
+    isDir: it.isDir,
+    ...(it.isDir ? {} : { leaf: true }),
   }));
-  const files: TNode[] = r.files.map((f) => ({
-    title: f.name,
-    key: f.path,
-    isDir: false,
-    leaf: true,
-  }));
-  return [...dirs, ...files].sort(
-    (a, b) => Number(b.isDir) - Number(a.isDir) || a.title.localeCompare(b.title)
-  );
 }
 
-/** 在树里把 target 路径的祖先链都展开、确保中间节点已加载。 */
-async function syncTreeToPath(
-  target: string,
-  data0: TNode[]
-): Promise<{ data: TNode[]; expanded: Set<string> }> {
-  const segs = target.split("/").filter(Boolean);
-  const chain: string[] = [
-    "/",
-    ...segs.map((_, i) => "/" + segs.slice(0, i + 1).join("/")),
-  ];
-  let data = data0;
-  for (let i = 0; i < chain.length - 1; i++) {
-    const key = chain[i];
-    const node = findNode(data, key);
-    if (!node || node.children == null) {
-      const kids = await loadChildren(key);
-      data = injectChildren(data, key, kids);
-    }
-  }
-  return { data, expanded: new Set(chain.slice(0, -1)) };
-}
-
-const EXT_LANG: Record<string, string> = {
-  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", mjs: "javascript",
-  py: "python", rb: "ruby", go: "go", rs: "rust", java: "java", kt: "kotlin",
-  c: "c", h: "c", cpp: "cpp", cs: "csharp", php: "php", swift: "swift",
-  json: "json", yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", cfg: "ini",
-  sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
-  html: "html", htm: "html", css: "css", scss: "scss", less: "less",
-  sql: "sql", xml: "xml", svg: "xml", md: "markdown", lua: "lua",
-  dockerfile: "docker", makefile: "makefile",
-};
-function extLang(name: string): string {
-  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
-  return EXT_LANG[ext] ?? "";
-}
-function fence(content: string, lang: string): string {
-  return "```" + lang + "\n" + content + "\n```";
-}
 const fmtSize = (size: number) => {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -178,10 +127,11 @@ function TreeNav({
   onToggle,
   onSelectFile,
   onOpen,
-  onDownload,
   onRename,
   onDelete,
   onMkdirHere,
+  onCopy,
+  onContextMenu,
 }: {
   nodes: TNode[];
   depth: number;
@@ -191,10 +141,11 @@ function TreeNav({
   onToggle: (key: string) => void;
   onSelectFile: (key: string) => void;
   onOpen: (key: string, isDir: boolean) => void;
-  onDownload: (key: string) => void;
   onRename: (key: string) => void;
   onDelete: (key: string) => void;
   onMkdirHere: (key: string) => void;
+  onCopy: (key: string) => void;
+  onContextMenu?: (key: string, isDir: boolean, e: MouseEvent) => void;
 }) {
   return (
     <div>
@@ -210,6 +161,7 @@ function TreeNav({
                 "group flex items-center gap-1 rounded-md py-1 pr-1 transition-colors",
                 isSel ? "bg-brand/10" : "hover:bg-black/[0.04] dark:hover:bg-white/5"
               )}
+              onContextMenu={(e) => onContextMenu?.(n.key, n.isDir, e)}
             >
               {n.isDir ? (
                 <button
@@ -249,18 +201,17 @@ function TreeNav({
               </button>
               {/* hover 才出现：仿桌面文件管理器的右键式操作 */}
               <div className="ml-auto hidden shrink-0 items-center gap-0.5 pl-1 group-hover:flex">
-                {n.isDir ? (
+                {n.isDir && (
                   <RowBtn title="在此新建子文件夹" onClick={() => onMkdirHere(n.key)}>
                     <FolderPlus className="h-3.5 w-3.5" />
                   </RowBtn>
-                ) : (
-                  <RowBtn
-                    title="下载 / 用系统程序打开"
-                    onClick={() => onDownload(n.key)}
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                  </RowBtn>
                 )}
+                <RowBtn
+                  title="复制（在当前目录生成副本）"
+                  onClick={() => onCopy(n.key)}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </RowBtn>
                 <RowBtn
                   title="在文件管理器中打开"
                   onClick={() => onOpen(n.key, n.isDir)}
@@ -285,10 +236,11 @@ function TreeNav({
                 onToggle={onToggle}
                 onSelectFile={onSelectFile}
                 onOpen={onOpen}
-                onDownload={onDownload}
                 onRename={onRename}
                 onDelete={onDelete}
                 onMkdirHere={onMkdirHere}
+                onCopy={onCopy}
+                onContextMenu={onContextMenu}
               />
             )}
           </div>
@@ -300,13 +252,73 @@ function TreeNav({
 
 /** 右侧文件内容：受限读取后渲染。Markdown 直接渲染，其它文本按语言高亮，
  *  二进制 / 过大文件降级为「无法预览」信息卡。 */
-function FileViewer({ path }: { path: string }) {
+function AppModal({
+  title,
+  children,
+  onClose,
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="w-[360px] rounded-xl border border-line bg-surface p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 text-[13px] font-medium text-ink-strong">{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** 二进制 / 无法内联预览的文件：给信息卡（不渲染内容，下载走行内按钮）。 */
+function BinaryFileCard({ file, note }: { file: MySpaceFile; note?: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+      <FileText className="h-8 w-8 text-ink-faint" />
+      <div className="text-[13px] text-ink">无法预览此文件</div>
+      <div className="text-[12px] text-ink-muted">
+        {file.name} · {fmtSize(file.size)}
+      </div>
+      <div className="text-[12px] text-ink-faint">
+        {note ?? (file.is_text ? "非文本文件" : "二进制文件")}
+      </div>
+    </div>
+  );
+}
+
+function FileViewer({
+  space,
+  root,
+  path,
+}: {
+  space: SpaceApi;
+  root: string;
+  path: string;
+}) {
   const fq = useQuery({
     queryKey: ["my-space-file", path],
-    queryFn: () => apiMySpaceFile(path),
+    queryFn: () => space.read(path),
     // 切回窗口时自动拉最新（你在别的编辑器改完、点回本页即见）
     refetchOnWindowFocus: true,
   });
+  // 选中正文后浮出的"添加"按钮状态；path 即文件绝对路径（来自列表 key）。
+  const [quoteBtn, setQuoteBtn] = useState<{ x: number; y: number; text: string } | null>(
+    null
+  );
+  useEffect(() => {
+    if (!quoteBtn) return;
+    const clear = () => setQuoteBtn(null);
+    // 任意滚动都让按钮消失，避免停在过期位置
+    window.addEventListener("scroll", clear, true);
+    return () => window.removeEventListener("scroll", clear, true);
+  }, [quoteBtn]);
   if (fq.isLoading)
     return (
       <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
@@ -321,25 +333,124 @@ function FileViewer({ path }: { path: string }) {
       </div>
     );
   const f: MySpaceFile = fq.data!;
-  if (!f.is_text || f.too_large)
+  // 与「会话 / 工作区」里的文件预览共用同一张分派表（components/viewers.ts），
+  // 保证同样的扩展名在两处用同一套展示器：图片 / PDF / 视频 / Markdown / 代码 / HTML。
+  const kind = viewerKindOf(f.name);
+  const rawUrl = spaceFileUrl(root, path);
+
+  // 二进制：不渲染，只给下载
+  if (kind === "binary") return <BinaryFileCard file={f} />;
+
+  // 文本类（Markdown / 代码 / 数据 / 纯文本 / HTML）：优先信后端 is_text 信号——
+  // 解码失败（伪装成代码的二进制）或过大（> 2MB）都读不出可渲染文本，降级为下载卡。
+  const textKind =
+    kind === "markdown" ||
+    kind === "code" ||
+    kind === "data" ||
+    kind === "text" ||
+    kind === "html";
+  if (textKind && (!f.is_text || f.too_large))
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+      <BinaryFileCard
+        file={f}
+        note={f.too_large ? "文件过大（> 2MB），请下载后查看" : "非文本文件，无法预览"}
+      />
+    );
+
+  // 图片：内联缩放 / 平移预览（复用会话侧的 ImageViewer + PanZoomStage）
+  if (kind === "image")
+    return (
+      <div className="flex h-full items-center justify-center p-4">
+        <ImageViewer src={rawUrl} alt={f.name} height={560} />
+      </div>
+    );
+
+  // 视频：浏览器原生播放器
+  if (kind === "video")
+    return (
+      <div className="flex h-full items-center justify-center p-4">
+        <video src={rawUrl} controls style={{ maxHeight: "82vh", maxWidth: "100%" }} />
+      </div>
+    );
+
+  // PDF / HTML：交给浏览器新窗口（小框里没法看，且新窗口能缩放 / 全屏 / 另存）
+  if (kind === "pdf" || kind === "html")
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <FileText className="h-8 w-8 text-ink-faint" />
-        <div className="text-[13px] text-ink">无法预览此文件</div>
-        <div className="text-[12px] text-ink-muted">
-          {f.name} · {fmtSize(f.size)}
-        </div>
-        <div className="text-[12px] text-ink-faint">
-          {f.too_large ? "文件过大（> 2MB）" : "非文本文件"}
+        <div className="text-[13px] text-ink">{f.name}</div>
+        <div className="flex gap-2">
+          <a
+            href={rawUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+          >
+            {kind === "pdf" ? "在浏览器中打开 PDF" : "在浏览器中打开 HTML"}
+          </a>
         </div>
       </div>
     );
-  const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : "";
-  const isMd = ["md", "markdown", "mdx"].includes(ext);
-  const text = isMd ? f.text : fence(f.text, extLang(f.name));
+
+  // Markdown：渲染后的文档。选中文字后浮出"添加"按钮，一键把片段丢进右侧对话
+  if (kind === "markdown") {
+    const onSelMouseUp = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+        setQuoteBtn(null);
+        return;
+      }
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      setQuoteBtn({
+        x: Math.max(8, rect.left + rect.width / 2 - 22),
+        y: Math.max(8, rect.top - 38),
+        text: sel.toString(),
+      });
+    };
+    const onAddQuote = () => {
+      if (quoteBtn) addQuoteToChat({ path, text: quoteBtn.text });
+      setQuoteBtn(null);
+      window.getSelection()?.removeAllRanges();
+    };
+    return (
+      <>
+        <div className="kp-md mx-auto max-w-[900px]" onMouseUp={onSelMouseUp}>
+          <MarkdownView text={f.text} mode="static" />
+        </div>
+        {quoteBtn && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onAddQuote}
+            style={{ position: "fixed", left: quoteBtn.x, top: quoteBtn.y, zIndex: 60 }}
+            className="flex h-7 items-center gap-1 rounded-full bg-brand-gradient px-3 text-[12px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-110 active:scale-95"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            添加
+          </button>
+        )}
+      </>
+    );
+  }
+
+  // 代码 / 数据 / 纯文本：Monaco 只读 + 语言高亮
+  const lang = monacoLangOf(f.name) ?? "plaintext";
   return (
-    <div className="kp-md mx-auto max-w-[900px]">
-      <MarkdownView text={text} mode="static" />
+    <div className="h-full min-h-0">
+      <Editor
+        height="100%"
+        language={lang}
+        theme={KEEPER_THEME}
+        beforeMount={applyKeeperTheme}
+        value={f.text}
+        options={{
+          readOnly: true,
+          minimap: { enabled: false },
+          fontSize: 13,
+          scrollBeyondLastLine: false,
+          wordWrap: "on",
+        }}
+      />
     </div>
   );
 }
@@ -356,6 +467,8 @@ export default function UserSpacePage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
   const path = (q.data?.path ?? "").trim();
+  // 「我的空间」桌面原生文件操作入口（root 绑定到空间根；会话/内核侧仍走 Python）
+  const space = useMemo(() => makeSpaceApi(path), [path]);
 
   // 已配置态：目录树
   const [treeData, setTreeData] = useState<TNode[]>([]);
@@ -363,24 +476,11 @@ export default function UserSpacePage() {
   const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
-  // 选目录弹窗
-  const [browseOpen, setBrowseOpen] = useState(false);
-  const [browsePath, setBrowsePath] = useState("");
-  const [browseParent, setBrowseParent] = useState<string | null>(null);
-  const [browseDirs, setBrowseDirs] = useState<DirBrowseResp["dirs"]>([]);
-  const [browseFiles, setBrowseFiles] = useState<DirBrowseResp["files"]>([]);
-  const [browseErr, setBrowseErr] = useState<string | null>(null);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseTree, setBrowseTree] = useState<TNode[]>([]);
-  const [browseExpanded, setBrowseExpanded] = useState<Set<string>>(new Set());
-  const [browseSelKey, setBrowseSelKey] = useState("");
-
   const saveM = useMutation({
     mutationFn: (p: string) => apiSetMySpace(p),
     onSuccess: () => {
       toast.success("已保存「我的空间」");
       qc.invalidateQueries({ queryKey: ["my-space"] });
-      setBrowseOpen(false);
     },
     onError: (e: any) => toast.error(e?.message || "保存失败"),
   });
@@ -396,10 +496,24 @@ export default function UserSpacePage() {
     setTreeLoadingKey(path);
     (async () => {
       try {
-        const kids = await loadChildren(path);
+        const kids = await loadChildren(space, path);
         if (cancelled) return;
-        setTreeData([{ title: basename(path), key: path, isDir: true, children: kids }]);
-        setExpandedKeys(new Set([path]));
+        // 去掉冗余的根节点「keeperzone」（面板标题已显示空间名），直接把空间内
+        // 容物铺在最上层；并默认展开第一层目录（预取其子项，避免展开后空着）。
+        const withChildren = await Promise.all(
+          kids.map(async (k) => {
+            if (!k.isDir) return k;
+            try {
+              return { ...k, children: await loadChildren(space, k.key) };
+            } catch {
+              return k;
+            }
+          })
+        );
+        setTreeData(withChildren);
+        setExpandedKeys(
+          new Set(withChildren.filter((k) => k.isDir).map((k) => k.key))
+        );
       } catch (e: any) {
         if (!cancelled) toast.error(e?.message || "加载目录失败");
       } finally {
@@ -423,7 +537,7 @@ export default function UserSpacePage() {
     if (willOpen) {
       setTreeLoadingKey(key);
       try {
-        const kids = await loadChildren(key);
+        const kids = await loadChildren(space, key);
         setTreeData((prev) => injectChildren(prev, key, kids));
       } catch (e: any) {
         toast.error(e?.message || "加载子目录失败");
@@ -445,13 +559,19 @@ export default function UserSpacePage() {
         }
       });
     walk(treeData);
-    if (loadedKeys.length === 0) loadedKeys.push(path);
     setTreeLoadingKey(path);
     try {
-      let data = treeData;
+      // 扁平化后根目录本身不在 treeData 里，必须每次都重新列根，否则在根下
+      // 新建 / 上传的文件不会出现在树中（手动点「刷新」也不行）。
+      const rootKids = await loadChildren(space, path);
+      let data: TNode[] = rootKids;
       for (const k of loadedKeys) {
-        const kids = await loadChildren(k);
-        data = injectChildren(data, k, kids);
+        try {
+          const kids = await loadChildren(space, k);
+          data = injectChildren(data, k, kids);
+        } catch {
+          // 该目录可能已被删除（如刚删掉一个文件夹后刷新），跳过其子树即可
+        }
       }
       setTreeData(data);
     } catch (e: any) {
@@ -467,28 +587,23 @@ export default function UserSpacePage() {
       qc.invalidateQueries({ queryKey: ["my-space-file", selectedFile] });
   };
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // 上传目标目录 = 当前选中文件所在目录（没选中则空间根）；转成相对空间根的路径给后端
+  // 上传 / 导入目标目录 = 当前选中文件所在目录（没选中则空间根）
   const uploadTargetDir =
     selectedFile && selectedFile.includes("/")
       ? selectedFile.replace(/\/[^/]*$/, "") || path
       : path;
-  const uploadTargetRel =
-    uploadTargetDir === path
-      ? ""
-      : uploadTargetDir.slice(path.length).replace(/^\//, "");
 
-  /** 把 OS 拖进来的文件写进「我的空间」（拷入）。 */
-  const doUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
+  /** 用系统文件选择器选文件，拷入「我的空间」（原生）。 */
+  const doPickUpload = async () => {
+    const files = await space.pickFile(true);
+    if (!files.length) return;
     let ok = 0;
-    for (const f of Array.from(files)) {
+    for (const src of files) {
       try {
-        await apiUploadMySpace(f, uploadTargetRel);
+        await space.import(src, uploadTargetDir);
         ok++;
       } catch (e: any) {
-        toast.error(`上传失败 ${f.name}：${e?.message || e}`);
+        toast.error(`导入失败 ${basename(src)}：${e?.message || e}`);
       }
     }
     if (ok) {
@@ -497,20 +612,35 @@ export default function UserSpacePage() {
     }
   };
 
-  const doDownload = (key: string) => {
-    apiDownloadMySpace(key).catch((e) => toast.error(e?.message || "下载失败"));
+  const doOpen = (key: string, _isDir: boolean) => {
+    space.reveal(key).catch((e) => toast.error(e?.message || "打开失败"));
   };
 
-  const doOpen = (key: string, isDir: boolean) => {
-    apiOpenMySpace(key, isDir).catch((e) => toast.error(e?.message || "打开失败"));
-  };
+  // 应用内弹窗（替代 window.prompt / window.confirm：沙箱环境下后者会被禁用、静默失效）
+  const [promptState, setPromptState] = useState<{
+    title: string;
+    value: string;
+    resolve: (v: string | null) => void;
+  } | null>(null);
+  const [confirmState, setConfirmState] = useState<{
+    message: string;
+    resolve: (b: boolean) => void;
+  } | null>(null);
+  const askName = (title: string, def: string) =>
+    new Promise<string | null>((resolve) =>
+      setPromptState({ title, value: def, resolve })
+    );
+  const confirmDialog = (message: string) =>
+    new Promise<boolean>((resolve) =>
+      setConfirmState({ message, resolve })
+    );
 
   const doRename = async (key: string) => {
     const cur = key.split("/").pop() || "";
-    const name = window.prompt("重命名为：", cur);
+    const name = await askName("重命名为：", cur);
     if (!name || name === cur) return;
     try {
-      const r = await apiRenameMySpace(key, name);
+      const r = await space.rename(key, name);
       toast.success("已重命名");
       if (selectedFile === key) setSelectedFile(r.path);
       refreshTree();
@@ -520,20 +650,26 @@ export default function UserSpacePage() {
   };
 
   const doDelete = async (key: string) => {
-    if (
-      !window.confirm(
-        `确定删除 ${key.split("/").pop()}？（空间内的文件将被永久删除）`
-      )
-    )
-      return;
+    const ok = await confirmDialog(
+      `确定删除 ${key.split("/").pop()}？（空间内的文件将被永久删除）`
+    );
+    if (!ok) return;
     try {
-      await apiDeleteMySpaceFile(key);
+      await space.remove(key);
       toast.success("已删除");
       if (
         selectedFile &&
         (selectedFile === key || selectedFile.startsWith(key + "/"))
       )
         setSelectedFile(null);
+      // 清掉被删目录及其后代的展开状态，避免残留
+      setExpandedKeys((prev) => {
+        const next = new Set(prev);
+        next.forEach((k) => {
+          if (k === key || k.startsWith(key + "/")) next.delete(k);
+        });
+        return next;
+      });
       refreshTree();
     } catch (e: any) {
       toast.error(e?.message || "删除失败");
@@ -541,10 +677,10 @@ export default function UserSpacePage() {
   };
 
   const doMkdir = async (parentKey: string) => {
-    const name = window.prompt("新建文件夹名称：", "新建文件夹");
+    const name = await askName("新建文件夹名称：", "新建文件夹");
     if (!name) return;
     try {
-      await apiMkdirMySpace(parentKey, name);
+      await space.mkdir(parentKey, name);
       toast.success("已新建文件夹");
       refreshTree();
     } catch (e: any) {
@@ -552,81 +688,117 @@ export default function UserSpacePage() {
     }
   };
 
-  // ── 选目录弹窗逻辑 ──
-  const navigateDir = async (p?: string) => {
-    setBrowseLoading(true);
-    try {
-      const r = await apiBrowseDir(p);
-      setBrowsePath(r.path);
-      setBrowseParent(r.parent);
-      setBrowseDirs(r.dirs);
-      setBrowseFiles(r.files);
-      setBrowseErr(r.error);
-      const syn = await syncTreeToPath(r.path, browseTree);
-      setBrowseTree(syn.data);
-      setBrowseExpanded(syn.expanded);
-      setBrowseSelKey(r.path);
-    } catch (e: any) {
-      setBrowseErr(e?.message || "浏览失败");
-    } finally {
-      setBrowseLoading(false);
-    }
-  };
+  // ── 粘贴（桌面原生）──
+  // 从系统剪贴板粘贴（Ctrl+V）：原生选目标目录
+  // 仅桌面壳有效：window.keeperHost.readClipboardFiles 由 preload 桥暴露，纯 Web 版没有。
+  const hostForClipboard = (window as any).keeperHost;
+  const canPaste = !!hostForClipboard?.readClipboardFiles;
 
-  const openBrowse = async () => {
-    const start = path || undefined;
-    setBrowseOpen(true);
-    setBrowseLoading(true);
-    try {
-      const r = await apiBrowseDir(start);
-      setBrowsePath(r.path);
-      setBrowseParent(r.parent);
-      setBrowseDirs(r.dirs);
-      setBrowseFiles(r.files);
-      setBrowseErr(r.error);
-      const rootKids = await loadChildren("/");
-      let data: TNode[] = [
-        { title: "/", key: "/", isDir: true, children: rootKids },
-      ];
-      const syn = await syncTreeToPath(r.path, data);
-      data = syn.data;
-      setBrowseTree(data);
-      setBrowseExpanded(syn.expanded);
-      setBrowseSelKey(r.path);
-    } catch (e: any) {
-      setBrowseErr(e?.message || "浏览失败");
-    } finally {
-      setBrowseLoading(false);
-    }
-  };
-
-  const onBrowseToggle = async (key: string) => {
-    const node = findNode(browseTree, key);
-    if (node && node.children == null) {
-      setTreeLoadingKey(key);
+  const pasteInto = async (srcs: string[], dst: string) => {
+    let ok = 0;
+    for (const s of srcs) {
       try {
-        const kids = await loadChildren(key);
-        setBrowseTree((prev) => injectChildren(prev, key, kids));
-      } finally {
-        setTreeLoadingKey(null);
+        await space.import(s, dst);
+        ok++;
+      } catch (e: any) {
+        toast.error(`粘贴失败 ${basename(s)}：${e?.message || e}`);
       }
     }
-    setBrowseExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    if (ok) {
+      toast.success(srcs.length > 1 ? `已粘贴 ${ok} 项` : "已复制");
+      refreshTree();
+    }
   };
 
-  const chooseDir = () => {
-    if (browsePath) saveM.mutate(browsePath);
+  const doPaste = async () => {
+    if (!hostForClipboard?.readClipboardFiles) return;
+    let paths: string[] = [];
+    try {
+      paths = await hostForClipboard.readClipboardFiles();
+    } catch {
+      paths = [];
+    }
+    if (!paths.length) {
+      toast.error("剪贴板里没有可粘贴的文件");
+      return;
+    }
+    const dst = await space.pickFolder();
+    if (!dst) return;
+    await pasteInto(paths, dst);
   };
 
-  const browseRows = [
-    ...browseDirs.map((d) => ({ ...d, isDir: true as const })),
-    ...browseFiles.map((f) => ({ ...f, isDir: false as const })),
-  ];
+  // 全局 Ctrl/Cmd+V：仅桌面壳、且焦点不在输入框时拦截，触发粘贴
+  useEffect(() => {
+    if (!canPaste) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
+        const t = e.target as HTMLElement | null;
+        if (
+          t &&
+          (t.tagName === "INPUT" ||
+            t.tagName === "TEXTAREA" ||
+            t.isContentEditable)
+        )
+          return; // 让输入框走浏览器默认粘贴
+        e.preventDefault();
+        doPaste();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [doPaste]);
+
+  // 右键菜单分发：原生 Menu 返回的动作 → 对应操作
+  const handleContextMenu = async (
+    key: string,
+    isDir: boolean,
+    e: MouseEvent
+  ) => {
+    e.preventDefault();
+    const act = await space.contextMenu(key, isDir, canPaste);
+    switch (act) {
+      case "open":
+        doOpen(key, isDir);
+        break;
+      case "copy":
+        await doCopy(key);
+        break;
+      case "rename":
+        await doRename(key);
+        break;
+      case "delete":
+        await doDelete(key);
+        break;
+      case "mkdir":
+        await doMkdir(key);
+        break;
+      case "paste": {
+        const paths =
+          (await hostForClipboard?.readClipboardFiles?.().catch(() => [])) || [];
+        if (paths.length) await pasteInto(paths, key);
+        break;
+      }
+    }
+  };
+
+  const doCopy = async (key: string) => {
+    const parent = key.includes("/")
+      ? key.slice(0, key.lastIndexOf("/"))
+      : "";
+    try {
+      await space.copy(key, parent);
+      toast.success("已复制");
+      refreshTree();
+    } catch (e: any) {
+      toast.error(e?.message || "复制失败");
+    }
+  };
+
+  // 选择「我的空间」根目录（配置用）：原生目录对话框
+  const chooseSpaceFolder = async () => {
+    const p = await space.pickFolder();
+    if (p) saveM.mutate(p);
+  };
 
   const relPath = selectedFile
     ? selectedFile.slice(path.length).replace(/^\//, "") || "/"
@@ -634,11 +806,6 @@ export default function UserSpacePage() {
 
   return (
     <div className="flex h-full flex-col">
-      <PageHeader
-        title="我的空间"
-        desc="唯一一个用户空间：agent 默认访问的文件夹。已配置后这里就是文件浏览器——左侧目录树、右侧内容预览（仿 Obsidian）。"
-      />
-
       {q.isLoading ? (
         <div className="flex items-center gap-2 py-10 text-[13px] text-ink-muted">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -671,7 +838,7 @@ export default function UserSpacePage() {
           </p>
           <button
             type="button"
-            onClick={openBrowse}
+            onClick={chooseSpaceFolder}
             className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg bg-brand-gradient px-5 text-[14px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
           >
             <FolderOpen className="h-4 w-4" />
@@ -697,7 +864,7 @@ export default function UserSpacePage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={doPickUpload}
                   title="上传文件到此处"
                   className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
                 >
@@ -725,27 +892,7 @@ export default function UserSpacePage() {
                 </button>
               </div>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                doUpload(e.target.files);
-                e.target.value = "";
-              }}
-            />
-            <div
-              className="min-h-0 flex-1 overflow-auto py-1"
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "copy";
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                doUpload(e.dataTransfer.files);
-              }}
-            >
+            <div className="min-h-0 flex-1 overflow-auto py-1">
               <TreeNav
                 nodes={treeData}
                 depth={0}
@@ -755,13 +902,14 @@ export default function UserSpacePage() {
                 onToggle={onToggleDir}
                 onSelectFile={(k) => setSelectedFile(k)}
                 onOpen={doOpen}
-                onDownload={doDownload}
                 onRename={doRename}
                 onDelete={doDelete}
                 onMkdirHere={doMkdir}
+                onCopy={doCopy}
+                onContextMenu={(key, isDir, e) => handleContextMenu(key, isDir, e)}
               />
               <div className="px-3 py-2 text-[11px] leading-5 text-ink-faint">
-                把文件从电脑拖到这里即可拷入「我的空间」；hover 每行可下载 / 重命名 / 删除。
+                点「上传」按钮从电脑选文件拷入「我的空间」；hover 每行可下载 / 重命名 / 删除。
               </div>
             </div>
           </div>
@@ -797,7 +945,7 @@ export default function UserSpacePage() {
               </button>
               <button
                 type="button"
-                onClick={openBrowse}
+                onClick={chooseSpaceFolder}
                 className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
               >
                 重新选择文件夹
@@ -805,7 +953,7 @@ export default function UserSpacePage() {
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-4">
               {selectedFile ? (
-                <FileViewer path={selectedFile} />
+                <FileViewer space={space} root={path} path={selectedFile} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">
                   <FileText className="h-8 w-8" />
@@ -817,154 +965,97 @@ export default function UserSpacePage() {
         </div>
       )}
 
-      {/* 选目录弹窗 */}
-      <Modal
-        open={browseOpen}
-        onClose={() => setBrowseOpen(false)}
-        width={860}
-        title="选择目录"
-        footer={
-          <>
+      {promptState && (
+        <AppModal
+          title={promptState.title}
+          onClose={() => {
+            const r = promptState.resolve;
+            setPromptState(null);
+            r(null);
+          }}
+        >
+          <input
+            autoFocus
+            value={promptState.value}
+            onChange={(e) => setPromptState({ ...promptState, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const v = promptState.value.trim();
+                const r = promptState.resolve;
+                setPromptState(null);
+                r(v || null);
+              } else if (e.key === "Escape") {
+                const r = promptState.resolve;
+                setPromptState(null);
+                r(null);
+              }
+            }}
+            className="w-full rounded-md border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-brand"
+          />
+          <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
-              onClick={() => setBrowseOpen(false)}
+              onClick={() => {
+                const r = promptState.resolve;
+                setPromptState(null);
+                r(null);
+              }}
               className="h-8 rounded-lg border border-line px-4 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
             >
               取消
             </button>
             <button
               type="button"
-              disabled={saveM.isPending}
-              onClick={chooseDir}
-              className="h-8 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:opacity-50"
+              onClick={() => {
+                const v = promptState.value.trim();
+                const r = promptState.resolve;
+                setPromptState(null);
+                r(v || null);
+              }}
+              className="h-8 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
             >
-              {saveM.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              选择此目录
+              确定
             </button>
-          </>
-        }
-      >
-        <div className="flex h-[420px] flex-col">
-          <div className="mb-2 flex items-center gap-2">
+          </div>
+        </AppModal>
+      )}
+      {confirmState && (
+        <AppModal
+          title="确认"
+          onClose={() => {
+            const r = confirmState.resolve;
+            setConfirmState(null);
+            r(false);
+          }}
+        >
+          <div className="mb-3 text-[13px] text-ink-muted">{confirmState.message}</div>
+          <div className="flex justify-end gap-2">
             <button
               type="button"
-              disabled={!browseParent}
-              onClick={() => navigateDir(browseParent || undefined)}
-              className="flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={() => {
+                const r = confirmState.resolve;
+                setConfirmState(null);
+                r(false);
+              }}
+              className="h-8 rounded-lg border border-line px-4 text-[13px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
             >
-              <FolderOpen className="h-3 w-3" />
-              上一级
+              取消
             </button>
-            <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto whitespace-nowrap text-[12px]">
-              {(() => {
-                const segs = browsePath.split("/").filter((s) => s !== "");
-                if (segs.length === 0)
-                  return <span className="text-ink">/</span>;
-                return segs.map((name, i) => {
-                  const cum = "/" + segs.slice(0, i + 1).join("/");
-                  const isLast = i === segs.length - 1;
-                  return (
-                    <span key={cum} className="flex items-center gap-0.5">
-                      {i > 0 && <span className="text-ink-faint">/</span>}
-                      {isLast ? (
-                        <span className="text-ink">{name}</span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => navigateDir(cum)}
-                          className="text-ink-muted transition-colors hover:text-brand"
-                        >
-                          {name}
-                        </button>
-                      )}
-                    </span>
-                  );
-                });
-              })()}
-            </div>
-            {browseLoading && (
-              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-ink-faint" />
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                const r = confirmState.resolve;
+                setConfirmState(null);
+                r(true);
+              }}
+              className="h-8 rounded-lg bg-brand-gradient px-4 text-[13px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+            >
+              确定
+            </button>
           </div>
+        </AppModal>
+      )}
 
-          {browseErr && (
-            <div className="mb-2">
-              <Hint tone="danger">{browseErr}</Hint>
-            </div>
-          )}
-
-          <div className="flex min-h-0 flex-1 gap-3">
-            <div className="w-[240px] shrink-0 overflow-auto rounded-lg border border-line-soft py-1">
-              <TreeNav
-                nodes={browseTree}
-                depth={0}
-                expanded={browseExpanded}
-                selected={browseSelKey}
-                loadingKey={treeLoadingKey}
-                onToggle={onBrowseToggle}
-                onSelectFile={(k) => void navigateDir(k)}
-              />
-            </div>
-
-            <div className="min-w-0 flex-1 overflow-auto rounded-lg border border-line-soft">
-              {browseLoading ? (
-                <div className="flex items-center justify-center py-10 text-ink-muted">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                </div>
-              ) : browseRows.length === 0 ? (
-                <div className="py-10 text-center text-[13px] text-ink-faint">
-                  （空目录）
-                </div>
-              ) : (
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr className="border-b border-line-soft bg-surface text-left text-[12px] text-ink-muted">
-                      <th className="px-3 py-2 font-medium">名称</th>
-                      <th className="w-[110px] px-3 py-2 text-right font-medium">
-                        大小
-                      </th>
-                      <th className="w-[170px] px-3 py-2 font-medium">修改时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {browseRows.map((r) => (
-                      <tr
-                        key={r.path}
-                        onClick={r.isDir ? () => navigateDir(r.path) : undefined}
-                        className={cn(
-                          "border-b border-line-soft last:border-0",
-                          r.isDir
-                            ? "cursor-pointer transition-colors hover:bg-brand/[0.06]"
-                            : ""
-                        )}
-                      >
-                        <td className="px-3 py-1.5 text-[13px]">
-                          <span className="flex items-center gap-2">
-                            {r.isDir ? (
-                              <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-                            ) : (
-                              <FileIcon className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
-                            )}
-                            <span className={r.isDir ? "text-ink" : "text-ink-muted"}>
-                              {r.name}
-                            </span>
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-[12px] text-ink-muted">
-                          {r.isDir ? "—" : fmtSize(r.size)}
-                        </td>
-                        <td className="px-3 py-1.5 text-[12px] text-ink-muted">
-                          {fmtMtime(r.mtime)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }

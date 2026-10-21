@@ -27,10 +27,12 @@
  *    浮层（会话抽屉等）。窗口 resize 必须把视图尺寸重放一次，否则会停在旧尺寸
  *    被裁掉一半。
  */
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, protocol, shell } = require('electron');
 const path = require('path');
+const { fileURLToPath } = require('url');
 const { startSidecar, stopSidecar } = require('./sidecar');
 const browser = require('./browser');
+const spaceFs = require('./spaceFs');
 
 let win = null;
 /** 内核启动的 Promise（单例）：并发调用共享同一次启动，而不是各起一个 */
@@ -44,6 +46,54 @@ let sidecarToken = '';
 ipcMain.on('keeper:token', (e) => {
   e.returnValue = sidecarToken;
 });
+
+/**
+ * 读系统剪贴板里「被复制的文件 / 文件夹」的绝对路径列表。
+ *
+ * 用途：用户在系统文件管理器里 Ctrl+C 复制文件，再在「我的空间」里 Ctrl+V 粘贴。
+ * 网页本身读不到系统剪贴板的文件路径（浏览器安全限制），但 Electron 主进程可以——
+ * 这里用各平台通用的剪贴板格式取出 file:// URL 再转回本地路径。
+ * 任何一步失败都吞掉（返回 []），不让粘贴操作崩掉。
+ */
+function readClipboardFiles() {
+  const paths = [];
+  const pushUrl = (u) => {
+    try {
+      if (u && /^file:/i.test(u.trim())) paths.push(fileURLToPath(u.trim()));
+    } catch (_) {}
+  };
+  // 1) public.file-url：macOS / Windows 复制文件时都会写；多文件用 NUL(\0) 分隔
+  try {
+    const buf = clipboard.readBuffer('public.file-url');
+    if (buf && buf.length) buf.toString('utf8').split('\0').forEach(pushUrl);
+  } catch (_) {}
+  // 2) Windows 专用 FileNameW：UTF-16LE，NUL 分隔，结尾双 NUL
+  if (paths.length === 0) {
+    try {
+      const buf = clipboard.readBuffer('FileNameW');
+      if (buf && buf.length > 2) {
+        const end =
+          buf[buf.length - 1] === 0 && buf[buf.length - 2] === 0
+            ? buf.length - 2
+            : buf.length;
+        buf
+          .slice(0, end)
+          .toString('utf16le')
+          .split('\0')
+          .filter(Boolean)
+          .forEach((p) => paths.push(p));
+      }
+    } catch (_) {}
+  }
+  // 3) 单文件兜底：read 只返回第一个
+  if (paths.length === 0) {
+    try {
+      const u = clipboard.read('public.file-url');
+      if (u) pushUrl(u);
+    } catch (_) {}
+  }
+  return [...new Set(paths)];
+}
 
 /**
  * 内置浏览器的 CDP 端口：Python 内核用 Playwright 连它做抓取。
@@ -144,9 +194,32 @@ async function boot() {
   return booting;
 }
 
+// 「我的空间」媒体预览：注册 keeperfile:// 协议，直接把空间内文件喂给 <img>/<video>/<iframe>，
+// 不再走 Python 的 /mine/file/raw（避免 UI 侧残留任何 HTTP）。路径锁在空间根内，越界返回 403。
+function b64urlDecode(s) {
+  const b = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(b, 'base64').toString('utf8');
+}
+function registerSpaceProtocol() {
+  if (protocol.isProtocolRegistered('keeperfile')) return;
+  protocol.handle('keeperfile', (request) => {
+    try {
+      const u = new URL(request.url);
+      const parts = u.pathname.split('/').filter(Boolean);
+      const root = b64urlDecode(parts[0] || '');
+      const rel = b64urlDecode(parts[1] || '');
+      const abs = spaceFs.resolveSpacePath(root, rel);
+      return net.fetch('file://' + abs, { headers: request.headers });
+    } catch (e) {
+      return new Response('forbidden', { status: 403 });
+    }
+  });
+}
+
 async function bootstrap() {
   try {
     const sidecar = await boot();
+    registerSpaceProtocol();
     createWindow(sidecar.url);
   } catch (err) {
     const msg = (err && err.message) || String(err);
@@ -166,6 +239,53 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   // IPC 注册放在 ready 之前：ipcMain.handle 只允许注册一次，早注册省得建窗时序出问题
   registerBrowserIpc();
+  // 「我的空间」粘贴：读系统剪贴板里复制的文件路径
+  ipcMain.handle('keeper:clipboard-files', () => readClipboardFiles());
+
+  // 「我的空间」文件操作（桌面原生）：人肉操作走这里，内核端点保留给会话/系统用
+  ipcMain.handle('space:list', (_e, root, dir) => spaceFs.list(root, dir));
+  ipcMain.handle('space:read', (_e, root, file) => spaceFs.readFile(root, file));
+  ipcMain.handle('space:mkdir', (_e, root, parent, name) =>
+    spaceFs.mkdir(root, parent, name)
+  );
+  ipcMain.handle('space:rename', (_e, root, file, newName) =>
+    spaceFs.rename(root, file, newName)
+  );
+  ipcMain.handle('space:delete', (_e, root, file) => spaceFs.remove(root, file));
+  ipcMain.handle('space:copy', (_e, root, src, dstDir) =>
+    spaceFs.copy(root, src, dstDir)
+  );
+  ipcMain.handle('space:import', (_e, root, src, dstDir) =>
+    spaceFs.importFromLocal(root, src, dstDir)
+  );
+  ipcMain.handle('space:reveal', (_e, file) => spaceFs.reveal(file));
+  ipcMain.handle('space:pick-folder', () => spaceFs.pickFolder());
+  ipcMain.handle('space:pick-file', (_e, multi) => spaceFs.pickFile(multi));
+  // 「我的空间」右键菜单：原生 Menu 弹在光标处，返回用户选中的动作；取消返回 null
+  ipcMain.handle('space:context-menu', (_e, { key, isDir, canPaste }) => {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (action) => {
+        if (done) return;
+        done = true;
+        resolve(action || null);
+      };
+      const items = [
+        { label: '在文件管理器中打开', click: () => finish('open') },
+        { type: 'separator' },
+        { label: '复制', click: () => finish('copy') },
+        { label: '重命名', click: () => finish('rename') },
+        { label: '删除', click: () => finish('delete') },
+      ];
+      if (isDir) {
+        items.push({ type: 'separator' });
+        items.push({ label: '在此新建文件夹', click: () => finish('mkdir') });
+        if (canPaste) items.push({ label: '粘贴', click: () => finish('paste') });
+      }
+      const menu = Menu.buildFromTemplate(items);
+      menu.popup({ window: win, callback: () => finish(null) });
+    });
+  });
 
   // 第二个实例启动时会走到这里：把已有窗口顶到前台
   app.on('second-instance', () => {
