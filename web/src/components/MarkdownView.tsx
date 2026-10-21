@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remend from "remend";
 import type { Components } from "react-markdown";
+import { MermaidView, ChartView } from "./BlockView";
 
 /** 只预加载常用语言，控制 Shiki 体积（全量语法包有几十 MB） */
 const LANGS = [
@@ -126,7 +127,16 @@ const components: Components = {
   code({ className, children, node, ...props }) {
     const m = /language-([\w+-]+)/.exec(className || "");
     const text = String(children ?? "").replace(/\n$/, "");
-    if (m) return <CodeBlock lang={m[1]} text={text} />;
+    if (m) {
+      const lang = m[1];
+      // markdown 内联渲染：```mermaid / ```vega-lite / ```echarts 直接渲染成图，
+      // 不再当普通代码高亮。与制品卡片共用 MermaidView / ChartView（吃源码字符串）。
+      if (lang === "mermaid") return <MermaidView src={text} />;
+      if (lang === "echarts") return <ChartView src={text} engine="echarts" />;
+      if (lang === "vega-lite" || lang === "chart")
+        return <ChartView src={text} engine="vega-lite" />;
+      return <CodeBlock lang={lang} text={text} />;
+    }
     return (
       <code className="kp-md-inline-code" {...props}>
         {children}

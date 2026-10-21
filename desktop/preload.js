@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld('keeperHost', {
 contextBridge.exposeInMainWorld('keeperSpace', {
   list: (root, dir) => ipcRenderer.invoke('space:list', root, dir),
   read: (root, file) => ipcRenderer.invoke('space:read', root, file),
+  write: (root, file, content) =>
+    ipcRenderer.invoke('space:write', root, file, content),
   mkdir: (root, parent, name) =>
     ipcRenderer.invoke('space:mkdir', root, parent, name),
   rename: (root, file, newName) =>

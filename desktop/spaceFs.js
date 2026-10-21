@@ -102,6 +102,15 @@ async function readFile(root, file) {
   };
 }
 
+/** 写回文件内容（「我的空间」内联编辑保存用）。父目录不存在则建好，路径锁在根内。 */
+async function writeFile(root, file, content) {
+  const f = resolveSpacePath(root, file);
+  await fsp.mkdir(path.dirname(f), { recursive: true });
+  await fsp.writeFile(f, content ?? '', 'utf8');
+  const st = await fsp.stat(f);
+  return { ok: true, path: f, size: st.size, mtime: st.mtimeMs };
+}
+
 async function mkdir(root, parent, name) {
   const p = resolveSpacePath(root, path.join(parent || '', name));
   await fsp.mkdir(p, { recursive: true });
@@ -191,6 +200,7 @@ module.exports = {
   resolveSpacePath,
   list,
   readFile,
+  writeFile,
   mkdir,
   rename,
   remove,

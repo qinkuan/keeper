@@ -3,6 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const BTN =
   "inline-flex h-6 items-center gap-1 rounded-md border border-line px-1.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong";
 
+// 滚轮/捏合缩放灵敏度：越小越「钝」。约 130 像素滚动 ≈ 缩放 12%。
+// 旧实现固定每次 ±10%，触控板捏合连续冒小事件会累加失控，这里改成按幅度指数映射。
+const ZOOM_SENSITIVITY = 0.0009;
+
 interface PanZoomStageProps {
   children: React.ReactNode;
   height?: number;
@@ -116,14 +120,22 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
     setPan((p) => clampPan(p.x, p.y, zoom));
   }, [zoom, natural, clampPan]);
 
-  // 滚轮缩放（含触控板捏合——其本质也是 wheel 事件）
+  // 滚轮缩放（含触控板捏合——其本质也是 wheel 事件）。
+  // 用指数映射 + deltaMode 归一：幅度越大缩放越多（与地图/图片查看器一致手感），
+  // 小幅度滚动只微调，避免「固定 10%/次」在触控板连续小事件下累加失控。
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // deltaMode 1=行、2=页，统一换算成像素量级，跨浏览器一致
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16;
+      else if (e.deltaMode === 2) dy *= 100;
+      // 指数映射：正负对称、手感线性；系数 ZOOM_SENSITIVITY 越小越「钝」
+      const factor = Math.exp(-dy * ZOOM_SENSITIVITY);
       const rect = el.getBoundingClientRect();
-      zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.1 : 0.9);
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);

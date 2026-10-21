@@ -362,6 +362,7 @@ export default function ChatPage({
     });
   };
 
+
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (mention && filteredMentions.length > 0) {
       if (e.key === "ArrowDown") {
@@ -1514,10 +1515,10 @@ export default function ChatPage({
   const send = async (raw?: string, stepId?: string) => {
     const rawInput = raw ?? input;
     const q = expandMentions(rawInput).trim();
-    // 引用片段：拼成「文件的绝对路径: …\n选中内容」，追加到本轮正文
+    // 引用片段：拼成「文件的绝对路径: …\n内容: 选中内容」，追加到本轮正文
     const quoteBlock = pendingQuotes.length
       ? pendingQuotes
-          .map((qq) => `文件的绝对路径: ${qq.path}\n${qq.text}`)
+          .map((qq) => `文件的绝对路径: ${qq.path}\n内容: ${qq.text}`)
           .join("\n\n")
       : "";
     const sendText = (q + (q ? "\n\n" : "") + quoteBlock).trim();

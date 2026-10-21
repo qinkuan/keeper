@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   ChevronRight,
   Copy,
+  Eye,
   File as FileIcon,
   Plus,
   FileText,
@@ -9,6 +10,7 @@ import {
   FolderOpen,
   FolderPlus,
   Loader2,
+  PanelLeft,
   Pencil,
   RefreshCw,
   Trash2,
@@ -302,6 +304,7 @@ function FileViewer({
   root: string;
   path: string;
 }) {
+  const qc = useQueryClient();
   const fq = useQuery({
     queryKey: ["my-space-file", path],
     queryFn: () => space.read(path),
@@ -319,6 +322,14 @@ function FileViewer({
     window.addEventListener("scroll", clear, true);
     return () => window.removeEventListener("scroll", clear, true);
   }, [quoteBtn]);
+  // 编辑 / 预览切换：仅文本类、且确实能当文本读的文件可编辑。切文件时复位编辑态。
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setEditing(false);
+    setDraft("");
+  }, [path]);
   if (fq.isLoading)
     return (
       <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
@@ -392,65 +403,142 @@ function FileViewer({
       </div>
     );
 
-  // Markdown：渲染后的文档。选中文字后浮出"添加"按钮，一键把片段丢进右侧对话
-  if (kind === "markdown") {
-    const onSelMouseUp = () => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-        setQuoteBtn(null);
-        return;
-      }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      setQuoteBtn({
-        x: Math.max(8, rect.left + rect.width / 2 - 22),
-        y: Math.max(8, rect.top - 38),
-        text: sel.toString(),
-      });
-    };
-    const onAddQuote = () => {
-      if (quoteBtn) addQuoteToChat({ path, text: quoteBtn.text });
+  // 以下为可编辑文本类（Markdown / 代码 / 数据 / 纯文本）：预览 ↔ 编辑 切换。
+  // 预览按类型选查看组件（Markdown 渲染、其余 Monaco 只读高亮）；编辑态为可写 Monaco，
+  // 切回预览时把改动写回磁盘（space.write）。HTML 不在此列（预览走浏览器新窗口）。
+  const editable = f.is_text && !f.too_large;
+  const onSelMouseUp = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) {
       setQuoteBtn(null);
-      window.getSelection()?.removeAllRanges();
-    };
-    return (
-      <>
-        <div className="kp-md mx-auto max-w-[900px]" onMouseUp={onSelMouseUp}>
-          <MarkdownView text={f.text} mode="static" />
-        </div>
-        {quoteBtn && (
+      return;
+    }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    setQuoteBtn({
+      x: Math.max(8, rect.left + rect.width / 2 - 22),
+      y: Math.max(8, rect.top - 38),
+      text: sel.toString(),
+    });
+  };
+  const onAddQuote = () => {
+    if (quoteBtn) addQuoteToChat({ path, text: quoteBtn.text });
+    setQuoteBtn(null);
+    window.getSelection()?.removeAllRanges();
+  };
+  const toggleEdit = async () => {
+    if (!editing) {
+      setDraft(f.text ?? "");
+      setEditing(true);
+      return;
+    }
+    // 由编辑切回预览：落盘保存
+    try {
+      setSaving(true);
+      await space.write(path, draft);
+      qc.invalidateQueries({ queryKey: ["my-space-file", path] });
+      toast.success("已保存");
+    } catch (e: any) {
+      toast.error(e?.message || "保存失败");
+      return;
+    } finally {
+      setSaving(false);
+    }
+    setEditing(false);
+  };
+
+  const preview =
+    kind === "markdown" ? (
+      <div className="kp-md mx-auto max-w-[900px]" onMouseUp={onSelMouseUp}>
+        <MarkdownView text={f.text} mode="static" />
+      </div>
+    ) : (
+      <div className="h-full min-h-0">
+        <Editor
+          height="100%"
+          language={monacoLangOf(f.name) ?? "plaintext"}
+          theme={KEEPER_THEME}
+          beforeMount={applyKeeperTheme}
+          value={f.text}
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 13,
+            scrollBeyondLastLine: false,
+            wordWrap: "on",
+          }}
+        />
+      </div>
+    );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {editable && (
+        <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px]">
+          {editing ? (
+            <span className="flex items-center gap-1.5 font-medium text-brand">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand" />
+              编辑中
+            </span>
+          ) : (
+            <span className="truncate font-mono text-ink-muted">预览</span>
+          )}
           <button
             type="button"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={onAddQuote}
-            style={{ position: "fixed", left: quoteBtn.x, top: quoteBtn.y, zIndex: 60 }}
-            className="flex h-7 items-center gap-1 rounded-full bg-brand-gradient px-3 text-[12px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-110 active:scale-95"
+            onClick={toggleEdit}
+            disabled={saving}
+            className={
+              editing
+                ? "ml-auto flex h-7 shrink-0 items-center gap-1 rounded-md border border-brand/50 bg-brand/[0.08] px-2.5 text-[12px] font-medium text-brand transition-all duration-150 hover:bg-brand/[0.14] disabled:opacity-50"
+                : "ml-auto flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50"
+            }
           >
-            <Plus className="h-3.5 w-3.5" />
-            添加
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : editing ? (
+              <Eye className="h-3.5 w-3.5" />
+            ) : (
+              <Pencil className="h-3.5 w-3.5" />
+            )}
+            {editing ? "预览" : "编辑"}
           </button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {editing ? (
+          <div className="h-full min-h-0">
+            <Editor
+              height="100%"
+              language={monacoLangOf(f.name) ?? "plaintext"}
+              theme={KEEPER_THEME}
+              beforeMount={applyKeeperTheme}
+              value={draft}
+              onChange={(v) => setDraft(v ?? "")}
+              options={{
+                minimap: { enabled: false },
+                fontSize: 13,
+                scrollBeyondLastLine: false,
+                wordWrap: "on",
+              }}
+            />
+          </div>
+        ) : (
+          <>
+            {preview}
+            {kind === "markdown" && quoteBtn && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onAddQuote}
+                style={{ position: "fixed", left: quoteBtn.x, top: quoteBtn.y, zIndex: 60 }}
+                className="flex h-7 items-center gap-1 rounded-full bg-brand-gradient px-3 text-[12px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-110 active:scale-95"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                添加
+              </button>
+            )}
+          </>
         )}
-      </>
-    );
-  }
-
-  // 代码 / 数据 / 纯文本：Monaco 只读 + 语言高亮
-  const lang = monacoLangOf(f.name) ?? "plaintext";
-  return (
-    <div className="h-full min-h-0">
-      <Editor
-        height="100%"
-        language={lang}
-        theme={KEEPER_THEME}
-        beforeMount={applyKeeperTheme}
-        value={f.text}
-        options={{
-          readOnly: true,
-          minimap: { enabled: false },
-          fontSize: 13,
-          scrollBeyondLastLine: false,
-          wordWrap: "on",
-        }}
-      />
+      </div>
     </div>
   );
 }
@@ -463,6 +551,44 @@ function FileViewer({
  *   （Markdown 直接渲染，其它文本按语言高亮，二进制 / 过大文件降级为信息卡）。
  * 选好的路径存 settings.yaml，立即生效。
  */
+/** 竖向拖拽分隔条：左右拖动时按水平位移回调，父级据此调整左栏（目录树）宽度。 */
+function HResizeBar({ onResize }: { onResize: (dx: number) => void }) {
+  const dragging = useRef(false);
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      if (dragging.current) onResize(e.movementX);
+    };
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [onResize]);
+  return (
+    <div
+      onMouseDown={() => {
+        dragging.current = true;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      style={{
+        width: 6,
+        flex: "0 0 auto",
+        cursor: "col-resize",
+        background: "var(--kp-border-soft)",
+      }}
+      className="transition-colors hover:bg-brand/40"
+    />
+  );
+}
+
 export default function UserSpacePage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
@@ -475,6 +601,17 @@ export default function UserSpacePage() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  // 目录树宽度（可拖拽调节，落 localStorage）；默认 = 原 280px 的 80% = 224px
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("keeper_space_tree_width"));
+    return saved >= 180 && saved <= 640 ? saved : 224;
+  });
+  useEffect(() => {
+    localStorage.setItem("keeper_space_tree_width", String(treeWidth));
+  }, [treeWidth]);
+  // 目录树可整体收起为细条（仿左侧「隐藏菜单」的折叠交互）
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
 
   const saveM = useMutation({
     mutationFn: (p: string) => apiSetMySpace(p),
@@ -846,10 +983,26 @@ export default function UserSpacePage() {
           </button>
         </div>
       ) : (
-        /* 已配置：两栏文件浏览器 */
-        <div className="mt-4 flex min-h-0 flex-1 gap-3">
-          {/* 左侧目录树 */}
-          <div className="flex w-[280px] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+        /* 已配置：两栏文件浏览器（目录树可拖宽 / 可收起） */
+        <div className="mt-4 flex min-h-0 flex-1">
+          {/* 左侧目录树：收起时退化为细条 + 展开按钮 */}
+          {treeCollapsed ? (
+            <div className="flex w-9 shrink-0 flex-col items-center rounded-xl border border-line bg-panel py-2">
+              <button
+                type="button"
+                onClick={() => setTreeCollapsed(false)}
+                title="展开目录"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+              >
+                <PanelLeft className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div
+                className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel"
+                style={{ width: treeWidth }}
+              >
             <div className="flex items-center gap-1 border-b border-line-soft px-2 py-1.5 text-[12px] font-medium text-ink-muted">
               <FolderOpen className="h-3.5 w-3.5 shrink-0 text-brand" />
               <span className="truncate" title={path}>{basename(path)}</span>
@@ -890,6 +1043,14 @@ export default function UserSpacePage() {
                     <RefreshCw className="h-3.5 w-3.5" />
                   )}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setTreeCollapsed(true)}
+                  title="收起目录"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  <PanelLeft className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto py-1">
@@ -913,6 +1074,8 @@ export default function UserSpacePage() {
               </div>
             </div>
           </div>
+          <HResizeBar onResize={(dx) => setTreeWidth((w) => Math.max(180, Math.min(640, w + dx)))} />
+          </>)}
 
           {/* 右侧内容预览 */}
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-panel">
@@ -942,13 +1105,6 @@ export default function UserSpacePage() {
                 className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
               >
                 刷新
-              </button>
-              <button
-                type="button"
-                onClick={chooseSpaceFolder}
-                className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
-              >
-                重新选择文件夹
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-4">

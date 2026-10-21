@@ -101,6 +101,8 @@ export default function CodeView({
   // 用 ref 持有最新内容与保存函数，避免 Monaco 命令闭包捕获到旧值
   const textRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
+  // 持有 Monaco 实例（仅源码态挂载），插入片段时用到光标位置
+  const editorRef = useRef<any>(null);
 
   useEffect(() => {
     if (!sessionId || !path) return;
@@ -153,7 +155,38 @@ export default function CodeView({
     setDirty(true);
   };
 
+  // markdown 编辑器插入：把流程图 / 图表代码块骨架填进文档。
+  // 预览态直接写 text（diagram 立即在预览里出图）；源码态走 Monaco 光标处插入。
+  const SNIPPETS: Record<string, string> = {
+    mermaid:
+      '```mermaid\nflowchart TD\n  A[开始] --> B{判断}\n  B -- 是 --> C[处理]\n  B -- 否 --> D[结束]\n```\n',
+    echarts:
+      '```echarts\n{\n  "title": { "text": "示例" },\n  "tooltip": {},\n  "xAxis": { "type": "category", "data": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },\n  "yAxis": { "type": "value" },\n  "series": [{ "type": "bar", "data": [120, 200, 150, 80, 70, 110, 130] }]\n}\n```\n',
+    vega:
+      '```vega-lite\n{\n  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",\n  "data": { "values": [{ "a": "A", "b": 28 }, { "a": "B", "b": 55 }, { "a": "C", "b": 43 }] },\n  "mark": "bar",\n  "encoding": { "x": { "field": "a", "type": "nominal" }, "y": { "field": "b", "type": "quantitative" } }\n}\n```\n',
+  };
+
+  const insertSnippet = (kind: keyof typeof SNIPPETS) => {
+    const tpl = SNIPPETS[kind];
+    if (showPreview) {
+      // 预览态：直接更新内容，diagram 立刻渲染出来
+      const t = textRef.current;
+      const sep = t.length === 0 ? "" : t.endsWith("\n") ? "\n" : "\n\n";
+      const next = t + sep + tpl;
+      textRef.current = next;
+      setText(next);
+      setDirty(true);
+    } else if (editorRef.current) {
+      // 源码态：在光标处插入并跟随光标
+      const ed = editorRef.current;
+      const sel = ed.getSelection();
+      ed.executeEdits("", [{ range: sel, text: tpl, forceMoveMarkers: true }]);
+    }
+  };
+
   const handleMount = (editor: any, monaco: any) => {
+    // DiffEditor 的插入目标取「修改侧」
+    editorRef.current = editor.getModifiedEditor?.() ?? editor;
     // 仅原始(HEAD)侧只读，修改侧可编辑
     editor.getOriginalEditor?.().updateOptions({ readOnly: true });
     // DiffEditor 不支持 onChange prop，监听修改侧内容变化
@@ -204,12 +237,13 @@ export default function CodeView({
           language={lang}
           theme="keeper-light"
           value={text}
-          onMount={(editor, monaco) =>
+          onMount={(editor, monaco) => {
+            editorRef.current = editor;
             editor.addCommand?.(
               monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
               () => saveRef.current()
-            )
-          }
+            );
+          }}
           onChange={(v) => handleChange(v)}
           options={{ ...MONACO_OPTIONS, readOnly: readOnly || !canEdit }}
         />
@@ -331,6 +365,20 @@ export default function CodeView({
         {gitTag(gitStatus)}
         <Pill tone="muted">{kind}</Pill>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {/* markdown 编辑器插入：流程图 / 图表代码块骨架，点一下填进文档 */}
+          {kind === "markdown" && (
+            <>
+              <button type="button" onClick={() => insertSnippet("mermaid")} className={BTN}>
+                流程图
+              </button>
+              <button type="button" onClick={() => insertSnippet("echarts")} className={BTN}>
+                ECharts 图
+              </button>
+              <button type="button" onClick={() => insertSnippet("vega")} className={BTN}>
+                Vega 图
+              </button>
+            </>
+          )}
           {/* 预览/源码切换：markdown/html 默认看渲染结果，SVG 默认看图 */}
           {(kind === "markdown" || kind === "html" || kind === "image") && (
             <button
