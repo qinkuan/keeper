@@ -23,25 +23,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ChatBubble from "../components/ChatBubble";
 import SessionList from "../components/SessionList";
 import AskBox from "../components/AskBox";
-/*
- * 编码工作台按需加载：monaco 有 3.9MB，而多数人多数时候不开工作台。
- * 静态 import 的话，进对话页就要先下载它——首屏被一个用不到的编辑器拖住。
- */
-const FileExplorer = lazy(() => import("../components/FileExplorer"));
-const CodeView = lazy(() => import("../components/CodeView"));
-/* 浏览器工作台同样按需加载：不开工作台的人不该为它付首屏。
-   这里只有 Electron 嵌入的那一份（WebContentsView）。曾还有个Agent 浏览器工作台
-   （Playwright 自带的独立 Chromium 窗口），**已删**：它够不到用户自己 Chrome 里的
-   页面 —— 那条链路现在由浏览器扩展接管，见 keeper「浏览器」页。 */
-const BrowserPanel = lazy(() => import("../components/BrowserPanel"));
 import AgentInfoDrawer from "../components/AgentInfoDrawer";
 import UsageDetailModal from "../components/UsageDetailModal";
 import { ModelPicker } from "../components/ModelPicker";
-import {
-  WorkbenchPicker,
-  type WorkbenchType,
-} from "../components/WorkbenchPicker";
-import { WorkspacePicker } from "../components/WorkspacePicker";
 import { ThinkingPicker } from "../components/ThinkingPicker";
 import { ModePicker } from "../components/ModePicker";
 import PromptDumpModal from "../components/PromptDumpModal";
@@ -60,41 +44,6 @@ import type { UsageSummary } from "../api/types";
 
 
 /** 可拖拽竖分隔条：拖动时按水平位移回调，由父级调整列宽。 */
-function Resizer({ onResize }: { onResize: (dx: number) => void }) {
-  const dragging = useRef(false);
-  useEffect(() => {
-    const move = (e: MouseEvent) => {
-      if (dragging.current) onResize(e.movementX);
-    };
-    const up = () => {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-  }, [onResize]);
-  return (
-    <div
-      onMouseDown={() => {
-        dragging.current = true;
-        document.body.style.cursor = "col-resize";
-        document.body.style.userSelect = "none";
-      }}
-      style={{
-        width: 6,
-        flex: "0 0 auto",
-        cursor: "col-resize",
-        background: "var(--kp-border-soft)",
-      }}
-    />
-  );
-}
 import {
   apiAbortChat,
   apiChat,
@@ -104,12 +53,10 @@ import {
   apiDeployInfo,
   apiListAgents,
   apiListTasks,
-  apiListUserSpaces,
   apiGetMySpace,
   apiSessionActivity,
   apiSessionMessages,
   apiSessions,
-  apiSessionWorkspace,
   apiUpdateSessionWorkspace,
   apiSessionMetrics,
   apiBudget,
@@ -121,8 +68,6 @@ import type {
   Attachment,
   ChatMessage,
   SessionKind,
-  SessionWorkspace,
-  UserSpace,
   ReasoningEffort,
   RunMode,
 } from "../api/types";
@@ -284,9 +229,8 @@ export default function ChatPage({
   const expandMentions = (text: string): string => {
     const ranges = computeMentions(text);
     if (!ranges.length) return text;
-    const userSpacePath = mySpacePath || workspace?.user_space?.path || "";
-    const sessionPath =
-      workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
+    const userSpacePath = mySpacePath || "";
+    const sessionPath = mentionCfg.root + (activeSessionId || "");
     let out = text;
     for (let k = ranges.length - 1; k >= 0; k--) {
       const r = ranges[k];
@@ -612,15 +556,10 @@ export default function ChatPage({
   });
   const dumpEnabled = !!settingsQ.data?.prompt_dump?.enabled;
 
-  // 新会话（未建 session）时待选的用户空间；"" = 默认自动目录
-  const [userSpaceId, setUserSpaceId] = useState<string>("");
-  // 当前会话生效的工作空间（已有会话才拉取）
-  const [workspace, setWorkspace] = useState<SessionWorkspace | null>(null);
-  // 思考模式（新会话待选值）：模型是否"先想再答"，及其强度。已有会话的值从
-  // workspace 读回（见 loadWorkspace），这里只承载"还没建会话时"的待选状态。
-  const [thinkingMode, setThinkingMode] = useState(false);
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("low");
-  // 运行模式（新会话待选值）：普通/快捷/程序化。已有会话从 workspace.mode 读回。
+  // 思考模式（新会话待选值）：模型是否"先想再答"，及其强度。
+  const [thinkingMode, setThinkingMode] = useState(true);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
+  // 运行模式（新会话待选值）：普通/快捷/程序化。
   const [runMode, setRunMode] = useState<RunMode>("normal");
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -630,8 +569,6 @@ export default function ChatPage({
   // 切到 task 会列出一列表不属于这里的任务，而在 send() 里还会把浏览器会话的
   // 历史混进来。所以那边根本不渲染切换控件，mode 恒为 "chat"。
   const [mode, setMode] = useState<"chat" | "task">("chat");
-  // 工作台：关 / 编码工作台（文件浏览 + 编辑器）/ Agent 浏览器 —— 三选一，可叠加在左侧
-  const [workbenchType, setWorkbenchType] = useState<WorkbenchType>("off");
   const [drawerOpen, setDrawerOpen] = useState(false);
   // 会话浮层动画：mounted 控制挂载，closing 控制播放退场动画
   const [drawerMounted, setDrawerMounted] = useState(false);
@@ -647,25 +584,8 @@ export default function ChatPage({
     }
   }, [drawerOpen]);
   const closeDrawer = () => setDrawerOpen(false);
-  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
-  // 保存文件后自增，触发文件浏览器刷新 git 角标
-  const [explorerRefresh, setExplorerRefresh] = useState(0);
-  // 编码工作台：文件浏览器宽度（内部可拖拽）
-  const [explorerWidth, setExplorerWidth] = useState(248);
-  // 工作台宽度（与主区域间可拖拽）。三种形态共用这一份宽度：从编码切到浏览器时
-  // 右侧边界必须停在原处，否则切换动作本身会让内容区宽度变化，看着像"页面跳了"
-  const [workbenchWidth, setWorkbenchWidth] = useState(560);
-  const resizeWorkbench = useCallback(
-    (dx: number) =>
-      setWorkbenchWidth((w) => Math.max(360, Math.min(1100, w + dx))),
-    []
-  );
   // Agent 配置抽屉（入口在顶栏右侧）
   const [configOpen, setConfigOpen] = useState(false);
-
-  // 用户空间列表（选择器用）
-  const usQ = useQuery({ queryKey: ["user-spaces"], queryFn: apiListUserSpaces });
-  const userSpaces: UserSpace[] = usQ.data?.user_spaces ?? [];
 
   // 「我的空间」路径（来自 settings.yaml，单空间）：@我的空间 mention 解析用
   const mySpaceQ = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
@@ -827,17 +747,6 @@ export default function ChatPage({
     [agentId, updateMsgs]
   );
 
-  /** 拉取某会话生效的工作空间 */
-  const loadWorkspace = useCallback(
-    async (sid: string) => {
-      try {
-        setWorkspace(await apiSessionWorkspace(agentId, sid));
-      } catch {
-        setWorkspace(null);
-      }
-    },
-    [agentId]
-  );
 
   /**
    * **「有没有开了一轮新的」探测**——让浮球发起的对话也能在本页实时出现。
@@ -1247,9 +1156,8 @@ export default function ChatPage({
     const sid = localStorage.getItem(sessionKey(agentId, effKind));
     if (sid) {
       loadMessages(sid);
-      loadWorkspace(sid);
     }
-  }, [agentId, loadMessages, loadWorkspace]);
+  }, [agentId, loadMessages]);
 
   /**
    * 实际渲染的消息列表 = 已落库的 msgs + 当前会话正在流式的那两条。
@@ -1275,11 +1183,6 @@ export default function ChatPage({
     if (el) el.scrollTop = el.scrollHeight;
   }, [msgs, sending, mode, activeRun]);
 
-  // 切换会话时清空已打开的文件（该会话工作空间变了）
-  useEffect(() => {
-    setActiveFilePath(null);
-  }, [sessionId]);
-
   /**
    * 消息头显示的 agent 名。
    *
@@ -1294,20 +1197,16 @@ export default function ChatPage({
   const handleSelect = (sid: string) => {
     setSessionId(sid);
     setChatSessionId(sid);
-    setUserSpaceId("");
     localStorage.setItem(sessionKey(agentId, effKind), sid);
     loadMessages(sid);
-    loadWorkspace(sid);
   };
 
   const handleNew = () => {
     setSessionId(undefined);
     setChatSessionId(undefined);
-    setUserSpaceId("");
-    setWorkspace(null);
-    // 思考待选值也回到出厂（关 + 低），别让上一条会话的选择粘到新会话上
-    setThinkingMode(false);
-    setReasoningEffort("low");
+    // 思考待选值也回到出厂（开 + 高），别让上一条会话的选择粘到新会话上
+    setThinkingMode(true);
+    setReasoningEffort("high");
     setRunMode("normal");
     localStorage.removeItem(sessionKey(agentId, effKind));
     // 清掉「还没拿到真实 session_id 时用的那个桶」：里面可能躺着上一段没绑定到
@@ -1327,7 +1226,6 @@ export default function ChatPage({
    *  不写入「会话视图」的选择也不落本地存储——否则切回会话会被任务会话顶掉。 */
   const applyTaskSession = (sid: string) => {
     setSessionId(sid);
-    loadWorkspace(sid);
   };
 
   /**
@@ -1361,13 +1259,11 @@ export default function ChatPage({
             setChatSessionId(remembered);
             setSessionId(remembered);
             await loadMessages(remembered);
-            loadWorkspace(remembered);
             return;
           }
           if (chatSessionId && ids.has(chatSessionId)) {
             setSessionId(chatSessionId);
             await loadMessages(chatSessionId);
-            loadWorkspace(chatSessionId);
             return;
           }
           // 记着的那条已经不属于这一类：清掉，否则刷新一次就被它带进一个空页面
@@ -1452,7 +1348,6 @@ export default function ChatPage({
           setSessionId(session_id);
           setChatSessionId(session_id);
           localStorage.setItem(sessionKey(agentId, effKind), session_id);
-          loadWorkspace(session_id);
         }
         setPendingFiles((prev) => [...prev, attachment]);
         // 不再往输入框塞「【文件：name】」文本——那会让退格逐字删文件名。
@@ -1524,9 +1419,8 @@ export default function ChatPage({
     const sendText = (q + (q ? "\n\n" : "") + quoteBlock).trim();
     // 气泡展示用：把 @标签 连同它解析出的内容（如绝对路径）一起存下来，供 ChatBubble 渲染成 chip
     const mentionRanges = computeMentions(rawInput);
-    const userSpacePath = mySpacePath || workspace?.user_space?.path || "";
-    const sessionPath =
-      workspace?.agent_space || mentionCfg.root + (activeSessionId || "");
+    const userSpacePath = mySpacePath || "";
+    const sessionPath = mentionCfg.root + (activeSessionId || "");
     const mentions = mentionRanges.map((r) => ({
       label: r.item.label,
       resolved: resolveSnippet(r.item.snippet, { sessionPath, userSpacePath }),
@@ -1637,8 +1531,8 @@ export default function ChatPage({
         {
           sessionId: targetSid,
           stepId,
-          // 仅新建会话时传待选用户空间；已有会话忽略（沿用库里绑定）
-          userSpaceId: targetSid ? undefined : userSpaceId,
+          // 已移除工作空间选择，新会话一律用 agent 默认目录
+          userSpaceId: undefined,
           // 思考模式/强度：同理，仅新建会话传；已有会话沿用库里绑定（后端读行）
           thinking: targetSid ? undefined : thinkingMode,
           reasoningEffort: targetSid ? undefined : reasoningEffort,
@@ -1665,7 +1559,6 @@ export default function ChatPage({
             rekey(sid);
             setSessionId(sid);
             localStorage.setItem(sessionKey(agentId, effKind), sid);
-            loadWorkspace(sid);
           },
           // 每完成一步：追加到占位消息的思考过程里
           onStep: (s) =>
@@ -1693,7 +1586,6 @@ export default function ChatPage({
               rekey(resp.session_id);
               setSessionId(resp.session_id);
               localStorage.setItem(sessionKey(agentId, effKind), resp.session_id);
-              loadWorkspace(resp.session_id); // 会话已建，拉取生效工作空间
             }
             // 收尾：把权威内容写进**这一轮所属会话**的消息列表（用服务端的 message_id），
             // 随后 finally 删桶。这里写的是 bucket 而不是「当前视图」，所以用户中途
@@ -1741,13 +1633,12 @@ export default function ChatPage({
             q,
             targetSid,
             stepId,
-            targetSid ? undefined : userSpaceId
+            undefined
           )) || { answer: "", llm: false };
         if (resp.session_id && resp.session_id !== targetSid) {
           rekey(resp.session_id);
           setSessionId(resp.session_id);
           localStorage.setItem(sessionKey(agentId, effKind), resp.session_id);
-          loadWorkspace(resp.session_id);
         }
         const resolvedId = resp.message_id || placeholderId;
         updateMsgs(bucket, (prev) => [
@@ -1894,22 +1785,6 @@ export default function ChatPage({
     }
   };
 
-  /** 切换已有会话绑定的用户空间（对话结束后可换） */
-  const switchWorkspace = async (val: string) => {
-    if (!sessionId) return;
-    try {
-      await apiUpdateSessionWorkspace(agentId, sessionId, val || null);
-      await loadWorkspace(sessionId);
-      // 工作空间变了，关闭当前打开的文件并刷新编码工作台文件树
-      setActiveFilePath(null);
-      setExplorerRefresh((n) => n + 1);
-      if (val) toast.success("已切换工作空间");
-      else toast.success("已回落到 agent 默认目录");
-    } catch (e: any) {
-      toast.error(e?.message || "切换失败");
-    }
-  };
-
   // 思考模式/强度：已有会话改一下即写库（不影响工作空间，后端 exclude_unset 区分）；
   // 新会话只更新本地 pending 值（发第一条消息时才落库）。
   const applyThinking = async (enabled: boolean, effort: ReasoningEffort) => {
@@ -1923,7 +1798,6 @@ export default function ChatPage({
         enabled,
         reasoning_effort: effort,
       });
-      await loadWorkspace(sessionId);
     } catch (e: any) {
       toast.error(e?.message || "思考模式切换失败");
     }
@@ -1932,12 +1806,6 @@ export default function ChatPage({
   // 运行模式：仅在「新会话」（无 sessionId）时可选——选中即存本地 pending，发第一条
   // 消息时落库；会话一旦创建，模式即固定，选择器置灰不可改（见下方 ModePicker 的
   // disabled={!!sessionId}）。后端 PUT 的 mode 能力保留，但前端不再暴露切换入口。
-
-  // 原生 select 的 option 只能放纯文本，所以把「只读 / 可写」并进文案
-  const usOptions = userSpaces.map((u) => ({
-    value: u.id,
-    label: `${u.name}（${u.read_only ? "只读" : "可写"}）`,
-  }));
 
   /** 输入框高度（可拖把手放大，向上拖变大） */
   const [inputH, setInputH] = useState(64);
@@ -2254,53 +2122,17 @@ export default function ChatPage({
               </span>
 
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                {/* 工作台 / 工作空间 / 模型：三个都在回答同一个问题——这次在哪儿、
-                    用哪个模型干活，所以并排放在输入框右侧，顺序也按这个来：
-                    工作台（用哪种工作台）→ 工作空间（在哪个目录）→ 模型（用谁思考）。
-
-                    这三个原先散在两处：工作台和工作空间在**会话抽屉头部**，模型在输入
-                    框里。抽屉是"选哪个会话"的地方，把干活的控件塞进去等于让它们离真正
-                    的使用现场很远——打开抽屉才够得着，而工作空间恰恰是**每轮都可能要换**
-                    的那个。
-
-                    工作台本身也从"开关按钮"改成了下拉：右侧那块区域不止文件浏览一种
-                    用法，现在是 关 / 编码工作台 / Agent 浏览器 三选一。 */}
-                <WorkbenchPicker
-                  value={workbenchType}
-                  onChange={setWorkbenchType}
+                {/* 模式 + 思考：移到模型选择左侧（不再放在输入框下方） */}
+                <ModePicker
+                  disabled={!!sessionId}
+                  value={(runMode as RunMode) || "normal"}
+                  onChange={setRunMode}
                 />
-
-                {/* 工作空间选择：会话 / 任务模式共用。
-                    宽度给死（原 flex-1 会占满整行，把模型选择挤走），
-                    并保留 truncate：空间名可能很长。
-                    **最窄的一档整体隐藏**（md 以下）：这一行右侧同时挂着工作台、
-                    模型选择和发送钮，全展开时没有 900px 就一定会挤。空间切换在
-                    窄屏下仍可从「Agent 配置」里改，功能没有丢。 */}
-                {(() => {
-                  const dflt =
-                    userSpaces.find((u) => u.name === "default")?.id ?? "";
-                  const cur = sessionId
-                    ? workspace?.user_space?.id || dflt
-                    : userSpaceId || dflt;
-                  // 会话指向的空间被删、或数据异常时 cur 不在列表里，补一个兜底项，
-                  // 否则触发器显示空白，用户看不出当前究竟在哪个目录
-                  const opts = [
-                    ...usOptions,
-                    ...(cur && !usOptions.some((o) => o.value === cur)
-                      ? [{ value: cur, label: cur }]
-                      : []),
-                  ];
-                  // 保留文件小图标作入口，点它从上方弹出工作区列表（见 WorkspacePicker）。
-                  return (
-                    <WorkspacePicker
-                      value={cur}
-                      options={opts}
-                      onChange={(v) =>
-                        sessionId ? switchWorkspace(v) : setUserSpaceId(v)
-                      }
-                    />
-                  );
-                })()}
+                <ThinkingPicker
+                  thinking={thinkingMode}
+                  effort={(reasoningEffort as ReasoningEffort) || "high"}
+                  onChange={(thinking, effort) => void applyThinking(thinking, effort)}
+                />
 
                 {/*
                   模型选择：改的是**这个 agent 的绑定**，不是逐会话的。
@@ -2353,27 +2185,6 @@ export default function ChatPage({
                 )}
               </div>
             </div>
-          </div>
-
-          {/* 思考模式选择器：输入框下方。开 → 显示强度（低/高/最高）；
-              新会话用本地 pending 值，已有会话改即写库（applyThinking）。 */}
-          <div className="mt-2 flex items-center gap-2 px-1">
-            <ModePicker
-              disabled={!!sessionId}
-              value={
-                ((sessionId ? workspace?.mode : runMode) as RunMode) || "normal"
-              }
-              onChange={setRunMode}
-            />
-            <ThinkingPicker
-              thinking={sessionId ? !!workspace?.thinking : thinkingMode}
-              effort={
-                ((sessionId
-                  ? workspace?.reasoning_effort
-                  : reasoningEffort) as ReasoningEffort) || "low"
-              }
-              onChange={(thinking, effort) => void applyThinking(thinking, effort)}
-            />
           </div>
 
           {/* 底部免责声明：截图里是居中的极小灰字 */}
@@ -2441,108 +2252,7 @@ export default function ChatPage({
       </div>
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* 工作台区域：叠加在工作模式左侧。三种形态（关 / 编码 / Agent 浏览器）共用同一套
-            宽度和拖拽把手——换形态时这块区域的位置不该跟着跳一下。 */}
-        {workbenchType !== "off" && (
-          <Suspense
-            fallback={
-              <div
-                className="flex shrink-0 items-center justify-center border-r border-line-soft text-[13px] text-ink-muted"
-                style={{ width: workbenchWidth }}
-              >
-                加载工作台…
-              </div>
-            }
-          >
-            {workbenchType === "coding" ? (
-              <>
-                <div
-                  style={{
-                    width: workbenchWidth,
-                    flex: "0 0 auto",
-                    display: "flex",
-                    minHeight: 0,
-                    overflow: "hidden",
-                    borderRight: "1px solid var(--kp-border-soft)",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: explorerWidth,
-                      borderRight: "1px solid var(--kp-border-soft)",
-                      display: "flex",
-                      flexDirection: "column",
-                      minHeight: 0,
-                      flex: "0 0 auto",
-                    }}
-                  >
-                    <FileExplorer
-                      agentId={agentId}
-                      sessionId={sessionId}
-                      onOpenFile={setActiveFilePath}
-                      onDeleted={(p) => {
-                        if (p === activeFilePath) setActiveFilePath(null);
-                      }}
-                      onRenamed={(oldPath, newPath) => {
-                        if (oldPath === activeFilePath) setActiveFilePath(newPath);
-                      }}
-                      refreshSignal={explorerRefresh}
-                      rootName={workspace?.user_space?.name}
-                    />
-                  </div>
-                  <Resizer
-                    onResize={(dx) =>
-                      setExplorerWidth((w) =>
-                        Math.max(160, Math.min(520, w + dx))
-                      )
-                    }
-                  />
-                  <div
-                    style={{
-                      flex: 1,
-                      minHeight: 0,
-                      display: "flex",
-                      flexDirection: "column",
-                    }}
-                  >
-                    <CodeView
-                      agentId={agentId}
-                      sessionId={sessionId}
-                      path={activeFilePath}
-                      readOnly={workspace?.read_only ?? true}
-                      onSaved={() => setExplorerRefresh((n) => n + 1)}
-                    />
-                  </div>
-                </div>
-                <Resizer onResize={resizeWorkbench} />
-              </>
-            ) : (
-              /* 浏览器工作台（用户可见那一份 WebContentsView）：结构比编码工作台简单得多
-                 （没有内部分栏），但外框的宽度、边框、把手三处必须一致，否则形态互切时
-                 右侧边界会来回跳。 */
-              <>
-                <div
-                  style={{
-                    width: workbenchWidth,
-                    flex: "0 0 auto",
-                    display: "flex",
-                    minHeight: 0,
-                    overflow: "hidden",
-                    borderRight: "1px solid var(--kp-border-soft)",
-                  }}
-                >
-                  {/* 抽屉打开时把原生浏览器视图藏起来：WebContentsView 不在 DOM 里，
-                      z-index 对它无效，不显式藏会被整个压在抽屉下面 */}
-                  <BrowserPanel
-                    className="min-w-0 flex-1"
-                    overlayOpen={drawerOpen || configOpen}
-                  />
-                </div>
-                <Resizer onResize={resizeWorkbench} />
-              </>
-            )}
-          </Suspense>
-        )}
+
 
         {/* 工作模式区域：会话视图(对话) 或 任务视图(对话+计划) */}
         <div
