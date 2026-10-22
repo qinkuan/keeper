@@ -628,35 +628,6 @@ async def session_messages(
     return await svc.load_messages(session_id, limit=limit, before_seq=before_seq)
 
 
-@router.get("/{agent_id}/sessions/{session_id}/activity")
-async def session_activity(agent_id: str, session_id: str) -> Dict[str, Any]:
-    """这条会话**此刻有没有在跑的一轮**。只回两个字段，几十字节。
-
-    为什么需要它
-    ------------
-    前端已经有两套「接住正在跑的那一轮」的机制——3 秒轮询和 SSE 重连——但它们
-    **都被门控在"页面已经知道有这一轮"上**：
-
-    * 轮询：``if (!msgs.some((m) => m.streaming)) return;``，要已有「进行中」气泡；
-    * 重连：``recoverRunId`` 来自 ``load_messages`` 合成的那个气泡。
-
-    页面自己发起的轮次天然满足（它自己知道 runId），于是两套都能启动。但**浮球发起
-    的那一轮，页面完全不知情**——两套都不启动，用户只能手动刷新去触发一次
-    ``load_messages``。这就是"浮球发了消息、agent 界面要刷新才看得到"的成因。
-
-    与其让页面去全量拉消息（一次最多 200 条）来发现"有没有新东西"，不如问一个
-    几十字节的问题：**变了才去拉**。
-
-    纯内存查表（``chat/runs.py`` 的注册表），不打库、不校验归属——所以它便宜到可以
-    每 3 秒问一次。归属校验放在真正取消息的 ``/messages`` 上，那里本来就有。
-    """
-    _agent(agent_id)
-    from .runs import active_run_id
-
-    run_id = active_run_id(session_id) or ""
-    return {"running": bool(run_id), "run_id": run_id}
-
-
 @router.get("/{agent_id}/config")
 async def config(agent_id: str) -> Dict[str, Any]:
     """只读配置视图（api_key 仅暴露“是否已配置”），供 keeper/web 控制台展示。"""

@@ -1763,22 +1763,6 @@ export function apiSessionMessages(
 
 }
 
-/**
- * 这条会话此刻有没有在跑的一轮。
- *
- * 存在的理由：页面的 3 秒轮询和 SSE 重连都被门控在「页面已经知道有这一轮」上
- * （前者要已有进行中气泡，后者要 recoverRunId）。页面自己发起的轮次天然满足，
- * 浮球发起的那一轮页面却完全不知情——于是只能手动刷新才看得见。
- *
- * 与其为此全量拉一次消息（最多 200 条）来发现变化，不如问这个几十字节的问题。
- * 内核那边是纯内存查表，不打库，所以便宜到可以每 3 秒问一次。
- */
-export function apiSessionActivity(agentId: string, sessionId: string) {
-  return apiGet<{ running: boolean; run_id: string }>(
-    `/agents/${agentId}/sessions/${sessionId}/activity`
-  );
-}
-
 export function apiSkills(agentId: string) {
 
   return apiGet<SkillsResp>(`/agents/${agentId}/skills`);

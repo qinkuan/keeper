@@ -54,7 +54,6 @@ import {
   apiListAgents,
   apiListTasks,
   apiGetMySpace,
-  apiSessionActivity,
   apiSessionMessages,
   apiSessions,
   apiUpdateSessionWorkspace,
@@ -407,24 +406,6 @@ export default function ChatPage({ agentId }: { agentId: string }) {
    *  用 ref 而不是 state 控制显隐：那个 input 从头到尾不可见，没有渲染上的意义，
    *  而 ref 能在不改渲染的前提下拿到它。 */
   const fileInputRef = useRef<HTMLInputElement>(null);
-  /**
-   * 本页是否正有一条**本地流**在跑（send() 期间为 true）。
-   *
-   * 为什么需要它：会话探测（下面那个每 3 秒问 /activity 的 effect）在状态变化时
-   * 会 ``loadMessages``，而那是**替换**语义——它会把 msgs 整个换成服务端版本。
-   * 服务端的 user 消息 id 是后端生成的，与本地 ``activeRun.user``（前端生成的 id）
-   * 必然不同，于是 ``visibleMsgs`` 会把两条 user 同时显示出来：**同一条提问出现
-   * 两个气泡**。
-   *
-   * 正常轮次里这个窗口只有 3 秒、且用户从打开会话到发消息通常早已越过首次探测，
-   * 所以不容易撞上。但**附件轮次会稳定复现**：上传时后端当场建会话，
-   * activeSessionId 从 undefined 变成真实 id → 探测 effect 重新挂载、lastKey
-   * 重置 → 3 秒后首次探测就算「变化」→ 立刻 loadMessages，正好落在流式进行中。
-   *
-   * 用 ref 而不是 state：探测那个 effect 的依赖里刻意不放这些（放了会让它每轮
-   * 重启成风暴），所以只能靠 ref 读到实时值。
-   */
-  const localStreamingRef = useRef(false);
   /* 「记住上次会话」的 localStorage 键按它分桶：对话页恒为 chat（task 视图走另一条
      会话通道，不写这个键）。 */
   const effKind: SessionKind = "chat";
@@ -722,107 +703,6 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     [agentId, updateMsgs]
   );
 
-
-  /**
-   * **「有没有开了一轮新的」探测**——让浮球发起的对话也能在本页实时出现。
-   *
-   * 问题
-   * ----
-   * 下面那个 3 秒轮询、以及 SSE 重连，都门控在「页面已经知道有这一轮」上：
-   * 前者要 ``msgs`` 里已有进行中气泡，后者要 ``recoverRunId``（同样来自
-   * ``load_messages`` 合成的那个气泡）。而那个气泡的判据是 ``active_run_id``。
-   *
-   * 页面自己发起的轮次天然满足，于是两套都能启动。但**浮球发起的那一轮，页面完全
-   * 不知情**——两套都不启动，用户只能手动刷新去触发一次 ``load_messages``。
-   *
-   * 做法
-   * ----
-   * 每 3 秒问一次 ``/activity``（纯内存查表，几十字节，不打库），**只在
-   * ``running`` 或 ``run_id`` 变化时**才 ``loadMessages`` 一次。变化时重新拉消息
-   * 会拿到新的用户消息 + 进行中气泡，于是下面那套轮询和重连自然接手。
-   *
-   * 为什么用「变化才拉」而不是无条件轮询消息：无条件拉一次是 200 条消息的重量，
-   * 每 3 秒一次、而绝大多数时候什么都不会变。
-   *
-   * 只盯**当前打开的会话**：别的会话起了轮次，页面不跳走——用户正在看的东西不该
-   * 被别处的事抢走。
-   */
-  useEffect(() => {
-    const sid = activeSessionId;
-    if (!sid) return;
-    let stop = false;
-    let lastKey: string | null = null;
-
-    const tick = async () => {
-      while (!stop) {
-        await new Promise((r) => setTimeout(r, 3000));
-        if (stop) return;
-        try {
-          const r = await apiSessionActivity(agentId, sid);
-          if (stop) return;
-          const key = `${r.running ? "1" : "0"}:${r.run_id}`;
-          /* ── KEEPER_DIAG ── 每次探测都打（有节流），看内核到底怎么答的 */
-          diag("activity", { running: !!r.running, runId: (r.run_id || "").slice(0, 8), key, lastKey });
-          // 第一次拿到也当作变化：那正好覆盖"页面打开时那一轮已经在跑"的情况
-          if (key !== lastKey) {
-            lastKey = key;
-            /* 本地流在跑时**不拉消息**：loadMessages 是替换语义，会把服务端的
-               user 消息（后端 id）和本地 activeRun.user（前端 id）同时摆上台，
-               变成"同一条提问两个气泡"。流式那几秒不值得为它冒这个险——
-               过程本来就有流式桶在实时喂。 */
-            if (localStreamingRef.current) continue;
-            await loadMessages(sid);
-            /* 内核**明确说**这个会话没有在跑了：任何"进行中"气泡都是过期的，清掉。
-             *
-             * 为什么必须在这里再清一次：`loadMessages` 里那套"按 runId 比对"的
-             * 清除只在**轮询**里跑，而轮询有两个提前退出的条件——
-             *   · activeRun 非空（重连建起了桶）就直接 return；
-             *   · 当前没有任何 streaming 气泡也直接 return。
-             * 于是残留气泡一旦落到这些路径之外，就再也碰不到清除逻辑，页面会一直
-             * 挂着「正在思考」，哪怕内核那一轮早就结束、回答也早已落库。
-             *
-             * 用内核的 run 注册表当判据，比"服务端这次没合成气泡"硬得多：
-             * 后者依赖气泡带着 runId，而它不是每条都有。 */
-            if (!r.running) {
-              /* ── KEEPER_DIAG ── 清之前先记一笔，看当时到底有没有残留 */
-              diag("clear.before", {
-                sid: sid.slice(0, 10),
-                hadStreamingInMsgs: (msgsRef.current || []).some((m) => m.streaming),
-              });
-              updateMsgs(sid, (prev) =>
-                prev.some((m) => m.streaming) ? prev.filter((m) => !m.streaming) : prev
-              );
-              /* 连**重连的桶**一起拆。
-               *
-               * 只清 msgs 是不够的：`visibleMsgs` 优先显示 streamRuns 里的桶，桶
-               * 在的话页面照样挂着「正在思考」，而 msgs 那份清得再干净也没用。
-               *
-               * 只拆 resumed 的桶：本页自己发起的流即便此刻服务端还没登记上 run，
-               * 那也是**真的在跑**，一刀切会把用户正在进行的那一轮的本地显示掐掉。
-               * 重连的桶则相反——它依赖服务端那一轮还活着，服务端说结束了它就是
-               * 过期数据，没有保留的理由。 */
-              setStreamRuns((prev) => {
-                const run = prev[sid];
-                if (!run || !run.resumed) return prev;
-                const next = { ...prev };
-                delete next[sid];
-                return next;
-              });
-            }
-          }
-        } catch {
-          /* 网络抖动：下一轮自然重试 */
-        }
-      }
-    };
-    void tick();
-    return () => {
-      stop = true;
-    };
-    // 只依赖当前会话：换会话等于换探测目标。刻意不进 loadMessages——
-    // 它每次渲染都是新函数，进依赖会让这个循环每轮自己重启成风暴。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, activeSessionId]);
 
   /**
    * 「本轮进行中」的轮询：整页刷新 / 重新进页面时用。
@@ -1398,9 +1278,6 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     // 仅发附件（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
     // 这种消息 q 为空，但 pendingFiles 非空，应当照常发出。
     if ((!q && pendingFiles.length === 0 && pendingQuotes.length === 0) || sending) return;
-    // 标记本地正在流式：让那条 3 秒一探的 effect 跳过 loadMessages，
-    // 否则它会把刚发上去、还在流式中的这一轮又拉一遍，和服务端回灌的 user 重复显示。
-    localStreamingRef.current = true;
 
     /**
      * 这一轮要发到**哪个会话**：视图当前所在的会话。
@@ -1682,8 +1559,6 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       // 侧栏会话列表也要刷：**首条用户消息落库后后端会自动派生出标题**，
       // 不刷的话列表里这条会一直显示「新对话」直到手动刷新页面。
       qc.invalidateQueries({ queryKey: ["sessions"] });
-      // 流式彻底收尾：放开探测 effect，让后续（含下一轮）的 loadMessages 正常生效。
-      localStreamingRef.current = false;
     }
   };
 
