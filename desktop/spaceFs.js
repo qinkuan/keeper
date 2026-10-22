@@ -18,6 +18,7 @@ const path = require('path');
 const { dialog, shell } = require('electron');
 
 const MAX_TEXT = 2 * 1024 * 1024; // 与 Python 端一致的“过大不读”阈值
+const MAX_BINARY = 64 * 1024 * 1024; // 预览二进制（xlsx/pdf 等）上限，超出不读，避免 OOM
 
 /** 把 p 解析到 root 之下；越界（逃逸出 root）抛错。返回绝对路径。 */
 function resolveSpacePath(root, p) {
@@ -100,6 +101,21 @@ async function readFile(root, file) {
     too_large: st.size > MAX_TEXT,
     text: isText ? head.toString('utf8') : '',
   };
+}
+
+/** 读文件二进制字节，回 base64（预览 xlsx/pdf 用）。路径锁在根内；超过上限抛错。 */
+async function readBinary(root, file, maxBytes = MAX_BINARY) {
+  const f = resolveSpacePath(root, file);
+  const st = await fsp.stat(f);
+  if (st.isDirectory())
+    throw Object.assign(new Error('目录不能读取为字节'), { code: 'IS_DIR' });
+  if (st.size > maxBytes)
+    throw Object.assign(
+      new Error(`文件过大（> ${Math.round(maxBytes / 1048576)}MB），无法预览`),
+      { code: 'TOO_LARGE' }
+    );
+  const buf = await fsp.readFile(f);
+  return { name: path.basename(f), size: st.size, base64: buf.toString('base64') };
 }
 
 /** 写回文件内容（「我的空间」内联编辑保存用）。父目录不存在则建好，路径锁在根内。 */
@@ -200,6 +216,7 @@ module.exports = {
   resolveSpacePath,
   list,
   readFile,
+  readBinary,
   writeFile,
   mkdir,
   rename,

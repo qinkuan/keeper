@@ -19,6 +19,8 @@ export interface SpaceApi {
   list(dir: string): Promise<{ path: string; items: RawNode[] }>;
   /** 读取文件内容（文本 / 探测结果），结构同后端 MySpaceFile。 */
   read(p: string): Promise<any>;
+  /** 读取文件二进制字节，回 { name, size, base64 }（预览 xlsx/pdf 用）。 */
+  readBinary(p: string, maxBytes?: number): Promise<{ name: string; size: number; base64: string }>;
   /** 写回文件内容（「我的空间」内联编辑保存用）。 */
   write(p: string, content: string): Promise<any>;
   /** 在 parent 下新建名为 name 的子文件夹。 */
@@ -50,6 +52,7 @@ export function makeSpaceApi(root: string): SpaceApi {
   return {
     list: (dir) => s.list(root, dir),
     read: (p) => s.read(root, p),
+    readBinary: (p, maxBytes) => s.readBinary(root, p, maxBytes),
     write: (p, content) => s.write(root, p, content),
     mkdir: (parent, name) => s.mkdir(root, parent, name),
     rename: (p, name) => s.rename(root, p, name),

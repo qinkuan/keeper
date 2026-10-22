@@ -29,7 +29,9 @@ import ImageViewer from "../components/ImageViewer";
 import Editor from "@monaco-editor/react";
 import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
 import { monacoLangOf } from "../monacoLang";
-import { viewerKindOf } from "../components/viewers";
+import { viewerKindOf, isSheetName } from "../components/viewers";
+import SheetViewer from "../components/SheetViewer";
+import PdfViewer from "../components/PdfViewer";
 
 /** 树节点：既能是目录（可展开）也能是文件（叶子）。 */
 interface TNode {
@@ -349,6 +351,25 @@ function FileViewer({
   const kind = viewerKindOf(f.name);
   const rawUrl = spaceFileUrl(root, path);
 
+  // 读文件二进制字节 → ArrayBuffer（表格 / PDF 预览用）。base64 由桌面桥 readBinary 给。
+  const loadBytes = async (): Promise<ArrayBuffer> => {
+    const r = await space.readBinary(path);
+    const bin = atob(r.base64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  };
+
+  // 我的空间专属内联预览（走二进制字节，故放在通用分派之前拦截）：
+  //   表格 xlsx/xls/csv/tsv → SheetViewer；PDF → PdfViewer。
+  // 只读预览：读取失败（过大 / 解析不了）时给出下载兜底，不白屏。
+  if (isSheetName(f.name)) {
+    return <SheetViewer name={f.name} loadBytes={loadBytes} />;
+  }
+  if (kind === "pdf") {
+    return <PdfViewer name={f.name} loadBytes={loadBytes} />;
+  }
+
   // 二进制：不渲染，只给下载
   if (kind === "binary") return <BinaryFileCard file={f} />;
 
@@ -384,8 +405,9 @@ function FileViewer({
       </div>
     );
 
-  // PDF / HTML：交给浏览器新窗口（小框里没法看，且新窗口能缩放 / 全屏 / 另存）
-  if (kind === "pdf" || kind === "html")
+  // HTML：交给浏览器新窗口（小框里没法看，且新窗口能缩放 / 全屏 / 另存）。
+  // PDF 已改为内联预览（见上面的 PdfViewer 拦截）。
+  if (kind === "html")
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <FileText className="h-8 w-8 text-ink-faint" />
@@ -397,7 +419,7 @@ function FileViewer({
             rel="noreferrer"
             className="rounded-md border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
           >
-            {kind === "pdf" ? "在浏览器中打开 PDF" : "在浏览器中打开 HTML"}
+            在浏览器中打开 HTML
           </a>
         </div>
       </div>

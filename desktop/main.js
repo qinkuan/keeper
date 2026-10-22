@@ -216,6 +216,9 @@ if (!app.requestSingleInstanceLock()) {
   // 「我的空间」文件操作（桌面原生）：人肉操作走这里，内核端点保留给会话/系统用
   ipcMain.handle('space:list', (_e, root, dir) => spaceFs.list(root, dir));
   ipcMain.handle('space:read', (_e, root, file) => spaceFs.readFile(root, file));
+  ipcMain.handle('space:read-binary', (_e, root, file, maxBytes) =>
+    spaceFs.readBinary(root, file, maxBytes)
+  );
   ipcMain.handle('space:write', (_e, root, file, content) =>
     spaceFs.writeFile(root, file, content)
   );

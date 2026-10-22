@@ -51,6 +51,9 @@ contextBridge.exposeInMainWorld('keeperHost', {
 contextBridge.exposeInMainWorld('keeperSpace', {
   list: (root, dir) => ipcRenderer.invoke('space:list', root, dir),
   read: (root, file) => ipcRenderer.invoke('space:read', root, file),
+  /** 读文件二进制字节，回 { name, size, base64 }（预览 xlsx/pdf 用）。 */
+  readBinary: (root, file, maxBytes) =>
+    ipcRenderer.invoke('space:read-binary', root, file, maxBytes),
   write: (root, file, content) =>
     ipcRenderer.invoke('space:write', root, file, content),
   mkdir: (root, parent, name) =>

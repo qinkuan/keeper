@@ -70,6 +70,17 @@ const TEXT_EXTS = new Set([
 
 const PDF_EXTS = new Set(["pdf"]);
 
+// 表格类：我的空间用 SheetJS 解析成表格预览（xlsx/xls/csv/tsv）。
+// 刻意**不改** viewerKindOf 的既有映射（csv/tsv 仍是 data、xlsx/xls 仍是 binary）——
+// 那张表被会话产物（ArtifactCard）共用，改了会让聊天里的 csv 文本预览回归。这里只
+// 额外导出一个判定，给「我的空间」本地拦截用。
+const SHEET_EXTS = new Set(["xlsx", "xls", "csv", "tsv"]);
+
+/** 是否是表格类文件（我的空间表格预览用，不影响会话产物的分派）。 */
+export function isSheetName(name: string): boolean {
+  return SHEET_EXTS.has(extOf(name));
+}
+
 // 网页：用浏览器渲染而不是看源码——agent 产出 HTML 的目的就是让人看到效果。
 // 安全上后端会给 text/html 加 CSP，前端用不带 allow-same-origin 的 sandbox。
 const HTML_EXTS = new Set(["html", "htm"]);
