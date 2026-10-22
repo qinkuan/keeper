@@ -184,8 +184,8 @@ class ChatStreamIn(BaseModel):
     # 为什么发消息这条路也要带：会话是**发第一条消息时**才建的（侧栏「新对话」只清
     # 状态、不预建），所以对「点新对话后发第一条」这个最常见的路径，这里就是它落库
     # 时唯一的类别来源。已有会话一律沿用库里的值，不因为这里传了什么而改写。
-    # browser-automation：网页 Agent 自动操作产生的会话（「浏览器」页的「网页 Agent」tab）。
-    kind: Literal["chat", "task", "browser", "browser-automation"] = "chat"
+    # browser：网页「对这一页提问」会话（「浏览器」页按它过滤）。
+    kind: Literal["chat", "task", "browser"] = "chat"
     # 本次运行的标识（前端生成）：点「停止生成」时按它精确中止这一次，
     # 而不是按 session 粗粒度停——同一会话可能有别的请求在跑。
     run_id: str = ""
@@ -373,26 +373,26 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
     async def runner() -> None:
         try:
             res = await run_one_ask(
-                agent_id=agent_id,
-                session_id=body.session_id or "",
-                text=body.q,
-                run_id=run_id,
-                kind=body.kind,
-                step_id=body.step_id or "",
-                user_space_id=body.user_space_id or "",
-                thinking=body.thinking,
-                reasoning_effort=body.reasoning_effort or None,
-                mode=body.mode or "normal",
-                attachments=body.attachments or None,
-                mention_raw=body.mention_raw or None,
-                mentions=body.mentions,
-                # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
-                # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
-                # 整片消失。
-                on_session=lambda sid: q.put(("session", {"session_id": sid})),
-                on_step=on_step,
-                on_delta=on_delta,
-            )
+                    agent_id=agent_id,
+                    session_id=body.session_id or "",
+                    text=body.q,
+                    run_id=run_id,
+                    kind=body.kind,
+                    step_id=body.step_id or "",
+                    user_space_id=body.user_space_id or "",
+                    thinking=body.thinking,
+                    reasoning_effort=body.reasoning_effort or None,
+                    mode=body.mode or "normal",
+                    attachments=body.attachments or None,
+                    mention_raw=body.mention_raw or None,
+                    mentions=body.mentions,
+                    # 尽早把 id 交给前端：新会话第一句尤其关键——前端要立刻写进
+                    # localStorage，否则用户刷新后连「该去看哪个会话」都不知道，历史也会
+                    # 整片消失。
+                    on_session=lambda sid: q.put(("session", {"session_id": sid})),
+                    on_step=on_step,
+                    on_delta=on_delta,
+                )
             await q.put(("done", res))
         except Exception as e:  # 兜底：异常也要收尾，否则前端会一直挂着
             logger.exception("chat/stream 执行失败")
@@ -515,7 +515,7 @@ class NewSessionIn(BaseModel):
     # 用 Literal 而不是 str：数据库这列是无 CHECK 的 TEXT，写错一个字母不会报错，
     # 只会让那条会话在所有列表里都消失（哪个类别都不匹配）。在入口挡成 422，
     # 比让人对着一个空列表猜强得多。
-    kind: Literal["chat", "task", "browser", "browser-automation"] = "chat"
+    kind: Literal["chat", "task", "browser"] = "chat"
 
 
 @router.post("/{agent_id}/sessions")
@@ -588,9 +588,8 @@ async def sessions(
     initiator_id: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
-    # browser-automation：网页 Agent 会话（「浏览器」页的「网页 Agent」tab 按它过滤）。
-    # 不列进来，前端传 kind=browser-automation 会被 FastAPI 挡成 422，列表永远空。
-    kind: Optional[Literal["chat", "task", "browser", "browser-automation"]] = None,
+    # browser：网页「对这一页提问」会话（「浏览器」页按它过滤）。
+    kind: Optional[Literal["chat", "task", "browser"]] = None,
 ) -> Dict[str, Any]:
     """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。
 

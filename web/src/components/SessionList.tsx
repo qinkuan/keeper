@@ -54,8 +54,7 @@ export default function SessionList({
   agentId: string;
   activeId?: string | null;
   /**
-   * 只列这一类会话：「对话」页按当前 tab 传 chat / task，浏览器页传 browser /
-   * browser-automation（由上层 tab 切换决定）。
+   * 只列这一类会话：「对话」页按当前 tab 传 chat / task，浏览器页传 browser。
    *
    * 为什么用类别而不是「要不要任务」这种布尔：三类是**互斥**的，浏览器会话不该
    * 出现在「会话」tab 里。而布尔只能表达二分，`kind !== "task"` 会把 browser
@@ -65,7 +64,7 @@ export default function SessionList({
   onSelect: (sessionId: string) => void;
   onNew: () => void;
   onNewTask?: (sessionId: string) => void;
-  /** 隐藏「新建」入口：自动化会话由网页 Agent 自动创建，不该让用户手动新建 */
+  /** 隐藏「新建」入口（浏览器会话由用户在面板里发起，不在此处手动新建） */
   hideCreate?: boolean;
 }) {
   const taskMode = kind === "task";
@@ -150,7 +149,7 @@ export default function SessionList({
 
   return (
     <div className="flex h-full flex-col">
-      {/* 顶部：新建入口（自动化会话由网页 Agent 自动创建，不在此处手动新建） */}
+      {/* 顶部：新建入口（浏览器会话由用户在面板里发起，不在此处手动新建） */}
       {!hideCreate && (
         <div className="p-2">
           <button

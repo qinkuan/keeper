@@ -226,6 +226,57 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
         non_tool = {"think", "ask", "pause", "final", "final_summary"}
         seq_by_id = {r.id: r.step for r in rows}
 
+        # 单趟进程（automation / simple / 无工具纯对话）：没有 react_steps 行，
+        # 但每一次 LLM 调用都落在 llm_calls 里。直接把它们当作「一步」展示，
+        # 否则「查看详情」只剩总用量、看不到这一步到底在干什么（dump 同理）。
+        if not rows:
+            synth_calls = (
+                await db.execute(
+                    select(LLMCall)
+                    .where(
+                        LLMCall.message_id == anchor,
+                        LLMCall.kind != "context_compact",
+                    )
+                    .order_by(LLMCall.created_at)
+                )
+            ).scalars().all()
+            for i, c in enumerate(synth_calls, start=1):
+                _ms = int(c.duration_ms or 0)
+                _pt = int(c.prompt_tokens or 0)
+                _ct = int(c.completion_tokens or 0)
+                steps.append(
+                    {
+                        "seq": c.step_seq or i,
+                        "step_id": c.id,
+                        "kind": c.kind or "react_step",
+                        "is_tool": False,
+                        "status": "done",
+                        "duration_ms": _ms,
+                        "llm_duration_ms": _ms,
+                        "tool_duration_ms": 0,
+                        "tool_calls": 0,
+                        "output_size": 0,
+                        "raw_output_size": 0,
+                        "truncated": False,
+                        "created_at": c.created_at.isoformat() if c.created_at else None,
+                        "input_text": "",
+                        "output_text": "",
+                        "input_chars": 0,
+                        "output_chars": 0,
+                        "dup": None,
+                        "read_repeat": False,
+                        "usage": {
+                            "prompt_tokens": _pt,
+                            "completion_tokens": _ct,
+                            "total_tokens": _pt + _ct,
+                            "cached_tokens": int(c.cached_tokens or 0),
+                            "reasoning_tokens": int(c.reasoning_tokens or 0),
+                            "call_count": 1,
+                            "llm_duration_ms": _ms,
+                        },
+                    }
+                )
+
         def _compact_step(c: Dict[str, Any]) -> Dict[str, Any]:
             """压缩节点：不是任何一步，但确实花了一次 LLM 调用的钱与时间。"""
             ms = int(c["duration_ms"] or 0)

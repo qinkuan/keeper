@@ -168,10 +168,6 @@ def make_app():
     app.include_router(settings_router, dependencies=auth_deps)
     # framework 环境（~/.keeper/framework 下集中管理的 python / node 运行时）
     app.include_router(framework_router, dependencies=auth_deps)
-    # 内置浏览器抓取（仅桌面形态可用：内核经 CDP 连桌面壳那个浏览器，见 keeper/browser/scrape.py）
-    from keeper.browser.scrape import router as browser_router
-
-    app.include_router(browser_router, dependencies=auth_deps)
     # A2A 入站：按 agent 路由，每个已装载 agent 各有自己的端点
     # POST /agents/{agent_id}/a2a 与 GET /agents/{agent_id}/.well-known/agent.json
     from keeper.a2a import build_a2a_router

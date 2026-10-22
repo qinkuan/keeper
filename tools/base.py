@@ -24,6 +24,9 @@ class ProcessorTool:
     #: 放行，可写区至少要挡住工作空间外的路径。内置 ``fs.*`` 工具都是 False——
     #: 它们只碰工作空间内的路径，由 ``mutating`` / ``read_only`` 那套约束即可。
     dangerous: bool = False
+    #: 仅在特定会话类别下披露/可用（如浏览器自动化）。普通会话里既不进 system
+    #: 工具清单，也不会被模型调用（调用时也过 chat/context 的会话类别守卫）。
+    browser_only: bool = False
 
     async def execute(self, args: dict) -> str:
         try:
@@ -87,7 +90,10 @@ class ToolRegistry:
         """
         if not self._tools:
             return "（当前没有可用工具）"
-        return "\n".join(self._line(t) for t in self._tools.values())
+        tools = [t for t in self._tools.values()]
+        if not tools:
+            return "（当前没有可用工具）"
+        return "\n".join(self._line(t) for t in tools)
 
     # ---- 按需展示（P1，见 doc/capability-loading-design.md 第四节）----
     @staticmethod

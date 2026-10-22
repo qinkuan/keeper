@@ -324,6 +324,29 @@ def current_thinking() -> ThinkingCtx | None:
     return _current_thinking.get()
 
 
+# 当前请求的会话类别（chat / task / browser）：由 ChatService.ask
+# 在解析出会话后注入，供需要按类别区别行为的模块（如浮球「对这一页提问」）读取。
+@dataclass
+class SessionKindCtx:
+    kind: str
+
+
+_current_session_kind: ContextVar[Optional[SessionKindCtx]] = ContextVar(
+    "keeper_session_kind", default=None
+)
+
+
+def set_session_kind(kind: str | None) -> None:
+    """注入当前请求的会话类别（请求入口、确定 session 后调用一次）。"""
+    _current_session_kind.set(SessionKindCtx(kind) if kind else None)
+
+
+def current_session_kind() -> str | None:
+    """取当前会话类别；无上下文（构建期 / 未注入）返回 None。"""
+    c = _current_session_kind.get()
+    return c.kind if c else None
+
+
 # 任务模式下「当前正在执行哪个计划点」：由执行器在发一轮对话前设置，
 # ``task.mark_item_done`` 工具执行时取它，才知道该把哪个点勾掉。
 # 同样用 ContextVar 而不是闭包：工具注册表是多会话共享的，闭包会串台。

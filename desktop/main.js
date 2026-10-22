@@ -1,17 +1,14 @@
 /**
  * keeper 桌面壳的主进程。
  *
- * 职责边界很清楚：**窗口 / 进程托管 + 内置浏览器**，不碰业务逻辑。
+ * 职责边界很清楚：**窗口 / 进程托管**，不碰业务逻辑。
  * 页面是 keeper 内核自带的（内核把 web/dist 作为站点根同源托管），所以这里
  * 只要等内核就绪、把窗口指过去就行——前端业务代码一行都不用改。
- *
- * 内置浏览器（desktop/browser.js）是唯一的例外：它是原生能力，前端拿不到，
- * 必须经 preload 桥转发命令（见 IPC 注册那段）。
  *
  * 这也意味着"桌面版"和"命令行版"跑的是同一套东西：数据目录（~/.keeper）、
  * 数据库、配置完全一致，切换形态不产生迁移成本。
  *
- * 五个必须守住的约束（都是踩过坑才写进来的）
+ * 三个必须守住的约束（都是踩过坑才写进来的）
  * -------------------------------------
  * 1. **单实例**：不抢锁的话，每跑一次 npm start 就多一个 Electron、多一个内核，
  *    它们会一起抢 ~/.keeper 的数据库。第二个实例直接退出并聚焦已有窗口。
@@ -20,18 +17,11 @@
  *    还没赋值时并发 spawn 出 N 个 Python。所以启动必须**去重成一个 Promise**。
  * 3. **建窗口要幂等**：activate 与 whenReady 可能在同一次启动里都走到建窗逻辑，
  *    已有窗口时只聚焦，不再 new 一个。
- * 4. **CDP 端口必须在 app ready 之前定下**：它是浏览器进程启动参数，ready 之后
- *    再 appendSwitch 就不生效了。而端口号还要交给 Python 内核（它用 Playwright
- *    连上来做抓取），所以取值只能是同步的——固定端口 + 环境变量覆盖。
- * 5. **原生视图永远在最上层**：WebContentsView 不在 DOM 里，会盖住页面上所有
- *    浮层（会话抽屉等）。窗口 resize 必须把视图尺寸重放一次，否则会停在旧尺寸
- *    被裁掉一半。
  */
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, protocol, shell } = require('electron');
 const path = require('path');
 const { fileURLToPath } = require('url');
 const { startSidecar, stopSidecar } = require('./sidecar');
-const browser = require('./browser');
 const spaceFs = require('./spaceFs');
 
 let win = null;
@@ -95,30 +85,6 @@ function readClipboardFiles() {
   return [...new Set(paths)];
 }
 
-/**
- * 内置浏览器的 CDP 端口：Python 内核用 Playwright 连它做抓取。
- * 必须与 desktop/browser.js 里的浏览器共用同一个 Electron 实例——所以端口是
- * Electron 的启动参数，而不是 Playwright 自己开一个浏览器。
- * 可用 KEEPER_CDP_PORT 覆盖（默认值被占用时换一个）。
- */
-const CDP_PORT = Number(process.env.KEEPER_CDP_PORT || 9333);
-app.commandLine.appendSwitch('remote-debugging-port', String(CDP_PORT));
-// 只监听回环：这个端口等于「该浏览器的完全控制权」（能读全部 cookie），
-// 绝不能绑到 0.0.0.0 让同网段的人够得着
-app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
-
-/** 前端 → 主进程的内置浏览器命令：桥的转发层，业务在 browser.js 里 */
-function registerBrowserIpc() {
-  ipcMain.on('browser:open', (_e, { url, rect } = {}) => browser.open(url, rect));
-  ipcMain.on('browser:close', () => browser.close());
-  ipcMain.on('browser:command', (_e, cmd, arg) => browser.command(cmd, arg));
-  ipcMain.on('browser:set-bounds', (_e, rect) => browser.setBounds(rect));
-  ipcMain.on('browser:set-visible', (_e, visible) => browser.setVisible(visible));
-  ipcMain.handle('browser:is-open', () => browser.isOpen());
-  ipcMain.handle('browser:current-url', () => browser.currentUrl());
-}
-
-
 function createWindow(url) {
   // 幂等：已有窗口就聚焦，绝不 new 第二个
   if (win) {
@@ -148,24 +114,32 @@ function createWindow(url) {
     },
   });
 
-  browser.attach(win);
-  // 原生视图是浮在页面之上的一层，窗口尺寸变了必须跟着重算，否则会被裁掉
-  win.on('resize', () => browser.refreshBounds());
-  win.on('maximize', () => browser.refreshBounds());
-  win.on('unmaximize', () => browser.refreshBounds());
   win.on('closed', () => {
-    browser.close();
     win = null;
   });
 
-  // 外链交给系统浏览器，别在壳里开（壳内的导航没有地址栏，用户出不来）
+  // 壳里永远不新开一个 Electron 窗口：外链交系统浏览器，站内/未知链接直接拦截
+  // （之前对「同域链接」返回 'allow' 会再拉起一个满屏 App 窗口，盖住当前应用、原窗口还在，
+  //  正是「打开一个 URL 就把整个应用抢过去」的成因）
   win.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (target && !target.startsWith(url)) {
+    if (target && /^https?:\/\//i.test(target)) {
       shell.openExternal(target);
-      return { action: 'deny' };
     }
-    return { action: 'allow' };
+    return { action: 'deny' };
   });
+
+  // 纵深防御：主窗口只允许在应用自身源内做顶层导航（SPA 的 pushState 不触发
+  // will-navigate，不受影响；F5 刷新同源也放行）。没有这道闸，任何一条误导航
+  // （比如自动化误把主界面当成网页 page 去 goto）都会让 React 应用整个被
+  // 外部网页替换——"应用窗口变成浏览器"。
+  try {
+    const appOrigin = new URL(url).origin;
+    win.webContents.on('will-navigate', (e, target) => {
+      if (!target.startsWith(appOrigin)) e.preventDefault();
+    });
+  } catch (err) {
+    // url 解析失败就不设闸（不应发生：url 来自内核 sidecar）
+  }
 
   win.once('ready-to-show', () => win.show());
   win.loadURL(url);
@@ -176,8 +150,6 @@ async function boot() {
   if (!booting) {
     booting = startSidecar({
       onLog: (line) => console.log('[keeper]', line),
-      // 把 CDP 端口交给内核：抓取走「连上桌面壳那个浏览器」，而不是自己再开一个
-      cdpPort: CDP_PORT,
     })
       .then((sidecar) => {
         console.log(`[desktop] 内核就绪：${sidecar.url}`);
@@ -238,7 +210,6 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   // IPC 注册放在 ready 之前：ipcMain.handle 只允许注册一次，早注册省得建窗时序出问题
-  registerBrowserIpc();
   // 「我的空间」粘贴：读系统剪贴板里复制的文件路径
   ipcMain.handle('keeper:clipboard-files', () => readClipboardFiles());
 

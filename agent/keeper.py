@@ -336,7 +336,10 @@ class KeeperAgent:
         from .process import ReactProcess
         from .simple_process import SimpleProcess
 
-        cls = {"normal": ReactProcess, "simple": SimpleProcess}.get(mode, ReactProcess)
+        cls = {
+            "normal": ReactProcess,
+            "simple": SimpleProcess,
+        }.get(mode, ReactProcess)
         p = self._processes.get(mode)
         if p is None:
             # Process 自己知道该从 agent 上取什么（llm / persona / skill 注入）

@@ -1171,10 +1171,9 @@ export interface CapabilityToggle {
  * （忘了加 browser 的筛选条件）都会表现为「那条会话在哪个列表里都看不见」，
  * 这种 bug 没有任何报错。联合类型让漏改在 tsc 阶段就暴露。
  *
- * browser=手动「对这一页提问」产生的浏览器会话；browser-automation=网页 Agent
- * 自动操作产生的会话，两者都归「浏览器」页，但分两组展示、可分别折叠。
+ * browser=手动「对这一页提问」产生的浏览器会话，归「浏览器」页。
  */
-export type SessionKind = "chat" | "task" | "browser" | "browser-automation";
+export type SessionKind = "chat" | "task" | "browser";
 
 /** 思考强度：low / high / max（仅思考模式开启时有意义） */
 export type ReasoningEffort = "low" | "high" | "max";

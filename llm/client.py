@@ -614,6 +614,9 @@ class LangChainLLM:
         细分、输出上限那些逻辑都在那边，没必要为附件复制一遍）。
         """
         client = self._direct_client()
+        import time as _t
+
+        t0 = _t.perf_counter()
         resp = await client.chat.completions.create(
             model=self.cfg.model_name,
             messages=self._direct_payload(msgs),
@@ -623,14 +626,49 @@ class LangChainLLM:
         u = getattr(resp, "usage", None)
         if u:
             self.usage.add(u.prompt_tokens or 0, u.completion_tokens or 0)
-        return (resp.choices[0].message.content or "") if resp.choices else ""
+        duration_ms = int((_t.perf_counter() - t0) * 1000)
+        text = (resp.choices[0].message.content or "") if resp.choices else ""
+        # 带附件的一次性路径也必须落用量 + dump，否则「查看详情 / dump」整段缺失
+        # （注释见 _direct_chat_stream）。dump 用原始 langchain msgs（含 SystemMessage），
+        # 不能用 _direct_payload 的纯 dict。裸 OpenAI resp 没有 usage_metadata，
+        # 所以照流式路径合成 usage_metadata 再喂给 _record_usage。
+        try:
+            um: dict = {}
+            if u is not None:
+                um["input_tokens"] = int(getattr(u, "prompt_tokens", 0) or 0)
+                um["output_tokens"] = int(getattr(u, "completion_tokens", 0) or 0)
+            from types import SimpleNamespace
+
+            synth_resp = SimpleNamespace(usage_metadata=um)
+            await self._record_usage(
+                synth_resp,
+                duration_ms=duration_ms,
+                is_stream=False,
+                kind="other",
+                messages=msgs,
+                out_chars=len(text or ""),
+                tool_args_chars=0,
+                resp_text=text or "",
+                tool_args_text="",
+            )
+        except Exception as e:  # noqa: BLE001 记账绝不能影响主流程
+            logger.debug("带附件一次性落盘用量失败: %s", e)
+        return text
 
     async def _direct_chat_stream(self, msgs: list):
         """同上，但流式逐块 yield。与一次性那条分开写，不是为了复用：
 
         Python 的 async generator 不能 ``return value``，混在一个函数里会直接
         SyntaxError。拆开是语言层面的必然，不是风格选择。
+
+        注意：这条路径**必须**在收尾时调一次 ``_record_usage`` 落用量 + 落盘——
+        否则带附件的轮次（网页自动化每步都带截图）既不会写 ``llm_calls`` 行、
+        也不会落 dump 文件，导致「查看详情 / 查看 dump」只剩汇总、看不到这一步。
         """
+        import time as _time
+
+        from types import SimpleNamespace
+
         client = self._direct_client()
         resp = await client.chat.completions.create(
             model=self.cfg.model_name,
@@ -639,16 +677,88 @@ class LangChainLLM:
             **self._output_kwargs(),
             **self._thinking_kwargs(),
         )
+        t0 = _time.perf_counter()
+        ttft_ms = None
+        out_parts: list = []
+        out_chars = 0
+        last_usage = None
+        n_chunks = 0
+        first_chunk = None
+        last_finish = None
         async for chunk in resp:
+            n_chunks += 1
+            if first_chunk is None:
+                first_chunk = chunk
             # usage 可能落在倒数第二个分片（DeepSeek 的已知行为，见 astream_chat）
             u = getattr(chunk, "usage", None)
-            if u:
+            if u is not None:
+                last_usage = u
                 self.usage.add(u.prompt_tokens or 0, u.completion_tokens or 0)
+            # API 层错误（如余额/权限/参数）常以 chunk.error 形式返回，且 content 为空；
+            # 不单独处理就会被下面「content 为空就不 yield」吞掉，表现为「模型返回空」。
+            err = getattr(chunk, "error", None)
+            if err is not None:
+                logger.warning("[AUTOMATION] 带附件流式 chunk 报错: %r", err)
             for choice in chunk.choices or []:
                 delta = getattr(choice, "delta", None)
                 piece = getattr(delta, "content", None) if delta else None
+                fr = getattr(choice, "finish_reason", None)
+                if fr is not None:
+                    last_finish = fr
                 if piece:
+                    if ttft_ms is None:
+                        ttft_ms = int((_time.perf_counter() - t0) * 1000)
+                    out_parts.append(piece)
+                    out_chars += len(piece)
                     yield piece
+        duration_ms = int((_time.perf_counter() - t0) * 1000)
+        if out_chars == 0:
+            logger.warning(
+                "[AUTOMATION] 带附件流式返回空文本！n_chunks=%d finish_reason=%r first_chunk=%r",
+                n_chunks, last_finish, first_chunk,
+            )
+        # 把 OpenAI 的 usage 转成 _extract_usage 认的 usage_metadata，再落盘 + 记账。
+        um: dict = {}
+        if last_usage is not None:
+            um["input_tokens"] = int(getattr(last_usage, "prompt_tokens", 0) or 0)
+            um["output_tokens"] = int(getattr(last_usage, "completion_tokens", 0) or 0)
+            ptd = getattr(last_usage, "prompt_tokens_details", None)
+            if ptd is not None:
+                cr = getattr(ptd, "cache_read", None) or getattr(ptd, "cached_tokens", None)
+                if cr is not None:
+                    um["input_token_details"] = {"cache_read": int(cr)}
+            ctd = getattr(last_usage, "completion_tokens_details", None)
+            if ctd is not None:
+                rs = getattr(ctd, "reasoning_tokens", None)
+                if rs is not None:
+                    um["output_token_details"] = {"reasoning": int(rs)}
+            # DeepSeek 扁平字段兜底
+            hit = getattr(last_usage, "prompt_cache_hit_tokens", None)
+            if hit is not None:
+                um.setdefault("input_token_details", {})["cache_read"] = int(hit)
+        synth_resp = SimpleNamespace(usage_metadata=um)
+        try:
+            await self._record_usage(
+                synth_resp,
+                duration_ms=duration_ms,
+                ttft_ms=ttft_ms if ttft_ms is not None else duration_ms,
+                is_stream=True,
+                kind="other",
+                # 注意：dump 必须吃**原始 langchain msgs**（含 SystemMessage 实例），
+                # 不能用 self._direct_payload(msgs)——那是喂给 API 的纯 dict（role 是
+                # 字符串、SystemMessage 被展平成 {"role":"system"}），dump_llm_call 的
+                # _system_of 只认 SystemMessage 实例，吃 dict 会得到空 system；且消息
+                # 角色也会错乱。网页 Agent 每步都带截图附件走这条直连路径，所以只有
+                # 它的 dump 会变成「system + messages 全空」，普通对话（langchain 流式
+                # 路径）不受影响。API 调用那边仍用 _direct_payload(msgs)（见上）。
+                messages=msgs,
+                out_chars=out_chars,
+                tool_args_chars=0,
+                resp_text="".join(out_parts),
+                tool_args_text="",
+            )
+        except Exception as e:  # noqa: BLE001 记账绝不能影响主流程
+            logger.debug("带附件流式落盘用量失败: %s", e)
 
     async def chat(self, messages: list[dict], system: str = "") -> str:
         t0 = time.perf_counter()

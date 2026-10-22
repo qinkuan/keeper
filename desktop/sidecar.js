@@ -102,7 +102,7 @@ function waitHealthy(port, timeoutMs) {
   });
 }
 
-async function startSidecar({ onLog, cdpPort } = {}) {
+async function startSidecar({ onLog } = {}) {
   if (state) return state;
   if (pending) return pending;
 
@@ -129,14 +129,6 @@ async function startSidecar({ onLog, cdpPort } = {}) {
           PORT: String(port),
           // 内核据此启用入站认证（见 keeper/api/auth.py）
           KEEPER_TOKEN: token,
-          /*
-           * 内置浏览器的 CDP 端口。内核靠它用 Playwright **连上桌面壳已经在跑的
-           * 那个浏览器**（desktop/main.js 里 appendSwitch 的同一个端口），而不是自己
-           * 再 launch 一个——同一个 user-data-dir 不能被两个 Chromium 进程同时打开，
-           * 那样会把 cookie 库写坏。
-           * 命令行形态（./start_keeper.sh）没有这个变量，抓取接口会明确回"不可用"。
-           */
-          KEEPER_CDP_PORT: cdpPort ? String(cdpPort) : '',
           /*
            * 内核日志落盘。stdio 是 pipe，全靠 onLog 转给窗口上的日志面板——而面板
            * 只在窗口活着时才有。浏览器僵死恰恰是最需要日志的时候，那次排查就是因为

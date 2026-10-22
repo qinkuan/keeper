@@ -32,7 +32,7 @@ export function Modal({
           className={cn(
             /* macOS 的模态遮罩很淡（约 25%）且带一层模糊：模糊把背后的界面
                "推远"，比单纯压暗更像系统弹窗，弹窗自身也显得更靠前 */
-            "fixed inset-0 z-[1500] bg-black/25 backdrop-blur-[3px] dark:bg-black/50",
+            "fixed inset-0 z-[2100] bg-black/25 backdrop-blur-[3px] dark:bg-black/50",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0"
           )}
@@ -40,7 +40,7 @@ export function Modal({
         <Dialog.Content
           style={{ width }}
           className={cn(
-            "fixed left-1/2 top-1/2 z-[1600] flex max-h-[88vh] max-w-[94vw] -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-[2200] flex max-h-[88vh] max-w-[94vw] -translate-x-1/2 -translate-y-1/2",
             /* 标题栏用灰底，与内容区白底分开——macOS 的 sheet / alert 就是这个结构 */
             "flex-col overflow-hidden rounded-float border border-line-soft bg-panel shadow-pop outline-none",
             "duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out",

@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from sqlalchemy import delete, func, select, update
@@ -49,8 +52,6 @@ SESSION_STATUS_DELETED = "deleted"
 #   chat    普通会话，出现在「对话」页
 #   task    任务绑定会话，一个任务一条（见 chat/api.py 的 create_task）
 #   browser 浏览器会话，出现在「浏览器」页
-#   browser-automation 网页 Agent 自动操作产生的会话，独立于浮球「浏览器」会话，
-#       不出现在浮球会话列表中
 #
 # 为什么是并列而不是「会话 / 任务」两级下再挂一层：这几者在**列表里互斥**
 # （浏览器页不该看见普通会话，任务视图也不该看见它），所以按值筛比按层级筛更简单，
@@ -61,10 +62,9 @@ SESSION_STATUS_DELETED = "deleted"
 SESSION_KIND_CHAT = "chat"
 SESSION_KIND_TASK = "task"
 SESSION_KIND_BROWSER = "browser"
-SESSION_KIND_BROWSER_AUTOMATION = "browser-automation"
 # 子 agent（delegatee）的子会话：内部成本归集用，不进任何用户的会话列表
 SESSION_KIND_DELEGATEE = "delegatee"
-SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER, SESSION_KIND_BROWSER_AUTOMATION)
+SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER)
 
 # 浮球的默认会话标记（chat_sessions.ball_key 的取值）。
 #
@@ -154,6 +154,7 @@ from .context import (
     set_memory_day,
     set_message_id,
     set_session_id,
+    set_session_kind,
     set_thinking,
     set_workspace,
 )
@@ -236,6 +237,8 @@ async def resolve_thinking(session_id: Optional[str]) -> ThinkingCtx:
     except Exception as e:  # noqa: BLE001 取不到不该挡住本轮对话
         logger.debug("解析会话 %s 的思考模式失败，按关闭处理: %s", session_id, e)
     return ThinkingCtx(enabled=False, effort="low")
+
+
 
 
 async def resolve_mode(session_id: Optional[str]) -> str:
@@ -761,6 +764,7 @@ class ChatService:
         # 会读它来记账。用 ContextVar 而非闭包，是因为工具表是多会话共享的，
         # 闭包捕获会在并发时串台。
         set_session_id(session_id)
+        set_session_kind(self.session_kind)
         # 记忆作用域与 session_id 成对设置：recall / read 按天共享记忆，光有
         # session_id 定位不到"今天"那个目录（见 resolve_memory_day）
         set_memory_day(await resolve_memory_day(session_id))
@@ -1006,6 +1010,7 @@ class ChatService:
 
         session_id = await self._ensure_session()
         set_session_id(session_id)
+        set_session_kind(self.session_kind)
         set_memory_day(await resolve_memory_day(session_id))
         set_agent(self.agent_id, getattr(self.agent, "name", None))
         set_workspace(await resolve_workspace(self.agent, session_id))

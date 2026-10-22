@@ -192,11 +192,7 @@ export default function App() {
   });
   const online = !healthQ.isLoading && !healthQ.isError && healthQ.data?.ok;
   const inChat = route.page === "chat" && !!route.agentId;
-  /* 浏览器页：只列浏览器类别的会话。没有核心 agent 时不挂 ChatPage —— 会话要发消息
-     就得有 agent（会话从第一句话才开始建），这时页面退化成纯「扩展接入」面板，
-     仍然有意义的指引不该因为 agent 没装载好就一起看不见。 */
   const inBrowser = route.page === "browser";
-  const showBrowserChat = inBrowser && !!coreAgentId;
 
   /** 侧栏导航条目 */
   const NavItem = ({
@@ -584,13 +580,29 @@ export default function App() {
               ChatPage，只是锁死类别为 browser。见 components/BrowserConnectPanel.tsx
               顶部那段注释，它解释的是为什么必须由用户手动填一次 token。 */}
           {inBrowser && (
-            <div className="flex h-full animate-fade-up flex-col">
-              <BrowserConnectPanel />
-              {showBrowserChat && (
-                <div className="min-h-0 flex-1">
-                  <ChatPage agentId={coreAgentId} sessionKind="browser" />
+            <div className="flex h-full flex-col">
+              {/* 接入面板未连接时展开成一大块表单。限制其最大高度并内部滚动，
+                  否则它会把下方对话区（flex-1 min-h-0）压到接近 0 高，ChatPage 内容
+                  向下溢出被 overflow-hidden 裁掉，输入框（在底部）就被切掉一半——
+                  之前「窗口不协调、输入框下半部分没了」的根因。 */}
+              <div className="min-h-0 shrink-0 overflow-y-auto" style={{ maxHeight: "44vh" }}>
+                <BrowserConnectPanel />
+              </div>
+              {/* 下方只放对话区：浏览器菜单不内嵌网页视图（避免再叠一块原生视图）。 */}
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="flex h-9 shrink-0 items-center border-b border-line-soft px-3 text-[13px] font-medium text-ink-strong">
+                  对话
                 </div>
-              )}
+                <div className="min-h-0 flex-1">
+                  {coreAgentId ? (
+                    <ChatPage agentId={coreAgentId} sessionKind="browser" />
+                  ) : (
+                    <div className="flex h-full items-center justify-center px-4 text-center text-[12px] leading-5 text-ink-muted">
+                      请先在「智能体」页装载一个智能体，才能开始对话
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           {route.page === "trash" && (

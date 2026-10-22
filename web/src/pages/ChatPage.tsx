@@ -441,18 +441,10 @@ export default function ChatPage({
    * 重启成风暴），所以只能靠 ref 读到实时值。
    */
   const localStreamingRef = useRef(false);
-  /* 浏览器页的两个子类别：手动「对这一页提问」的 browser，与网页 Agent 自动操作的
-     browser-automation。两者各自成 tab（与「对话」页 chat/task 两个 tab 同款样式），
-     各自记住上次看的是哪条会话。
-     ⚠ 这两个声明必须放在下面的 remembered 之前：remembered 会在 useState 惰性初始化
-     时读 effKind，而 const 有暂时性死区（TDZ）——声明在后面，首屏渲染调用 remembered()
-     就会抛 "Cannot access 'effKind' before initialization"，整个 React 树崩掉变白屏
-     （tsc/madge 都查不出这种错，只有运行时首屏才暴露）。 */
-  const [browserTab, setBrowserTab] =
-    useState<"browser" | "browser-automation">("browser");
-  /* 当前生效的会话类别：浏览器页随子 tab 切换，其余页恒为 chat（task 视图走另一条
-     会话通道，不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
-  const effKind: SessionKind = browserOnly ? browserTab : (sessionKind ?? "chat");
+  /* 浏览器页只有「对这一页提问」的 browser 一种类别（网页 Agent 自动操作已移除）。
+     effKind 随浏览器页锁定为 browser，其余页恒为 chat（task 视图走另一条会话通道，
+     不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
+  const effKind: SessionKind = browserOnly ? "browser" : (sessionKind ?? "chat");
   /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
      只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
   const remembered = () =>
@@ -1249,8 +1241,7 @@ export default function ChatPage({
       try {
         if (mode === "chat") {
           // 关键：任务会话不能顶掉会话视图的会话，回来时按 chatSessionId 恢复。
-          // 浏览器页有 browser / browser-automation 两个子 tab，各自记在按 effKind
-          // 分的 localStorage 桶里——切 tab 互不串，下面优先恢复「当前子类」上次看的。
+          // 浏览器页只有 browser 一种类别，按 effKind 分的 localStorage 桶恢复上次看的。
           const r = await apiSessions(agentId, undefined, 50, 0, effKind);
           if (cancelled) return;
           const ids = new Set((r.sessions || []).map((s) => s.id));
@@ -1290,7 +1281,7 @@ export default function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // sessionKind 一并列入：这个 effect 会按它拉不同的列表，不列的话 prop 变了
     // 不会重跑（目前靠路由切换时组件整体卸载掩盖住了，但那是个隐式约定）。
-  }, [mode, agentId, sessionKind, browserTab]);
+  }, [mode, agentId, sessionKind]);
 
   /**
    * 重新生成：把上一条用户消息重发一遍。
@@ -1442,6 +1433,8 @@ export default function ChatPage({
      * 按 sessionId 落到 A、UI 却按 activeSessionId 显示 B，同一条消息连同它的回答
      * 就同时出现在两个会话里。发消息的目标和气泡的归属必须是同一个。
      */
+    // 发消息目标 = 视图当前所在的会话（activeSessionId）。浏览器页（browser）同样
+    // 走这条：回复沿用当前会话，仅「新对话」后首次发送才新建。
     const targetSid = activeSessionId;
 
     setInput("");
@@ -1477,6 +1470,7 @@ export default function ChatPage({
 
     // 桶 key：用**视图当前显示的**会话（activeSessionId），这样切会话后气泡跟着
     // 视图走；与 stopSend / visibleMsgs 取的是同一个 key，三处不会分叉。
+    // 新会话还没有 id，先落 PENDING_BUCKET，等流里第一帧带真实 session_id 回来再搬。
     // 新会话还没有 id，先落 PENDING_BUCKET，等流里第一帧带真实 session_id 回来再搬。
     let bucket = activeSessionId || PENDING_BUCKET;
     setStreamRuns((prev) => ({
@@ -2240,6 +2234,17 @@ export default function ChatPage({
           drawerOpen && "pointer-events-none opacity-0"
         )}
       >
+        {browserOnly && (
+          <button
+            type="button"
+            onClick={handleNew}
+            title="新对话"
+            className="flex h-8 items-center gap-1.5 rounded-[9px] border border-line-soft bg-panel px-2.5 text-[12.5px] font-medium text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            新对话
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
@@ -2346,21 +2351,9 @@ export default function ChatPage({
                 <span className="text-[13px] font-semibold tracking-[-0.01em] text-ink-strong">
                   会话
                 </span>
-                {/* 类别切换：对话页在 chat/task 间切；浏览器页在 browser（手动提问）/
-                    browser-automation（网页 Agent 自动操作）两个子类别间切。两种都是同一
-                    款 SegmentedControl，样式与「对话」页一致。 */}
-                {browserOnly ? (
-                  <SegmentedControl
-                    value={browserTab}
-                    onChange={(v) =>
-                      setBrowserTab(v as "browser" | "browser-automation")
-                    }
-                    options={[
-                      { label: "浏览器会话", value: "browser" },
-                      { label: "网页 Agent", value: "browser-automation" },
-                    ]}
-                  />
-                ) : (
+                {/* 类别切换：非浏览器页在 chat/task 间切（浏览器页只有 browser 一种，
+                    无需切换）。与「对话」页同款 SegmentedControl。 */}
+                {!browserOnly && (
                   <SegmentedControl
                     value={mode}
                     onChange={(v) => setMode(v as "chat" | "task")}
@@ -2400,11 +2393,11 @@ export default function ChatPage({
               <SessionList
                 agentId={agentId}
                 activeId={sessionId}
-                /* 类别：对话页按 tab 给 chat/task，浏览器页按子 tab 给
-                   browser / browser-automation。必须是显式枚举而不是"非 task 即普通"
-                   ——那样浏览器会话会混进「会话」列表，而它在那条会话的消息并不属于这里。 */
+                /* 类别：对话页按 tab 给 chat/task，浏览器页给 browser。必须是显式枚举
+                   而不是"非 task 即普通"——那样浏览器会话会混进「会话」列表，而它在那条
+                   会话的消息并不属于这里。 */
                 kind={effKind}
-                hideCreate={browserOnly && browserTab === "browser-automation"}
+                hideCreate={false}
                 onSelect={(sid) => {
                   // 任务视图里选的是任务会话，不能顶掉会话视图的选择
                   if (mode === "task") applyTaskSession(sid);

@@ -106,6 +106,12 @@ class SimpleProcess:
                     budget_stopped=True,
                     budget=budget,
                 )
+            # 单趟推理：把这次 LLM 调用标成「第 1 步」，否则可观测里既没 react_step
+            # 行、dump 标签也退化成 other——「查看详情 / dump」就只剩汇总、看不到这一步。
+            from ..chat.context import set_llm_call_kind, set_step_seq
+
+            set_step_seq(1)
+            set_llm_call_kind("react_step")
             parts: List[str] = []
             async for piece in self.llm.astream_chat(
                 self._build_messages(question, file_parts), system=self._system()
