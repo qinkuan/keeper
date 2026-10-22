@@ -115,6 +115,10 @@ class ChatSession(Base):
     # 无循环、无记忆、无 planner）/ ptc=写代码解决问题。会话级、建会话时定，之后沿用
     # （同 user_space_id：新建取前端传入，已有会话读库里绑定）。无 DB CHECK，校验在接口层。
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="normal")
+    # 本会话动态激活的插件名列表（JSON 数组，如 ["excel","pdf"]）——用户在对话里用 `/`
+    # 临时启用「库里有但未 link 给本 agent」的插件，仅对本会话生效（见 plugin/active.py）。
+    # 存会话而非 agent：激活是对话级的；NULL/空 = 未激活（存量行无需回填）。
+    activated_plugins: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow

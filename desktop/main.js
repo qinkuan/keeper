@@ -222,6 +222,9 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('space:write', (_e, root, file, content) =>
     spaceFs.writeFile(root, file, content)
   );
+  ipcMain.handle('space:write-binary', (_e, root, file, base64) =>
+    spaceFs.writeBinary(root, file, base64)
+  );
   ipcMain.handle('space:mkdir', (_e, root, parent, name) =>
     spaceFs.mkdir(root, parent, name)
   );

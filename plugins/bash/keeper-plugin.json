@@ -1,0 +1,41 @@
+{
+  "name": "bash",
+  "version": "0.1.0",
+  "description": "执行 shell 命令（bash），供写代码 agent 自运行、跑测试、检查输入输出。",
+  "envDependencies": [
+    {
+      "kind": "python",
+      "minVersion": "3.10"
+    }
+  ],
+  "skill": "skills/SKILL.md",
+  "bin": [
+    {
+      "command": "${PLUGIN_ROOT}/bin/bash_server",
+      "tools": [
+        {
+          "name": "run",
+          "description": "执行一条 shell 命令，返回 stdout / stderr / returncode。用于运行代码、跑测试、检查输入输出。\n\n【产物】用本工具生成的文件（cat > a、npm run build 等）不会自动变成用户可见的卡片——生成后用 fs.deliver 交出去，否则用户只听到「文件已生成」却点不开。\n\n【路径】命令在当前目录下执行，直接用相对路径即可（如 node game.js、ls -la）。不要 cd 切目录。",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "要执行的单条 shell 命令。直接用相对路径定位目标，不要 cd 切目录。（必填）"
+              },
+              "timeout": {
+                "type": "integer",
+                "description": "超时秒数，默认 60。"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "mutating": true,
+          "requires_workspace": true
+        }
+      ]
+    }
+  ]
+}

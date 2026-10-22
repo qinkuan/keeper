@@ -22,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shlex
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -120,10 +122,21 @@ async def call_subprocess_tool(
     argv = build_argv(command, extra_argv)
     logger.info("插件可执行文件调用：%s (cwd=%s)", " ".join(argv), cwd)
 
+    # 让子进程用上 keeper 自己的虚拟环境：bin 脚本普遍写 `#!/usr/bin/env python3`，
+    # 而 keeper 跑在 .venv 里（openpyxl 等依赖装在那）。不把 venv 的 bin 提到 PATH
+    # 最前，子进程的 python3 会解析到系统 python3——缺依赖，插件「装了却跑不了」。
+    venv_bin = os.path.dirname(sys.executable)
+    env = dict(os.environ)
+    if venv_bin:
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+        if sys.prefix != sys.base_prefix:
+            env["VIRTUAL_ENV"] = sys.prefix
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd) if cwd else None,
+            env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

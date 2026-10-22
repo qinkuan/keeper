@@ -1,0 +1,37 @@
+{
+  "name": "excel",
+  "version": "1.0.0",
+  "description": "读取与编辑 Excel(.xlsx)：读单元格、写区域/单元格/公式、追加行、增删改工作表",
+  "skill": "skills/SKILL.md",
+  "bin": [
+    {
+      "name": "excel",
+      "summary": "Excel(.xlsx) 读取与编辑：读表、写单元格/区域/公式、追加行、增删改工作表",
+      "command": "${PLUGIN_ROOT}/bin/excel",
+      "timeout": 120,
+      "tools": [
+        {
+          "name": "edit",
+          "description": "读取 / 编辑 Excel(.xlsx)。先 read 看现状再改更稳；openpyxl 往返保存可能丢失图表/图片等少数高级特性（纯数据/公式无碍）。全名 excel__edit",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": ".xlsx 路径（工作区内相对路径，或 @user/@session 前缀）" },
+              "op": { "type": "string", "enum": ["read", "write", "append", "add_sheet", "delete_sheet", "rename_sheet"], "description": "操作类型" },
+              "sheet": { "type": "string", "description": "工作表名；省略取第一个；add_sheet 时为新表名" },
+              "range": { "type": "string", "description": "read/write 的区域，如 A1 或 A1:C10" },
+              "values": { "type": "array", "description": "write 的二维数组 / append 的一维数组" },
+              "cell": { "type": "string", "description": "单单元格目标，如 B2" },
+              "value": { "description": "单值（配合 cell），可为数字或字符串" },
+              "formula": { "type": "string", "description": "公式，以 = 开头（配合 cell），如 =SUM(A1:A10)" },
+              "new_name": { "type": "string", "description": "rename_sheet 的新表名" }
+            },
+            "required": ["path", "op"]
+          },
+          "mutating": true,
+          "requires_workspace": true
+        }
+      ]
+    }
+  ]
+}

@@ -127,6 +127,15 @@ async function writeFile(root, file, content) {
   return { ok: true, path: f, size: st.size, mtime: st.mtimeMs };
 }
 
+/** 写二进制文件（xlsx 等表格预览的「保存到原文件」用）。base64 进，落盘为字节。 */
+async function writeBinary(root, file, base64) {
+  const f = resolveSpacePath(root, file);
+  await fsp.mkdir(path.dirname(f), { recursive: true });
+  await fsp.writeFile(f, Buffer.from(base64 || '', 'base64'));
+  const st = await fsp.stat(f);
+  return { ok: true, path: f, size: st.size, mtime: st.mtimeMs };
+}
+
 async function mkdir(root, parent, name) {
   const p = resolveSpacePath(root, path.join(parent || '', name));
   await fsp.mkdir(p, { recursive: true });
@@ -218,6 +227,7 @@ module.exports = {
   readFile,
   readBinary,
   writeFile,
+  writeBinary,
   mkdir,
   rename,
   remove,

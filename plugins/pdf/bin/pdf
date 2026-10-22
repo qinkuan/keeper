@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""pdf 插件的可执行文件：读取 / 编辑 PDF（keeper 的 bin 组件协议）。
+
+协议：stdin 一行 JSON {"tool":"edit","args":{...},"context":{"workspace","read_only","agent_space"}}；
+stdout 最后一行 JSON {"ok":true,"result":...} 或 {"ok":false,"error":...}。
+业务级问题（越界/只读/缺参/文件不存在）走 ok:true + result；意外异常才 ok:false。
+
+依赖 pypdf，装在 keeper 的 .venv；子进程由 keeper 以 venv 的 PATH 拉起，
+`#!/usr/bin/env python3` 即解析到带依赖的解释器。
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+MAX_TEXT = 20000
+
+
+class Biz(Exception):
+    """业务级问题：作为正常 result 回给模型，不当成崩溃。"""
+
+
+def _resolve(ctx: dict, rel: str) -> Path:
+    ws = (ctx.get("workspace") or "").strip()
+    ag = (ctx.get("agent_space") or "").strip()
+    s = (rel or "").strip()
+    if s == "@tmp" or s.startswith("@tmp/") or s.startswith("@session/"):
+        base = ag
+        if s.startswith("@session/"):
+            s = s[len("@session/"):]
+        elif s.startswith("@tmp/"):
+            s = s[len("@tmp/"):]
+        label = "会话工作区"
+    else:
+        if s.startswith("@user/"):
+            s = s[len("@user/"):]
+        base = ws
+        label = "用户工作区"
+    if not base:
+        raise Biz(f"{label}不可用（没有工作区上下文）")
+    b = Path(base).resolve()
+    s = s.lstrip("/")
+    if not s:
+        raise Biz("空路径")
+    p = Path(s)
+    target = p.resolve() if p.is_absolute() else (b / s).resolve()
+    if not (target == b or b in target.parents):
+        raise Biz(f"路径越界（不在{label}内）：{rel}")
+    return target
+
+
+def _parse_pages(spec, n: int):
+    if spec is None:
+        return list(range(n))
+    if isinstance(spec, int):
+        spec = str(spec)
+    idx = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            for i in range(int(a), int(b) + 1):
+                idx.add(i - 1)
+        else:
+            idx.add(int(part) - 1)
+    return sorted(i for i in idx if 0 <= i < n)
+
+
+def handle(args: dict, ctx: dict) -> str:
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except Exception as e:  # noqa: BLE001
+        raise Biz(f"未安装 pypdf：{e}")
+
+    rel = (args.get("path") or "").strip()
+    op = (args.get("op") or "").strip().lower()
+    if not rel:
+        raise Biz("[缺少 path] 请给出工作区内的 .pdf 文件路径")
+    if not op:
+        raise Biz("[缺少 op] op：info / extract_text / merge / split / rotate / delete_pages")
+    p = _resolve(ctx, rel)
+    ro = bool(ctx.get("read_only"))
+
+    if not p.exists():
+        raise Biz(f"[文件不存在] {rel}")
+
+    if op == "info":
+        r = PdfReader(str(p))
+        meta = r.metadata or {}
+        title = meta.get("/Title", "") if hasattr(meta, "get") else ""
+        return f"{rel}｜共 {len(r.pages)} 页｜标题：{title or '（无）'}"
+
+    if op == "extract_text":
+        r = PdfReader(str(p))
+        pages = _parse_pages(args.get("pages"), len(r.pages))
+        limit = int(args.get("max_chars") or MAX_TEXT)
+        buf, total = [], 0
+        for i in pages:
+            t = r.pages[i].extract_text() or ""
+            buf.append(f"[第 {i + 1} 页]\n{t}")
+            total += len(t)
+            if total > limit:
+                break
+        text = "\n".join(buf)
+        if len(text) > limit:
+            text = text[:limit] + "\n…（已截断）"
+        return text or "（未抽取到文字，可能是扫描件/图片型 PDF）"
+
+    if ro:
+        raise Biz("[只读工作区] 当前会话绑定的工作区是只读的，不能修改文件")
+
+    def _out(default_suffix: str) -> Path:
+        o = (args.get("output") or "").strip()
+        if o:
+            return _resolve(ctx, o)
+        return p.with_name(p.stem + default_suffix + p.suffix)
+
+    if op == "merge":
+        inputs = args.get("inputs")
+        if not isinstance(inputs, (list, tuple)) or not inputs:
+            raise Biz("[缺少 inputs] merge 需要其它 pdf 路径数组，如 [\"a.pdf\",\"b.pdf\"]")
+        w = PdfWriter()
+        srcs = [p] + [_resolve(ctx, str(it)) for it in inputs]
+        for s in srcs:
+            w.append(str(s))
+        out = _out("_merged")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as fh:
+            w.write(fh)
+        return f"已合并 {len(srcs)} 个 PDF（共 {len(w.pages)} 页）→ {out.name}"
+
+    if op == "split":
+        r = PdfReader(str(p))
+        pages = _parse_pages(args.get("pages"), len(r.pages))
+        if not pages:
+            raise Biz("[无有效页] pages 取值无效")
+        w = PdfWriter()
+        for i in pages:
+            w.add_page(r.pages[i])
+        out = _out("_pages")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as fh:
+            w.write(fh)
+        shown = ",".join(str(i + 1) for i in pages)
+        return f"已抽出第 [{shown}] 页（共 {len(pages)} 页）→ {out.name}"
+
+    if op == "rotate":
+        r = PdfReader(str(p))
+        angle = int(args.get("angle") or 90)
+        if angle not in (90, 180, 270):
+            raise Biz("[angle 无效] 仅支持 90 / 180 / 270")
+        pages = _parse_pages(args.get("pages"), len(r.pages))
+        w = PdfWriter()
+        for i, page in enumerate(r.pages):
+            if i in pages:
+                page.rotate(angle)
+            w.add_page(page)
+        out = _out("_rotated")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as fh:
+            w.write(fh)
+        shown = ",".join(str(i + 1) for i in pages)
+        return f"已把第 [{shown}] 页旋转 {angle}° → {out.name}"
+
+    if op == "delete_pages":
+        r = PdfReader(str(p))
+        pages = set(_parse_pages(args.get("pages"), len(r.pages)))
+        w = PdfWriter()
+        for i, page in enumerate(r.pages):
+            if i not in pages:
+                w.add_page(page)
+        out = _out("_deleted")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as fh:
+            w.write(fh)
+        shown = ",".join(str(i + 1) for i in sorted(pages))
+        return f"已删除第 [{shown}] 页（剩 {len(w.pages)} 页）→ {out.name}"
+
+    raise Biz(f"[未知 op] {op}")
+
+
+def main() -> None:
+    line = sys.stdin.readline()
+    try:
+        req = json.loads(line)
+    except Exception as e:  # noqa: BLE001
+        sys.stdout.write(json.dumps({"ok": False, "error": f"stdin 不是合法 JSON：{e}"}) + "\n")
+        return
+    tool = req.get("tool")
+    args = req.get("args") or {}
+    ctx = req.get("context") or {}
+    if tool != "edit":
+        sys.stdout.write(json.dumps({"ok": False, "error": f"未知工具 {tool}（本插件只提供 edit）"}) + "\n")
+        return
+    try:
+        result = handle(args, ctx)
+        sys.stdout.write(json.dumps({"ok": True, "result": result}, ensure_ascii=False) + "\n")
+    except Biz as e:
+        sys.stdout.write(json.dumps({"ok": True, "result": str(e)}, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        sys.stdout.write(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}) + "\n")
+
+
+if __name__ == "__main__":
+    main()

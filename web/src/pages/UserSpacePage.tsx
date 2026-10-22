@@ -360,11 +360,50 @@ function FileViewer({
     return buf.buffer;
   };
 
+  // 表格编辑「保存到原文件」：csv/tsv 是文本，走 space.write；xlsx/xls 是二进制，
+  // 转 base64 走 space.writeBinary（桌面壳落盘为字节）。
+  const persistSheet = async (p: {
+    text?: string;
+    binary?: ArrayBuffer;
+  }) => {
+    if (p.text !== undefined) {
+      await space.write(path, p.text);
+      return;
+    }
+    if (p.binary) {
+      const bytes = new Uint8Array(p.binary);
+      // 分块拼 base64：大文件一次性 fromCharCode.apply 会爆调用栈
+      const CHUNK = 0x8000;
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(
+          null,
+          Array.from(bytes.subarray(i, i + CHUNK))
+        );
+      }
+      await space.writeBinary(path, btoa(bin));
+    }
+  };
+
   // 我的空间专属内联预览（走二进制字节，故放在通用分派之前拦截）：
   //   表格 xlsx/xls/csv/tsv → SheetViewer；PDF → PdfViewer。
   // 只读预览：读取失败（过大 / 解析不了）时给出下载兜底，不白屏。
   if (isSheetName(f.name)) {
-    return <SheetViewer name={f.name} loadBytes={loadBytes} />;
+    return (
+      <SheetViewer
+        name={f.name}
+        loadBytes={loadBytes}
+        persist={persistSheet}
+        onQuoteSelection={(range) => {
+          // 把「文件 + 表格区域」挂进聊天输入框（ChatPage 经 ADD_QUOTE_EVENT 收）。
+          // 描述只要路径 + 区域就够，AI 自己去读这个文件的哪一片。
+          addQuoteToChat({
+            path,
+            text: `表格区域 ${range}`,
+          });
+        }}
+      />
+    );
   }
   if (kind === "pdf") {
     return <PdfViewer name={f.name} loadBytes={loadBytes} />;

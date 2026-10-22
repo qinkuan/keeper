@@ -70,6 +70,13 @@ import type {
   ReasoningEffort,
   RunMode,
 } from "../api/types";
+import {
+  apiAvailablePlugins,
+  apiActivatedPlugins,
+  apiActivatePlugin,
+  apiDeactivatePlugin,
+} from "../api/client";
+import PluginPicker, { type AvailPlugin } from "../components/PluginPicker";
 
 /*
  * 任务视图按需加载：TaskPage 有 49KB 源码，而且它静态引入了 ArtifactCard，
@@ -187,6 +194,40 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     ? filterMentionItems(mentionCfg.items, mention.query)
     : [];
 
+  // 输入框 `/` 唤出「未加载插件」：动态把库里有但未 link 给本 agent 的插件激活到会话
+  // （激活态存服务端 ChatSession.activated_plugins，仅本对话有效）。
+  const [slash, setSlash] = useState<{ start: number; query: string } | null>(
+    null
+  );
+  const [activeSlash, setActiveSlash] = useState(0);
+  const [availablePlugins, setAvailablePlugins] = useState<AvailPlugin[]>([]);
+  const [activatedPlugins, setActivatedPlugins] = useState<string[]>([]);
+  // 候选 = 可动态加载 - 已激活，再按 query 过滤名称/描述
+  const filteredSlashPlugins = slash
+    ? availablePlugins
+        .filter((p) => !activatedPlugins.includes(p.name))
+        .filter((p) => {
+          const q = slash.query.trim().toLowerCase();
+          if (!q) return true;
+          return (
+            p.name.toLowerCase().includes(q) ||
+            (p.description || "").toLowerCase().includes(q)
+          );
+        })
+    : [];
+  // 进页面拉一次「可动态加载」清单（agent 级，与会话无关）
+  useEffect(() => {
+    let dead = false;
+    apiAvailablePlugins(agentId)
+      .then((r) => {
+        if (!dead) setAvailablePlugins((r.plugins || []) as AvailPlugin[]);
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [agentId]);
+
   // 把输入串里「@标签」且标签命中设置项的子串识别为 mention（用于高亮 + 发送时展开）。
   const computeMentions = (
     text: string
@@ -258,15 +299,32 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     if (m) {
       setMention({ start: caret - m[2].length - 1, query: m[2] });
       setActiveMention(0);
+      setSlash(null); // `@` 与 `/` 互斥
     } else {
       setMention(null);
+    }
+  };
+
+  /** 光标前出现 `/查询` 时唤出「未加载插件」选择器。`/` 前是行首或空白才触发，
+   *  避免误伤 URL / 路径里的斜杠（如 http:// 的 `//` 前是 `:`，不触发）。 */
+  const updateSlash = (val: string, caret: number) => {
+    const before = val.slice(0, caret);
+    const m = before.match(/(^|\s)\/([^\s/]*)$/);
+    if (m) {
+      setSlash({ start: caret - m[2].length - 1, query: m[2] });
+      setActiveSlash(0);
+      setMention(null);
+    } else {
+      setSlash(null);
     }
   };
 
   const onInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setInput(val);
-    updateMention(val, e.target.selectionStart ?? val.length);
+    const caret = e.target.selectionStart ?? val.length;
+    updateMention(val, caret);
+    updateSlash(val, caret);
   };
 
   // 选中后插入「@标签」原文（不在此展开）：输入框里看到的是高亮 chip，
@@ -287,6 +345,24 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       el?.focus();
       el?.setSelectionRange(pos, pos);
     });
+  };
+
+  // 选中「未加载插件」→ 从输入框摘掉 `/查询` 片段，并把插件激活到当前会话（服务端持久化，
+  // 仅本对话有效）。与 `@` 不同：插件不留在正文里，而是变成输入框上方的 chip。
+  const selectPlugin = (p: AvailPlugin) => {
+    if (slash) {
+      const el = textareaRef.current;
+      const caret = el?.selectionStart ?? input.length;
+      setInput(input.slice(0, slash.start) + input.slice(caret));
+    }
+    setSlash(null);
+    if (!activeSessionId) {
+      toast.error("请先发一条消息创建会话后，再用 / 启用插件");
+      return;
+    }
+    apiActivatePlugin(activeSessionId, p.name)
+      .then((r) => setActivatedPlugins(r.plugins || []))
+      .catch((e) => toast.error(e?.message || "启用插件失败"));
   };
 
 
@@ -344,6 +420,30 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             return;
           }
         }
+      }
+    }
+    // `/` 插件选择器打开时：上下选择、Enter/Tab 选中、Esc 关闭（吞掉 Enter 避免误发）。
+    if (slash && filteredSlashPlugins.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActiveSlash((i) => Math.min(i + 1, filteredSlashPlugins.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActiveSlash((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const pick = filteredSlashPlugins[activeSlash];
+        if (pick) selectPlugin(pick);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlash(null);
+        return;
       }
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -429,6 +529,22 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     mode === "task" ? sessionId : chatSessionId || sessionId;
   /** 视图正在看的那个桶。与 streamRuns 取同一个 key，两套状态因此不会分叉。 */
   const curBucket = activeSessionId || PENDING_BUCKET;
+  // 会话变了就拉「本会话已激活的插件」——输入框上方 chip 的数据源。
+  useEffect(() => {
+    let dead = false;
+    if (!activeSessionId) {
+      setActivatedPlugins([]);
+      return;
+    }
+    apiActivatedPlugins(activeSessionId)
+      .then((r) => {
+        if (!dead) setActivatedPlugins(r.plugins || []);
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [agentId, activeSessionId]);
   /** 当前会话的消息列表；该会话还没加载过时显示欢迎语 */
   const msgs = msgsBySession[curBucket] ?? EMPTY_WITH_WELCOME;
   /**
@@ -1812,6 +1928,37 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(66,133,244,0.4)]"
             )}
           >
+            {/* 本会话动态启用的插件（`/` 激活，服务端持久化，仅本对话有效）：
+                chip 展示，✕ 停用。和附件/引用一样属于"这一轮的输入配置"。 */}
+            {activatedPlugins.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {activatedPlugins.map((name) => (
+                  <div
+                    key={name}
+                    className="group flex max-w-[220px] items-center gap-1.5 rounded-full border border-brand/20 bg-brand/10 py-1 pl-1.5 pr-1 text-[12px] text-ink"
+                    title={`已启用插件 ${name}（仅本对话生效）`}
+                  >
+                    <span className="shrink-0 rounded-md bg-brand/12 px-1.5 text-[11px] font-medium text-brand">
+                      /{name}
+                    </span>
+                    <button
+                      type="button"
+                      title="停用"
+                      onClick={() => {
+                        if (!activeSessionId) return;
+                        apiDeactivatePlugin(activeSessionId, name)
+                          .then((r) => setActivatedPlugins(r.plugins || []))
+                          .catch(() => {});
+                      }}
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/10 hover:text-ink dark:hover:bg-white/20"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* 待发送的附件：一排小卡片，缩略图 + 名称 + 删除。
                 放在输入框**里面**（浮块内最上一行）而不是外面：它属于这一轮的
                 输入，跟文字挨着才看得出"我要发的是这些"。放外面会变成另一块
@@ -1855,7 +2002,10 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                   >
                     <FileText className="h-3.5 w-3.5 shrink-0 text-brand" />
                     <span className="truncate">
-                      {qq.path.split(/[\\/]/).pop()} · 引用 {qq.text.length} 字
+                      {qq.path.split(/[\\/]/).pop()} ·{" "}
+                      {qq.text.length <= 20
+                        ? qq.text
+                        : `引用 ${qq.text.length} 字`}
                     </span>
                     <button
                       type="button"
@@ -1881,6 +2031,23 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                   onSelect={selectMention}
                   onHover={setActiveMention}
                 />
+              </div>
+            )}
+            {/* `/` 未加载插件弹出：与 @ 同款位置（输入框上方）。无会话时给一句提示。 */}
+            {slash && (
+              <div className="absolute bottom-full left-4 right-4 z-50 mb-2">
+                {activeSessionId ? (
+                  <PluginPicker
+                    items={filteredSlashPlugins}
+                    activeIndex={activeSlash}
+                    onSelect={selectPlugin}
+                    onHover={setActiveSlash}
+                  />
+                ) : (
+                  <div className="w-[min(440px,90vw)] rounded-xl border border-line-soft bg-panel px-3 py-2 text-[12.5px] text-ink-muted shadow-[0_12px_36px_-10px_rgba(0,0,0,0.28)]">
+                    先发一条消息创建会话后，即可用 / 启用插件
+                  </div>
+                )}
               </div>
             )}
 

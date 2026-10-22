@@ -278,6 +278,26 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* ===== 表格网格（「我的空间」Excel 预览：SheetGrid / SheetViewer）=====
+ *
+ * 本项目关了 Tailwind preflight（见 tailwind.config.js），UA 不管这三件事：
+ * border-width 初始值是 medium(3px)、border-style 初始是 none、box-sizing 初始是
+ * content-box。于是网格里 border-b/r 只设宽度和颜色却不渲染；而一旦只补
+ * border-style:solid，没写边框类名的元素（span / 行容器）立刻顶起 3px 默认宽度的
+ * 框——文字被方框包住、行间出现粗黑条，就是这么来的。
+ *
+ * 这里在 .kp-sheet 作用域内补回 preflight 的基线三件套，并用 :where() 把特异性
+ * 压到 0：组件里的 border-b/r、border-line-soft 等工具类永远压得住这条基线，
+ * 只有没写边框类名的元素才吃到"宽 0 + style solid"= 无边框。
+ * **只影响这个类名下的子树，不碰全局。**
+ *
+ * 用法：SheetGrid / SheetViewer 的根节点加 kp-sheet。 */
+:where(.kp-sheet, .kp-sheet *) {
+  border-width: 0;
+  border-style: solid;
+  box-sizing: border-box;
+}
+
 /* 交互元素统一缓动 */
 a,
 button {

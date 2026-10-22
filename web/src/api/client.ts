@@ -1897,6 +1897,35 @@ export function apiListPlugins() {
 
 }
 
+/** 库里有、未 link 给该 agent、且支持动态加载(bin 类)的插件——对话里 `/` 选择器数据源。 */
+export function apiAvailablePlugins(agentId: string) {
+  return apiGet<{ plugins: PluginLibraryResp["plugins"] }>(
+    `/manage/plugins/available?agent_id=${encodeURIComponent(agentId)}`
+  );
+}
+
+/** 本会话当前激活的插件名列表（输入框上方 chip 用它渲染）。 */
+export function apiActivatedPlugins(sessionId: string) {
+  return apiGet<{ plugins: string[] }>(
+    `/manage/plugins/sessions/${sessionId}/activated`
+  );
+}
+
+/** 激活一个插件到会话，返回激活后的名单。 */
+export function apiActivatePlugin(sessionId: string, name: string) {
+  return apiPost<{ plugins: string[] }>(
+    `/manage/plugins/sessions/${sessionId}/activated`,
+    { name }
+  );
+}
+
+/** 从会话停用一个插件，返回剩余名单。 */
+export function apiDeactivatePlugin(sessionId: string, name: string) {
+  return apiDelete<{ plugins: string[] }>(
+    `/manage/plugins/sessions/${sessionId}/activated/${encodeURIComponent(name)}`
+  );
+}
+
 
 /** 创建本地 agent：落库 + 落插件绑定 + 建插件链接；环境不满足会被后端拒绝（409）。 */
 

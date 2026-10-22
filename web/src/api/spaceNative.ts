@@ -23,6 +23,8 @@ export interface SpaceApi {
   readBinary(p: string, maxBytes?: number): Promise<{ name: string; size: number; base64: string }>;
   /** 写回文件内容（「我的空间」内联编辑保存用）。 */
   write(p: string, content: string): Promise<any>;
+  /** 写二进制文件（xlsx 表格预览「保存到原文件」用）：base64 进，落盘为字节。 */
+  writeBinary(p: string, base64: string): Promise<any>;
   /** 在 parent 下新建名为 name 的子文件夹。 */
   mkdir(parent: string, name: string): Promise<any>;
   /** 重命名文件 / 文件夹为 newName。 */
@@ -54,6 +56,7 @@ export function makeSpaceApi(root: string): SpaceApi {
     read: (p) => s.read(root, p),
     readBinary: (p, maxBytes) => s.readBinary(root, p, maxBytes),
     write: (p, content) => s.write(root, p, content),
+    writeBinary: (p, base64) => s.writeBinary(root, p, base64),
     mkdir: (parent, name) => s.mkdir(root, parent, name),
     rename: (p, name) => s.rename(root, p, name),
     remove: (p) => s.remove(root, p),

@@ -49,7 +49,6 @@ dulwich>=1.2
 # FTS5 自带分词器不会做中文分词，需在 Python 侧用 jieba 预分词后再喂 FTS5。
 jieba>=0.42
 
-# ---- 内置浏览器抓取（keeper/browser/）----
-# 只装 Python 包，**不跑 playwright install**：抓取走 CDP 连桌面壳（Electron）
-# 自带的 Chromium，而 Chromium 的 user-data-dir 不能被两个进程同时打开。
-playwright>=1.44
+# ---- Office AI 编辑工具（tools/builtin/office.py：excel_edit / pdf_edit）----
+openpyxl>=3.1          # Excel(.xlsx) 读写
+pypdf>=4.0             # PDF 合并/拆分/旋转/删页/抽文字（纯 Python，无平台二进制）

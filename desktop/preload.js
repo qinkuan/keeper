@@ -56,6 +56,9 @@ contextBridge.exposeInMainWorld('keeperSpace', {
     ipcRenderer.invoke('space:read-binary', root, file, maxBytes),
   write: (root, file, content) =>
     ipcRenderer.invoke('space:write', root, file, content),
+  /** 写二进制文件（xlsx 表格预览「保存到原文件」用）：base64 进，落盘为字节。 */
+  writeBinary: (root, file, base64) =>
+    ipcRenderer.invoke('space:write-binary', root, file, base64),
   mkdir: (root, parent, name) =>
     ipcRenderer.invoke('space:mkdir', root, parent, name),
   rename: (root, file, newName) =>

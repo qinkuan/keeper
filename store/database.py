@@ -519,6 +519,19 @@ async def _migrate_chat_session_ball_key(conn) -> None:
         )
 
 
+async def _migrate_chat_session_activated_plugins(conn) -> None:
+    """chat_sessions 补 activated_plugins 列：本会话动态激活的插件名（JSON 数组）。
+
+    存量行一律留空（NULL）——读取侧把 NULL 当「未激活」，无需回填。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    existing = {r[1] for r in rows}
+    if "activated_plugins" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE chat_sessions ADD COLUMN activated_plugins TEXT"
+        )
+
+
 async def _migrate_chat_session_thinking(conn) -> None:
     """chat_sessions 补 thinking / reasoning_effort 列：会话级思考模式与强度。
 
@@ -819,6 +832,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_chat_session_deleted_at(conn)
         await _migrate_chat_session_thinking(conn)
         await _migrate_chat_session_mode(conn)
+        await _migrate_chat_session_activated_plugins(conn)
         await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)
         await _migrate_strip_tmp_artifacts(conn)

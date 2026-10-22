@@ -1,0 +1,35 @@
+{
+  "name": "pdf",
+  "version": "1.0.0",
+  "description": "读取与编辑 PDF：抽取文字、合并、拆分(取页)、旋转、删页",
+  "skill": "skills/SKILL.md",
+  "bin": [
+    {
+      "name": "pdf",
+      "summary": "PDF 读取与编辑：抽文字、合并、拆分取页、旋转、删页",
+      "command": "${PLUGIN_ROOT}/bin/pdf",
+      "timeout": 120,
+      "tools": [
+        {
+          "name": "edit",
+          "description": "读取 / 编辑 PDF。破坏性操作(merge/split/rotate/delete_pages)默认另存新文件，不覆盖原文件。全名 pdf__edit",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": ".pdf 路径（工作区内相对路径，或 @user/@session 前缀）" },
+              "op": { "type": "string", "enum": ["info", "extract_text", "merge", "split", "rotate", "delete_pages"], "description": "操作类型" },
+              "inputs": { "type": "array", "description": "merge 用的其它 pdf 路径数组" },
+              "pages": { "type": "string", "description": "页码，1-based，如 '1,3,5-7'" },
+              "angle": { "type": "integer", "description": "rotate 角度：90 / 180 / 270" },
+              "output": { "type": "string", "description": "输出路径；省略自动派生（不覆盖原文件）" },
+              "max_chars": { "type": "integer", "description": "extract_text 最多返回的字符数" }
+            },
+            "required": ["path", "op"]
+          },
+          "mutating": true,
+          "requires_workspace": true
+        }
+      ]
+    }
+  ]
+}

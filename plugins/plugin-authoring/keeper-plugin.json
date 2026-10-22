@@ -1,0 +1,6 @@
+{
+  "name": "plugin-authoring",
+  "version": "0.1.0",
+  "description": "制作 keeper 插件的规范：目录结构、清单字段、bin 协议、SKILL.md 写法与交付自检清单",
+  "skill": "skills/SKILL.md"
+}

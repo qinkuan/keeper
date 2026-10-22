@@ -90,7 +90,7 @@ class AgentExecutor:
         self.agent.recover_peers_in_background()
 
         sid, tid = self._budget_scope(session_id, task_id)
-        process = await self.agent.prepare(mode)
+        process = await self.agent.prepare(mode, session_id=sid)
         result = await process.run(
             text,
             on_step=self._step_writer(session_message_id, on_step=on_step),
@@ -187,7 +187,7 @@ class AgentExecutor:
         prior_steps = [self._step_from_record(r) for r in records]
 
         _sid, tid = self._budget_scope(resume_session_id, task_id)
-        process = await self.agent.prepare()
+        process = await self.agent.prepare(session_id=_sid)
         result = await process.resume(
             qmsg.content if qmsg else "",
             prior_steps,
@@ -387,7 +387,7 @@ class AgentExecutor:
 
         prior_steps = [self._step_from_record(r) for r in records]
         _sid, tid = self._budget_scope(resume_session_id, task_id)
-        process = await self.agent.prepare()
+        process = await self.agent.prepare(session_id=_sid)
         result = await process.resume(
             question,
             prior_steps,
