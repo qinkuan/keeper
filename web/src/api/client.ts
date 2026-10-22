@@ -126,19 +126,6 @@ import type {
 
   CreateLocalAgentInput,
 
-  BrowserStatus,
-
-  BrowserPage,
-
-  BrowserTargetsResp,
-
-  BrowserTextResp,
-
-  BrowserScreenshotResp,
-
-
-  AgentBridgeInfo,
-
   Attachment,
 
   SessionKind,
@@ -957,7 +944,7 @@ export function apiUpdateCoreAgentSoul(body: { soul: string }) {
 
  *
 
- * `kind` 决定这条会话属于哪一页：缺省 chat（「对话」页），浏览器页传 "browser"。
+ * `kind` 决定这条会话属于哪一类：缺省 chat（「对话」页），任务会话传 "task"。
 
  * 它**只在建会话的那一刻生效**——之后一律沿用库里的值，所以传错了只能删掉重建来改，
 
@@ -1701,7 +1688,7 @@ export function apiRestoreSession(sessionId: string) {
 
  * 类别过滤**必须交给后端**（查询参数），不能取回来在前端筛：分页是 limit/offset，
 
- * 前端筛等于「这一页 50 条里挑出 browser 那几条」，浏览器会话一多就会把普通会话
+ * 前端筛等于「这一页 50 条里挑出属于那一类的几条」，同类会话一多就会把别的
 
  * 挤出第一页，翻页还会出现空洞。
 
@@ -3033,78 +3020,3 @@ export function apiReviewTask(
 }
 
 
-// ---- 内置浏览器抓取（/browser）----
-
-// 桌面形态专用：内核用 Playwright 经 CDP 连桌面壳里那个内置浏览器，
-
-// 所以拿到的是**用户正在看的那一页**（含登录态）。Web 形态下这些接口回 503，
-
-// 前端据此把抓取入口藏掉，而不是让用户点一下吃一个错误。
-
-export function apiBrowserStatus() {
-
-  return apiGet<BrowserStatus>("/browser/status");
-
-}
-
-export function apiBrowserTargets() {
-
-  return apiGet<BrowserTargetsResp>("/browser/targets");
-
-}
-
-/** 抓页面文字。不传 url_contains 就抓最近打开的那个页面 */
-
-export function apiBrowserText(opts?: {
-
-  url_contains?: string;
-
-  max_chars?: number;
-
-  selector?: string;
-
-}) {
-
-  return apiPost<BrowserTextResp>("/browser/text", opts ?? {});
-
-}
-
-/** 抓页面截图。full_page=false 只抓当前视口（视频这类长页面用 false） */
-
-export function apiBrowserScreenshot(opts?: {
-
-  url_contains?: string;
-
-  full_page?: boolean;
-
-  image_format?: "jpeg" | "png";
-
-  quality?: number;
-
-}) {
-
-  return apiPost<BrowserScreenshotResp>("/browser/screenshot", opts ?? {});
-
-}
-
-
-// ---- 扩展接入信息（/agent-bridge/*）----
-
-
-/**
-
- * 取「把浏览器扩展接到本内核」所需要的全部信息：地址、token、扩展 id、连接码。
-
- *
-
- * 这条接口存在的理由是扩展装在**用户自己的 Chrome** 里：内核的 Playwright够不到
-
- * 那个浏览器的service worker，没法再替它写配置，于是必须由用户手动填一次。
-
- */
-
-export function apiAgentBridgeInfo() {
-
-  return apiGet<AgentBridgeInfo>("/agent-bridge/info");
-
-}

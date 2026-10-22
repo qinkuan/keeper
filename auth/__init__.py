@@ -9,6 +9,5 @@ subprocess）。本地 HTTP 一旦裸奔，同网段设备、或用户打开的�
 读响应、不拦发请求，GET 简单请求连预检都不触发）都能驱动它。token 把这两条路都关上。
 
 为什么不用 cookie：cookie 会被浏览器自动附带给每个跨站请求，CSRF 立刻回来；自定义
-头不会，这正是要的性质。WebSocket 不受 CORS 约束，故 WS 路由必须显式自校验 token
-（见 browser/agent_bridge.py），本模块不自动替 WS 兜底。
+本模块不自动替 WS 兜底。
 """

@@ -98,12 +98,8 @@ class ChatSession(Base):
     # 没有任何 DB 约束（TEXT + default，无 CHECK）——新增取值不需要迁移，但校验
     # 责任在接口层，见 chat/service.py::SESSION_KINDS。
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
-    # 「谁来认领这条会话」的标记：目前只有浮球那一条用它（值见
-    # chat/service.py::BALL_SESSION_KEY）。非空即代表它是浮球的默认会话。
-    #
-    # 为什么不靠固定 id：那行被软删除后 id 就复用了（主键还在），浮球下次就找不到
-    # 「自己的」会话，于是默默新建第二条——用户会看到两条「浮球对话」。而靠标题找
-    # 又会被用户改个名就失效。这列既不参与用户可见字段，也不随重命名/删除变化。
+    # 「谁来认领这条会话」的标记列（当前无使用者，保留以备默认会话类需求）。
+    # 非空即代表它是某类默认/自动会话。它不参与用户可见字段，也不随重命名/删除变化。
     ball_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 思考模式：这一轮是否让模型"先想再答"（DeepSeek thinking / 推理）。

@@ -174,12 +174,6 @@ def make_app():
 
     app.include_router(build_a2a_router(), dependencies=auth_deps)
 
-    # 扩展 ↔ 内核的桥接（WebSocket）。**不挂 auth_deps**：WebSocket 握手根本不过
-    # HTTP 依赖，它自己校验 Origin + token（见 keeper/browser/agent_bridge.py）。
-    from keeper.browser.agent_bridge import router as agent_bridge_router
-
-    app.include_router(agent_bridge_router)
-
     # 健康检查**故意不带**认证：桌面壳就是靠它判断"内核起来了没"
     # （desktop/sidecar.js 的 waitHealthy）。它只返回 ready 标志、不含任何业务
     # 数据，暴露它没有风险；真要收紧可以在它里面回显一个随机 nonce 让 sidecar 比对。

@@ -4,7 +4,6 @@ import {
   Bot,
   ChevronRight,
   Database,
-  Globe,
   MessageSquare,
   PanelLeft,
   Settings,
@@ -37,7 +36,6 @@ import UserSpacePage from "./pages/UserSpacePage";
 import ObservabilityPage from "./pages/ObservabilityPage";
 import ModelManage from "./pages/ModelManage";
 import RecycleBinPage from "./pages/RecycleBinPage";
-import BrowserConnectPanel from "./components/BrowserConnectPanel";
 import { apiHealth, apiListAgents } from "./api/client";
 import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
@@ -50,15 +48,12 @@ import { Stat } from "./components/ui/Stat";
  *   「智能体」一样是导航项 —— 因为两者回答的是同一个问题："我要干什么"，
  *   而不是一个是动作、一个是页面。点击时会先建好会话（见 startChat）。
  * - **智能体**：装下「我的智能体 / 我的插件 / 智能体市场」三个 tab。
- * - **浏览器**：把 keeper 的扩展接进用户的 Chrome，显示连接码、安装步骤与接入状态。
- *   它是"我现在在哪、怎么让它认出我"的入口，放侧栏而不是设置里，因为它往往是
- *   用户**第一次**来就要找的地方（"浏览器那边连不上"）。
  *
  * 会话记录本身（增删改查）搬进了对话页的「会话管理 / 任务管理」面板：那是会话
  * 真正待着的地方，把它们拆在两个界面只会让人找不到重命名和删除。
  *
  * 低频配置（设置 / 可观测 / 回收站 / 模型管理）收在底部 Keeper 菜单；
- * 「我的空间」是高频入口，提升为顶部主导航项（与「浏览器」并列）。
+ * 「我的空间」是高频入口，提升为顶部主导航项。
  */
 /** 可拖拽竖分隔条：拖动时按水平位移回调，父级据此调整右栏宽度。 */
 function HResizer({ onResize }: { onResize: (dx: number) => void }) {
@@ -101,7 +96,6 @@ function HResizer({ onResize }: { onResize: (dx: number) => void }) {
 const NAV_MAIN = [
   { key: "chat", label: "对话", icon: MessageSquare },
   { key: "agents", label: "智能体", icon: Bot },
-  { key: "browser", label: "浏览器", icon: Globe },
   { key: "user-spaces", label: "我的空间", icon: Users },
 ] as const;
 
@@ -192,7 +186,6 @@ export default function App() {
   });
   const online = !healthQ.isLoading && !healthQ.isError && healthQ.data?.ok;
   const inChat = route.page === "chat" && !!route.agentId;
-  const inBrowser = route.page === "browser";
 
   /** 侧栏导航条目 */
   const NavItem = ({
@@ -573,36 +566,6 @@ export default function App() {
           {route.page === "observability" && (
             <div className="h-full animate-fade-up">
               <ObservabilityPage />
-            </div>
-          )}
-          {/* 「浏览器」：顶部一条可折叠的扩展接入面板（没接上时自动展开，接上后收成
-              一行状态条），下面就是浏览器会话的列表与对话区 —— 与「对话」页同一个
-              ChatPage，只是锁死类别为 browser。见 components/BrowserConnectPanel.tsx
-              顶部那段注释，它解释的是为什么必须由用户手动填一次 token。 */}
-          {inBrowser && (
-            <div className="flex h-full flex-col">
-              {/* 接入面板未连接时展开成一大块表单。限制其最大高度并内部滚动，
-                  否则它会把下方对话区（flex-1 min-h-0）压到接近 0 高，ChatPage 内容
-                  向下溢出被 overflow-hidden 裁掉，输入框（在底部）就被切掉一半——
-                  之前「窗口不协调、输入框下半部分没了」的根因。 */}
-              <div className="min-h-0 shrink-0 overflow-y-auto" style={{ maxHeight: "44vh" }}>
-                <BrowserConnectPanel />
-              </div>
-              {/* 下方只放对话区：浏览器菜单不内嵌网页视图（避免再叠一块原生视图）。 */}
-              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <div className="flex h-9 shrink-0 items-center border-b border-line-soft px-3 text-[13px] font-medium text-ink-strong">
-                  对话
-                </div>
-                <div className="min-h-0 flex-1">
-                  {coreAgentId ? (
-                    <ChatPage agentId={coreAgentId} sessionKind="browser" />
-                  ) : (
-                    <div className="flex h-full items-center justify-center px-4 text-center text-[12px] leading-5 text-ink-muted">
-                      请先在「智能体」页装载一个智能体，才能开始对话
-                    </div>
-                  )}
-                </div>
-              </div>
             </div>
           )}
           {route.page === "trash" && (

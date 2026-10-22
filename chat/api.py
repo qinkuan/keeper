@@ -179,13 +179,12 @@ class ChatStreamIn(BaseModel):
     # 运行模式：normal=普通 ReAct / simple=快捷一次性（翻译/OCR/总结）/ ptc=写代码。
     # **仅新建会话时生效**，之后沿用库里绑定（同 user_space_id）。
     mode: Literal["normal", "simple", "ptc"] = "normal"
-    # 本次运行要建的会话属于哪一类。「对话」页发 chat，浏览器页发 browser。
+    # 本次运行要建的会话属于哪一类。「对话」页发 chat，任务会话发 task。
     #
     # 为什么发消息这条路也要带：会话是**发第一条消息时**才建的（侧栏「新对话」只清
     # 状态、不预建），所以对「点新对话后发第一条」这个最常见的路径，这里就是它落库
     # 时唯一的类别来源。已有会话一律沿用库里的值，不因为这里传了什么而改写。
-    # browser：网页「对这一页提问」会话（「浏览器」页按它过滤）。
-    kind: Literal["chat", "task", "browser"] = "chat"
+    kind: Literal["chat", "task"] = "chat"
     # 本次运行的标识（前端生成）：点「停止生成」时按它精确中止这一次，
     # 而不是按 session 粗粒度停——同一会话可能有别的请求在跑。
     run_id: str = ""
@@ -510,12 +509,12 @@ class NewSessionIn(BaseModel):
     reasoning_effort: Literal["low", "high", "max"] = "low"
     # 运行模式（新建时定，之后沿用库里绑定）：normal / simple / ptc。
     mode: Literal["normal", "simple", "ptc"] = "normal"
-    # 会话类别。缺省 chat（普通会话）；浏览器页传 browser。
+    # 会话类别。缺省 chat（普通会话）；任务会话传 task。
     #
     # 用 Literal 而不是 str：数据库这列是无 CHECK 的 TEXT，写错一个字母不会报错，
     # 只会让那条会话在所有列表里都消失（哪个类别都不匹配）。在入口挡成 422，
     # 比让人对着一个空列表猜强得多。
-    kind: Literal["chat", "task", "browser"] = "chat"
+    kind: Literal["chat", "task"] = "chat"
 
 
 @router.post("/{agent_id}/sessions")
@@ -588,14 +587,12 @@ async def sessions(
     initiator_id: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
-    # browser：网页「对这一页提问」会话（「浏览器」页按它过滤）。
-    kind: Optional[Literal["chat", "task", "browser"]] = None,
+    kind: Optional[Literal["chat", "task"]] = None,
 ) -> Dict[str, Any]:
     """会话列表（按最近更新排序）。传 initiator_id 则只列该发起人的会话。
 
-    传 ``kind`` 则只列该类别，不传就是全部。「浏览器」页靠它把列表收窄到浏览器
-    会话——**必须由后端筛**：前端过滤是"取 50 条再挑出 browser 那几条"，浏览器
-    会话一多就会把普通会话挤掉，且翻页会出现空洞（每页都可能一条都不匹配）。
+    传 ``kind`` 则只列该类别，不传就是全部——**必须由后端筛**：前端过滤是"取 50 条
+    再挑出属于那一类的几条"，同类会话一多就会把别的挤掉，且翻页会出现空洞（每页都可能一条都不匹配）。
 
     ``offset`` + ``limit`` 是分页：侧栏一次只取几条（每页 5 条）往下翻，
     而不是一次性把全部会话捞回来——会话多了以后那能把侧栏卡住。
@@ -1860,9 +1857,8 @@ async def _store_agent_attachment(
 ) -> Dict[str, Any]:
     """把一段图片字节落成附件：校验 → 落本地缓存（有会话时）→ 传厂商拿 file_id。
 
-    抽出来是因为**浮球（WS 桥）**也要走同一套落库逻辑：它拿到的是 base64 图片，
-    没有 HTTP multipart。HTTP 上传端点（:func:`upload_attachment`）和浮球提问
-    （``browser/agent_bridge._ball_ask``）都调它，避免两处各写一份厂商上传 + 缓存。
+    抽出来是为了让「上传附件」HTTP 端点复用同一套落库逻辑：它拿到的是 multipart 文件，
+    转成字节后走这里，避免每个入口各写一份厂商上传 + 缓存。
 
     ``session_id`` 为空时**不写本地缓存**（缓存要落到确定的会话临时区，没会话就没
     法定位）—— 但这种附件仍会上传到厂商、仍能进模型上下文。本地缓存只服务于前端

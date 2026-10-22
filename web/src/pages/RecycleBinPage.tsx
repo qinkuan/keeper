@@ -76,12 +76,11 @@ export default function RecycleBinPage() {
       key: "kind",
       title: "类型",
       width: 88,
-      /* 三类都要显式列出来。写成 `task ? "任务" : "对话"` 会把浏览器会话标成
-         「对话」——用户在这行分不清自己删掉的是哪一类，跨类别找会话时尤其难受。
-         未知取值（老数据 / 后端加了新类别）兜底成「对话」，而不是显示空白。 */
+      /* 两类都要显式列出来。未知取值（老数据 / 后端加了新类别）兜底成「对话」，
+         而不是显示空白。 */
       render: (r) => (
-        <Pill tone={r.kind === "task" ? "blue" : r.kind === "browser" ? "green" : "muted"}>
-          {r.kind === "task" ? "任务" : r.kind === "browser" ? "浏览器" : "对话"}
+        <Pill tone={r.kind === "task" ? "blue" : "muted"}>
+          {r.kind === "task" ? "任务" : "对话"}
         </Pill>
       ),
     },

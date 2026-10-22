@@ -47,32 +47,22 @@ DEFAULT_SESSION_TITLE = "新对话"
 SESSION_STATUS_ACTIVE = "active"
 SESSION_STATUS_DELETED = "deleted"
 
-# 会话种类（chat_sessions.kind）。三个取值：
+# 会话种类（chat_sessions.kind）。两个取值：
 #
 #   chat    普通会话，出现在「对话」页
 #   task    任务绑定会话，一个任务一条（见 chat/api.py 的 create_task）
-#   browser 浏览器会话，出现在「浏览器」页
 #
 # 为什么是并列而不是「会话 / 任务」两级下再挂一层：这几者在**列表里互斥**
-# （浏览器页不该看见普通会话，任务视图也不该看见它），所以按值筛比按层级筛更简单，
+# （任务视图不该看见普通会话），所以按值筛比按层级筛更简单，
 # 也不需要前端维护一棵类别树。
 #
 # 数据库层面这里没有任何约束（kind 是无 CHECK 的 TEXT），**校验责任在本模块与
 # 接口层**——拼错一个字母不会报错，只会表现为「列表里看不见那条会话」。
 SESSION_KIND_CHAT = "chat"
 SESSION_KIND_TASK = "task"
-SESSION_KIND_BROWSER = "browser"
 # 子 agent（delegatee）的子会话：内部成本归集用，不进任何用户的会话列表
 SESSION_KIND_DELEGATEE = "delegatee"
-SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK, SESSION_KIND_BROWSER)
-
-# 浮球的默认会话标记（chat_sessions.ball_key 的取值）。
-#
-# 为什么要一个专用的标记列，而不是拿 id 或标题当锚点：见
-# ``get_or_create_ball_session`` 的 docstring——两条路都会在"用户删掉它"或
-# "用户给它改名"之后悄悄失效，而浮球没有别的办法察觉。
-BALL_SESSION_KEY = "float-ball"
-BALL_SESSION_TITLE = "浮球对话"
+SESSION_KINDS = (SESSION_KIND_CHAT, SESSION_KIND_TASK)
 
 # 自动标题的长度上限。侧栏只有 168px，12.5px 的中文一行放不下 20 个字，
 # 取 18 是折中：短到一眼扫完，长到能认出这段对话在聊什么。
@@ -295,57 +285,6 @@ async def _default_space_id() -> Optional[str]:
     return None
 
 
-async def latest_ball_answer(session_id: str) -> Dict[str, Any]:
-    """这个会话"最后说了什么"：最后一条 assistant 正文，外加"这一轮还在跑"。
-
-    为什么不用 :meth:`ChatService.load_messages`
-    ------------------------------------------
-    那个方法是给**完整历史**用的，为了还原前端那一屏它做了大量额外工作：逐条查
-    steps、逐条汇总 token 用量（usage 汇总会为一条消息发起 N 次查询）、按追问
-    边界切分步骤段、再合成一条「进行中」气泡。
-
-    而这里只要一个形状：``最后一条 assistant 的正文 + 有没有在跑``。为一个字符串
-    付掉上面全部开销不划算——而且那些额外数据各有失败模式（usage 汇总失败会
-    吞异常、步骤切分对追问轮次有专门的解包逻辑），任何一处出问题都会让"取一句
-    回答"变成 500。取不到就该取不到，不该拖着别的一起坏。
-
-    所以这里只发一条 ``ORDER BY seq DESC LIMIT 3`` 的查询，自己判断"在跑"：
-
-    * 有活跃 run 且**最后一条是 user** → 那一轮还在跑，正文一个字都还没定稿，
-      返回空正文 + ``in_progress=True``；
-    * 否则返回最后一条 assistant 的正文。
-
-    LIMIT 3 而不是 1：最后一条可能是 user（刚问出去），得往前退一条才拿得到
-    上一次的回答。三条足够覆盖"一问一答"和"追问"两种形态。
-    """
-    factory = get_session_factory()
-    async with factory() as db:
-        rows = (
-            await db.execute(
-                select(SessionMessage.role, SessionMessage.content, SessionMessage.id)
-                .where(SessionMessage.chat_session_id == session_id)
-                .order_by(SessionMessage.seq.desc())
-                .limit(3)
-            )
-        ).all()
-
-    if not rows:
-        return {"text": "", "in_progress": False, "message_id": ""}
-
-    newest_role = rows[0][0]
-    if active_run_id(session_id) and newest_role == "user":
-        return {"text": "", "in_progress": True, "message_id": ""}
-
-    last_answer = next((r for r in rows if r[0] == "assistant"), None)
-    if last_answer is None:
-        return {"text": "", "in_progress": False, "message_id": ""}
-    return {
-        "text": last_answer[1] or "",
-        "in_progress": False,
-        "message_id": last_answer[2],
-    }
-
-
 async def run_one_ask(
     *,
     agent_id: str,
@@ -370,29 +309,20 @@ async def run_one_ask(
     """跑**一轮**对话，并把这一轮 run 的生命周期完整管好。
 
     这是「发一条消息」唯一的执行入口。浏览器页的 SSE（``chat/api.py::chat_stream``）
-    和浏览器浮球（``browser/agent_bridge.py::_ball_ask``）都走它——两者只在**怎么把结果
-    送出去**上不同，执行的每一个环节都是同一份代码。
+    走它——执行与结果封装的每一个环节都在这一份代码里。
 
     为什么要有这个函数
     ------------------
     这套编排有 9 个必须成对出现的动作：``ensure_run`` → ``ensure_session_id`` →
     ``register_run`` → ``ask`` → ``hub_finish`` → ``finally`` 里 ``clear_stop`` +
     ``unregister_run``，外加每步的 ``publish_step`` / ``publish_delta``。
-
-    曾经它们被写了两遍。于是已经踩过一次坑：浮球那侧把 ``chat.hub.finish`` 的导入
-    名写错（真实名字是 ``finish``，惯例别名 ``hub_finish``），异常在所有 ``try``
-    之外冒到接收循环，把用户的 WebSocket 关掉了——而 SSE 那侧安然无恙。**两份代码
-    只有一份会坏，是最坏的组合**：它不报错，只是那条路不通。
-
-    而且"两份"不只是抄一遍就算：``ensure_session_id`` 必须在 ``register_run`` 之前
-    这一条的**理由**（会话 id 是"这一轮在哪儿"的唯一 key）只写在 SSE 那侧的注释里。
-    靠"另一份代码恰好也做了类似的事"来保持一致，迟早会散。
+    任漏一个就会出现"跑完了但进度条不消失""刷新后接不回来"这类极难定位的问题，
+    所以收成一个函数、只留一处。
 
     固定做掉的事
     ------------
     * **hub 事件缓冲**：每步 ``publish_step``、正文 ``publish_delta``、终态
-      ``hub_finish``。两侧都需要——浏览器页靠它支持"刷新后接回来"，浮球那一轮靠它
-      让浏览器页能实时看到。
+      ``hub_finish``。靠它支持"刷新后接回来"与多端实时可见。
     * **会话 id 先定下来再登记**：见 ``chat_stream`` 里那段注释。
     * **停止标记与注销成对**：``finally`` 里两个都做，且 ``unregister_run`` 放在最后
       （早一步注销，页面会以为这一轮结束了、进度条消失，而它其实还在跑）。
@@ -400,12 +330,12 @@ async def run_one_ask(
     调用方负责的
     ------------
     * ``on_session``：会话 id 定下来时通知（流式要**立刻**推给前端，否则新会话第一句
-      之后前端不知道该记哪个 id，刷新后整片消失）。浮球不需要——它已经知道 sid。
-    * ``on_step`` / ``on_delta``：额外推给**自己的**消费者。流式这边要推 SSE 队列；
-      浮球不要（只回一条最终结果），不传即可——hub 那份照写不误。
+      之后前端不知道该记哪个 id，刷新后整片消失）。
+    * ``on_step`` / ``on_delta``：额外推给**自己的**消费者（流式这边推 SSE 队列），
+      不传即可——hub 那份照写不误。
 
-    异常一律**向外抛**，由调用方决定怎么告诉用户（本项目里两种入口的报错通道不同：
-    SSE 的 ``error`` 帧 vs WebSocket 的 ``result`` 帧）。这里只负责把 hub 的终态封存好。
+    异常一律**向外抛**，由调用方决定怎么告诉用户（SSE 的 ``error`` 帧）。这里只负责
+    把 hub 的终态封存好。
     """
 
 
@@ -503,72 +433,6 @@ async def run_one_ask(
         clear_stop(run_id)
 
 
-async def get_or_create_ball_session(agent_id: str) -> str:
-    """取浮球的默认会话 id，没有就建一条（``kind="browser"``）。
-
-    「默认」意味着：用户在浮球里不选任何东西直接发消息，就进这一条。
-
-    为什么用 :attr:`ChatSession.ball_key` 认领，而不是固定 id 或按标题找
-    ---------------------------------------------------------------
-    * **固定 id**：那条被软删除之后主键还在（软删除 = status 改标记，行不删），
-      浮球下次查到的是一条 deleted 的会话，既不能复用（同 id 建不出来）也
-      不该复活（用户是明确删掉它的）。结果只能是"默默再开第二条"——用户会在
-      浏览器页看到两条「浮球对话」，还不明白哪条是自己的。
-    * **按标题找**：用户改个名就失效，接着退化成上一条。
-    * **ball_key**：用户既看不见也改不了它；被删的那条留在回收站（仍带 ball_key，
-      但查询时按 status 排除了），下一次会干净地新建一条新的。
-
-    为什么建出来是 ``kind="browser"``：这样它会出现在浏览器页的会话列表里，
-    和用户在那边手动建的会话共用一套展示与续聊逻辑（也就是「浏览器页的第三条
-    tab 只列浏览器会话」那个筛选能把它带出来）。
-    """
-    factory = get_session_factory()
-    async with factory() as db:
-        row = (
-            await db.execute(
-                select(ChatSession).where(
-                    ChatSession.ball_key == BALL_SESSION_KEY,
-                    ChatSession.agent_id == agent_id,
-                    ChatSession.status != SESSION_STATUS_DELETED,
-                )
-            )
-        ).scalars().first()
-        if row is not None:
-            return row.id
-        row = ChatSession(
-            id=new_id(),
-            initiator_id=default_initiator_id,
-            agent_id=agent_id,
-            user_space_id=None,
-            title=BALL_SESSION_TITLE,
-            kind=SESSION_KIND_BROWSER,
-            ball_key=BALL_SESSION_KEY,
-        )
-        db.add(row)
-        await db.commit()
-        return row.id
-
-
-async def find_ball_session(agent_id: str) -> Optional[str]:
-    """只查不建：浮球列会话时用它判断"默认那条现在存在吗"。
-
-    刻意不调 :func:`get_or_create_ball_session` —— 用户只是**打开浮球看一眼**，
-    不该因为看了一眼就在浏览器页凭空多出一条空会话。
-    """
-    factory = get_session_factory()
-    async with factory() as db:
-        row = (
-            await db.execute(
-                select(ChatSession.id).where(
-                    ChatSession.ball_key == BALL_SESSION_KEY,
-                    ChatSession.agent_id == agent_id,
-                    ChatSession.status != SESSION_STATUS_DELETED,
-                )
-            )
-        ).first()
-        return row[0] if row else None
-
-
 class ChatService:
     # 会话级串行锁：同一会话一次只跑一个 ask。
     #
@@ -618,14 +482,8 @@ class ChatService:
         # 本会话要绑定的用户空间（新建会话时由 ask 传入；已有会话沿用库里的绑定）
         self.user_space_id: Optional[str] = None
         # 生成会话标题时**优先用**它，而不是首条消息的正文（见 _auto_title）。
-        #
-        # 为什么要有它：浏览器浮球发出去的正文是 _ball_prompt() 拼好的 prompt，
-        # 开头是「我在页面「X」（URL）上提问。」——那是给 agent 看的上下文，不是给
-        # 用户看的标题。而 derive_session_title 只取首行前 18 字符，于是浮球会话
-        # 全被裁成同一个样子（"我在页面「chatbox…"，几条一字不差），自动标题本该
-        # 帮用户分辨会话，反而彻底失效。有这个字段时浮球传用户的原始提问。
-        #
-        # 不传就退回原本的行为（用正文），所以除浮球外无人需要关心它。
+        # 调用方给的正文可能是拼过的 prompt（带上下文前缀）时，用它传用户原始提问，
+        # 自动标题才不会被裁成同一个样子。不传就退回原本的行为（用正文）。
         self.title_text: Optional[str] = None
         # 新建会话时写进 kind 的类别。**已有会话沿用库里的值**，不因为这里改了而改写——
         # 会话一旦建出来是哪一类就定了，否则它会从浏览器页的列表里凭空消失。

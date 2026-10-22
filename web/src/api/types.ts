@@ -1167,13 +1167,11 @@ export interface CapabilityToggle {
  * 会话种类。后端 chat_sessions.kind 的取值集合（见 keeper/chat/service.py
  * 的 SESSION_KINDS）。
  *
- * 收紧成字面量联合而不是 `string`：四个取值**在列表里互斥**，任何一处漏改
- * （忘了加 browser 的筛选条件）都会表现为「那条会话在哪个列表里都看不见」，
+ * 收紧成字面量联合而不是 `string`：取值**在列表里互斥**，任何一处漏改
+ * （忘了加某类的筛选条件）都会表现为「那条会话在哪个列表里都看不见」，
  * 这种 bug 没有任何报错。联合类型让漏改在 tsc 阶段就暴露。
- *
- * browser=手动「对这一页提问」产生的浏览器会话，归「浏览器」页。
  */
-export type SessionKind = "chat" | "task" | "browser";
+export type SessionKind = "chat" | "task";
 
 /** 思考强度：low / high / max（仅思考模式开启时有意义） */
 export type ReasoningEffort = "low" | "high" | "max";
@@ -1189,7 +1187,7 @@ export interface SessionItem {
   /** 本会话绑定的用户空间（可空 → 回落 agent 默认目录） */
   user_space_id?: string | null;
   status?: string | null;
-  /** chat=普通会话（「对话」页）／task=任务绑定会话／browser=浏览器会话（「浏览器」页） */
+  /** chat=普通会话（「对话」页）／task=任务绑定会话 */
   kind?: SessionKind | null;
   /** 本会话的思考模式（模型"先想再答"） */
   thinking?: boolean;
@@ -1281,7 +1279,7 @@ export interface TrashSessionItem {
   /** 所属 agent；查不到名字时后端回填成 id（核心 agent 不在 agent 表里） */
   agent_id?: string | null;
   agent_name?: string | null;
-  /** 同 {@link SessionItem}：会话种类，决定回收站里显示成「任务/对话/浏览器」 */
+  /** 同 {@link SessionItem}：会话种类，决定回收站里显示成「任务/对话」 */
   kind?: SessionKind | null;
   /** 消息条数：标题常是「新对话」这种占位，靠它判断是不是要找的那条 */
   message_count: number;
@@ -1656,63 +1654,3 @@ export interface TaskReviewResp extends TaskDetailResp {
   question?: string | null;
 }
 
-// ---- 内置浏览器抓取（/browser）----
-// 仅桌面形态可用：内核经 CDP 连桌面壳（Electron）里那个内置浏览器，
-// 见 keeper/browser/cdp.py 与 desktop/browser.js。
-
-/** 内置浏览器是否可用。available=false 时 reason 是可执行的原因（不是错误堆栈） */
-export interface BrowserStatus {
-  available: boolean;
-  endpoint: string;
-  reason: string;
-}
-
-/** 内置浏览器当前打开的页面（keeper 主界面已被排除） */
-export interface BrowserPage {
-  url: string;
-  title: string;
-}
-export interface BrowserTargetsResp {
-  pages: BrowserPage[];
-}
-
-/** 抓取到的页面文字：直接可喂 LLM */
-export interface BrowserTextResp {
-  url: string;
-  title: string;
-  text: string;
-  /** 是否因超过 max_chars 被截断 */
-  truncated: boolean;
-  full_chars: number;
-}
-
-/** 抓取到的页面截图：base64（不带 data: 前缀，前端自己拼） */
-export interface BrowserScreenshotResp {
-  url: string;
-  title: string;
-  mime: string;
-  image_base64: string;
-  bytes: number;
-}
- /**
- * 扩展接入所需的全部信息（GET /agent-bridge/info）。
- *
- * `connect_code` 是给用户一次复制粘贴用的：里面打包了 `kernel_url` / `ws_url` /
- * `token` / `extension_id`。分开填四个字段容易漏、也容易把 token 截断，
- * 而 token 错一个字符的表现是"点了没反应"，很难自查。
- */
-export interface AgentBridgeInfo {
-  kernel_url: string;
-  ws_url: string;
-  token: string;
-  /** 内核是否启用了入站认证。未启用时 token 为空，且内核本身就是裸奔的 */
-  auth_enabled: boolean;
-  /** 未打包扩展按路径算出的 id；用户装出来的必须与它一致 */
-  extension_id: string;
-  /** 加载「已解压的扩展程序」时要选的**确切目录** */
-  extension_path: string;
-  /** 当前在线的扩展连接数（SW 被杀后重连会短暂为 0） */
-  connected: number;
-  connected_ids: string[];
-  connect_code: string;
-}

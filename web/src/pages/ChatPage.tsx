@@ -84,9 +84,9 @@ const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 /**
  * 每个 agent 单独记会话 id，避免在不同 agent 间串号。
  *
- * 后面那段 `.${kind}` 是为了**把同一个 agent 的三类会话分开记**：不加的话，
- * 在浏览器页刷新会恢复到「对话」页最后那条会话（反之亦然），而那条会话在当前
- * 列表里根本不存在——表现为「一进来就是个陌生会话，且列表里找不到它」。
+ * 后面那段 `.${kind}` 是为了**把同一个 agent 的会话按类别分开记**：不加的话，
+ * 记忆里的 id 可能属于另一类会话，在当前列表里根本不存在——表现为「一进来就是
+ * 个陌生会话，且列表里找不到它」。
  */
 const sessionKey = (agentId: string, kind: SessionKind) =>
   `keeper.sessionId.${agentId}.${kind}`;
@@ -154,23 +154,7 @@ type StreamRun = {
   resumed?: boolean;
 };
 
-export default function ChatPage({
-  agentId,
-  sessionKind = "chat",
-}: {
-  agentId: string;
-  /**
-   * 这个页面只管哪一类会话：默认「对话」页（chat / task 两类由 tab 切换），
-   * 浏览器页传 "browser" —— 那时列表只列浏览器会话，也不再显示 tab 切换。
-   *
-   * 用 prop 而不是内部再存一份：类别只决定「这一页列什么」，从外面传进来才是
-   * 单一事实来源——两个 state 各记一份迟早会在切路由时不一致，而不一致的表现是
-   * 「列表空着但会话还在」，极难定位。
-   */
-  sessionKind?: "chat" | "browser";
-}) {
-  /** 页面是否被锁在浏览器类别（锁定时不显示会话/任务切换） */
-  const browserOnly = sessionKind === "browser";
+export default function ChatPage({ agentId }: { agentId: string }) {
   /**
    * 消息列表**按会话索引**。
    *
@@ -441,10 +425,9 @@ export default function ChatPage({
    * 重启成风暴），所以只能靠 ref 读到实时值。
    */
   const localStreamingRef = useRef(false);
-  /* 浏览器页只有「对这一页提问」的 browser 一种类别（网页 Agent 自动操作已移除）。
-     effKind 随浏览器页锁定为 browser，其余页恒为 chat（task 视图走另一条会话通道，
-     不写这个键）。所有「记住上次会话」的 localStorage 键都按它分桶。 */
-  const effKind: SessionKind = browserOnly ? "browser" : (sessionKind ?? "chat");
+  /* 「记住上次会话」的 localStorage 键按它分桶：对话页恒为 chat（task 视图走另一条
+     会话通道，不写这个键）。 */
+  const effKind: SessionKind = "chat";
   /** 上次看的那条会话。侧栏「对话」不再预建会话，所以进页面时没有外部指定的 id，
      只有这台机器上"最近在聊哪个"的记忆；没有就直接进空态（发第一条消息时后端才建）。 */
   const remembered = () =>
@@ -454,9 +437,15 @@ export default function ChatPage({
   const [chatSessionId, setChatSessionId] = useState<string | undefined>(
     remembered
   );
+  // 工作模式：会话视图 / 任务视图
+  const [mode, setMode] = useState<"chat" | "task">("chat");
   const qc = useQueryClient();
-  /** 可观测：当前会话的累计用量（消息列表里看单轮，这里看整会话总计） */
-  const activeSessionId = chatSessionId || sessionId;
+  /** 可观测：当前会话的累计用量（消息列表里看单轮，这里看整会话总计）。
+   *  会话视图用 chatSessionId（切走再切回要恢复它）；任务视图只认 sessionId
+   *  （由 applyTaskSession 写入）。按 mode 分流，否则会话视图的选择会盖掉任务视图
+   *  正在看的那条——气泡归属与发送目标都取这一个值，两处不分叉。 */
+  const activeSessionId =
+    mode === "task" ? sessionId : chatSessionId || sessionId;
   /** 视图正在看的那个桶。与 streamRuns 取同一个 key，两套状态因此不会分叉。 */
   const curBucket = activeSessionId || PENDING_BUCKET;
   /** 当前会话的消息列表；该会话还没加载过时显示欢迎语 */
@@ -555,12 +544,6 @@ export default function ChatPage({
   const [runMode, setRunMode] = useState<RunMode>("normal");
   const listRef = useRef<HTMLDivElement>(null);
 
-  // 工作模式：会话视图 / 任务视图（合并原「会话模式」「任务模式」）
-  //
-  // 浏览器页（sessionKind="browser"）不使用这个开关：那一页只列浏览器会话，
-  // 切到 task 会列出一列表不属于这里的任务，而在 send() 里还会把浏览器会话的
-  // 历史混进来。所以那边根本不渲染切换控件，mode 恒为 "chat"。
-  const [mode, setMode] = useState<"chat" | "task">("chat");
   const [drawerOpen, setDrawerOpen] = useState(false);
   // 会话浮层动画：mounted 控制挂载，closing 控制播放退场动画
   const [drawerMounted, setDrawerMounted] = useState(false);
@@ -1226,9 +1209,7 @@ export default function ChatPage({
    * - 进入任务视图：选中任务列表第一条（或保持当前任务），只切生效 session。
    * 列表为空则不动，保持「从顶部新建 / 选择」的空态。
    *
-   * 会话视图这一支**必须按当前页面的类别拉列表**，而不是无脑恢复记忆里的 id：
-   * 「浏览器」页的 mode 同样是 "chat"（那一页没有任务视图），写成常量会在那里
-   * 挑一条普通会话选中，表现为「一个浏览器会话都没有，却显示着普通对话的内容」。
+   * 会话视图这一支**必须按当前类别拉列表**，而不是无脑恢复记忆里的 id。
    *
    * 顺带用它**校验记忆里的 id**：localStorage 记的是「上次在这页看到哪条」，而那条
    * 可能已被删除、或属于别的类别（键写错、跨页串了）。不校验就拿着一个外类 id 去拉
@@ -1241,7 +1222,6 @@ export default function ChatPage({
       try {
         if (mode === "chat") {
           // 关键：任务会话不能顶掉会话视图的会话，回来时按 chatSessionId 恢复。
-          // 浏览器页只有 browser 一种类别，按 effKind 分的 localStorage 桶恢复上次看的。
           const r = await apiSessions(agentId, undefined, 50, 0, effKind);
           if (cancelled) return;
           const ids = new Set((r.sessions || []).map((s) => s.id));
@@ -1279,9 +1259,7 @@ export default function ChatPage({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    // sessionKind 一并列入：这个 effect 会按它拉不同的列表，不列的话 prop 变了
-    // 不会重跑（目前靠路由切换时组件整体卸载掩盖住了，但那是个隐式约定）。
-  }, [mode, agentId, sessionKind]);
+  }, [mode, agentId]);
 
   /**
    * 重新生成：把上一条用户消息重发一遍。
@@ -1433,8 +1411,8 @@ export default function ChatPage({
      * 按 sessionId 落到 A、UI 却按 activeSessionId 显示 B，同一条消息连同它的回答
      * 就同时出现在两个会话里。发消息的目标和气泡的归属必须是同一个。
      */
-    // 发消息目标 = 视图当前所在的会话（activeSessionId）。浏览器页（browser）同样
-    // 走这条：回复沿用当前会话，仅「新对话」后首次发送才新建。
+    // 发消息目标 = 视图当前所在的会话（activeSessionId）：回复沿用当前会话，
+    // 仅「新对话」后首次发送才新建。
     const targetSid = activeSessionId;
 
     setInput("");
@@ -1533,8 +1511,8 @@ export default function ChatPage({
           // 运行模式：同理，仅新建会话传；已有会话沿用库里绑定（后端据此选 Process）
           mode: targetSid ? undefined : runMode,
           // 同样只对**新建**的那一次生效，但必须传：会话是发第一条消息才建的，
-          // 这里就是浏览器页那条会话落库时唯一的类别来源。
-          kind: sessionKind,
+          // 这里就是该会话落库时唯一的类别来源（对话页恒为 chat）。
+          kind: effKind,
           runId,
           // 本轮附件：随消息一起发（只带 file_id 等元信息，文件内容已在上面传完）
           attachments: pendingFiles,
@@ -2112,7 +2090,7 @@ export default function ChatPage({
                   给它品牌淡底，输入框就不会因为"全是灰控件"显得寡淡。 */}
               <span className="flex items-center gap-1 rounded-full bg-brand/10 py-[3px] pl-1.5 pr-2 text-[11.5px] font-medium text-brand">
                 <ListChecks className="h-3 w-3" />
-                {browserOnly ? "浏览器" : mode === "task" ? "任务" : "对话"}
+                {mode === "task" ? "任务" : "对话"}
               </span>
 
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -2234,25 +2212,14 @@ export default function ChatPage({
           drawerOpen && "pointer-events-none opacity-0"
         )}
       >
-        {browserOnly && (
-          <button
-            type="button"
-            onClick={handleNew}
-            title="新对话"
-            className="flex h-8 items-center gap-1.5 rounded-[9px] border border-line-soft bg-panel px-2.5 text-[12.5px] font-medium text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            新对话
-          </button>
-        )}
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
-          title={browserOnly ? "浏览器会话列表" : mode === "task" ? "任务列表" : "会话列表"}
+          title={mode === "task" ? "任务列表" : "会话列表"}
           className="flex h-8 items-center gap-1.5 rounded-[9px] border border-line-soft bg-panel px-2.5 text-[12.5px] font-medium text-ink-muted shadow-card transition-colors duration-150 hover:border-brand/40 hover:text-brand"
         >
           <List className="h-3.5 w-3.5" />
-          {browserOnly ? "浏览器会话" : mode === "task" ? "任务" : "会话"}
+          {mode === "task" ? "任务" : "会话"}
         </button>
       </div>
 
@@ -2271,11 +2238,7 @@ export default function ChatPage({
             boxSizing: "border-box",
           }}
         >
-          {/* browserOnly 时恒走 chatInner：那一页没有"任务视图"，切过去会把浏览器
-              会话的界面换成任务面板，而那条任务根本不在本页的列表里。
-              写成 browserOnly || 而不是靠 mode 恒为 "chat"——那是个需要读者
-              相信的隐式约定，忘了就会渲染出一个能点却不该存在的页面。 */}
-          {browserOnly || mode === "chat" ? (
+          {mode === "chat" ? (
             chatInner
           ) : (
             <Suspense
@@ -2351,18 +2314,15 @@ export default function ChatPage({
                 <span className="text-[13px] font-semibold tracking-[-0.01em] text-ink-strong">
                   会话
                 </span>
-                {/* 类别切换：非浏览器页在 chat/task 间切（浏览器页只有 browser 一种，
-                    无需切换）。与「对话」页同款 SegmentedControl。 */}
-                {!browserOnly && (
-                  <SegmentedControl
-                    value={mode}
-                    onChange={(v) => setMode(v as "chat" | "task")}
-                    options={[
-                      { label: "会话", value: "chat" },
-                      { label: "任务", value: "task" },
-                    ]}
-                  />
-                )}
+                {/* 类别切换：会话 / 任务。与「对话」页同款 SegmentedControl。 */}
+                <SegmentedControl
+                  value={mode}
+                  onChange={(v) => setMode(v as "chat" | "task")}
+                  options={[
+                    { label: "会话", value: "chat" },
+                    { label: "任务", value: "task" },
+                  ]}
+                />
                 <button
                   type="button"
                   title="关闭"
@@ -2393,10 +2353,9 @@ export default function ChatPage({
               <SessionList
                 agentId={agentId}
                 activeId={sessionId}
-                /* 类别：对话页按 tab 给 chat/task，浏览器页给 browser。必须是显式枚举
-                   而不是"非 task 即普通"——那样浏览器会话会混进「会话」列表，而它在那条
-                   会话的消息并不属于这里。 */
-                kind={effKind}
+                /* 类别跟随抽屉 tab：会话 / 任务。必须是显式枚举而不是"非 task 即普通"——
+                   任务会话有独立的状态与面板，混进「会话」列表会张冠李戴。 */
+                kind={mode}
                 hideCreate={false}
                 onSelect={(sid) => {
                   // 任务视图里选的是任务会话，不能顶掉会话视图的选择
