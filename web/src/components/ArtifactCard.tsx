@@ -7,7 +7,6 @@ import {
   artifactDiffUrl,
   apiRevealArtifact,
   apiDeployInfo,
-  authHeaders,
 } from "../api/client";
 import { monacoLangOf } from "../monacoLang";
 /* 主题在这里注册（beforeMount 拿得到 monaco 实例），所以产物卡片不必为了换个
@@ -144,10 +143,8 @@ export function ArtifactCard({
     setLoadingDiff(true);
     try {
       const [codeRes, diffRes] = await Promise.all([
-        fetch(previewSrc, { headers: authHeaders() }),
-        fetch(artifactDiffUrl(agentId, messageId, artifact.id), {
-          headers: authHeaders(),
-        }),
+        fetch(previewSrc),
+        fetch(artifactDiffUrl(agentId, messageId, artifact.id)),
       ]);
       setCodeText(await codeRes.text());
       let data: { status?: string; original?: string; modified?: string } = {};

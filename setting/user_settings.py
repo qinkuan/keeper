@@ -34,7 +34,10 @@ SETTINGS_FILENAME = "settings.yaml"
 # 允许出现在 settings.yaml 里的段：只有「设置页会改」的东西才准进，
 # 免得这个文件慢慢变成第二个 config.yaml。
 #
-KNOWN_SECTIONS = ("observability", "a2a", "context", "auth", "user_space")
+KNOWN_SECTIONS = ("observability", "a2a", "context", "user_space")
+
+# 曾经合法、功能已移除的段：启动时从文件里清掉（见 _drop_deprecated_sections）
+DEPRECATED_SECTIONS = ("auth",)
 
 
 def settings_path() -> Path:
@@ -176,7 +179,6 @@ def save_sections(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
-    auth: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """按段保存：只改传入的那几段，其余原样保留。返回保存后的完整内容。"""
     data = load_raw()
@@ -190,8 +192,6 @@ def save_sections(
         data["a2a"] = a2a
     if context is not None:
         data["context"] = context
-    if auth is not None:
-        data["auth"] = auth
     # 只保留已知段，避免写进杂项后没人认识
     data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
     save_raw(data)
@@ -346,6 +346,29 @@ def _block_range(
     return start, end
 
 
+def _drop_deprecated_sections(lines: List[str]) -> List[str]:
+    """删掉已废弃的顶层段，返回被删的段名。
+
+    废弃段 = 曾经合法、但功能已移除的段。目前只有 ``auth``（入站认证）：
+    认证整体移除后没人再读它，可老用户的 settings.yaml 里还留着——里面存着
+    明文 token（且那份 token 当年提交进过 config.yaml，早就泄露）。
+
+    行级删除而不是 yaml 重写：重写会抹掉段内注释，而用户可能自己加了备注。
+    """
+    removed: List[str] = []
+    for name in DEPRECATED_SECTIONS:
+        rng = _block_range(lines, name, 0, 0, len(lines))
+        if rng is None:
+            continue
+        start, end = rng
+        # 连同紧邻其后的空行一起删，免得留下一个空洞
+        while end < len(lines) and not lines[end].strip():
+            end += 1
+        del lines[start:end]
+        removed.append(name)
+    return removed
+
+
 def _existing_keys(lines: List[str], lo: int, hi: int, indent: int) -> set:
     """块内已有的键名（只看 ``indent + 2`` 这一层的 ``key:`` 行）。"""
     pat = re.compile(r"^" + " " * (indent + 2) + r"([A-Za-z_]\w*):")
@@ -440,6 +463,15 @@ def ensure_defaults() -> bool:
 
         lines = p.read_text(encoding="utf-8").splitlines()
         added: List[str] = []
+
+        # 先清掉**已废弃的段**：认证（auth）随入站认证一起移除了，但它可能还留在
+        # 老用户的 settings.yaml 里——那里面存着明文 token（而且那份 token 当年
+        # 提交进过 config.yaml，早就泄露了）。留着不删等于把一个废凭据继续摆在
+        # 磁盘上。清掉它是纯收益：这一段已经没有任何代码会读。
+        removed = _drop_deprecated_sections(lines)
+        if removed:
+            logger.info("已从用户设置中移除废弃段: %s", "、".join(removed))
+
         for section_name, tree in defaults.items():
             rng = _block_range(lines, section_name, 0, 0, len(lines))
             if rng is None:
@@ -448,10 +480,13 @@ def ensure_defaults() -> bool:
                 added.append(f"{section_name}（整段）")
                 continue
             _ensure_block(lines, rng, 0, tree, added)
-        if not added:
+        if not added and not removed:
             return False
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        logger.info("用户设置已补入 %s 个默认值: %s", len(added), "、".join(added))
+        if added:
+            logger.info(
+                "用户设置已补入 %s 个默认值: %s", len(added), "、".join(added)
+            )
         return True
     except Exception as e:  # noqa: BLE001 回填失败绝不能影响启动
         logger.warning("回填用户设置默认值失败（保持原状）: %s", e)

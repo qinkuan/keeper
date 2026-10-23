@@ -25,10 +25,26 @@
    名单里，实际在删文件。所以 ``xargs`` 不进白名单，``find`` 进但禁掉它的
    ``-exec`` / ``-delete`` / ``-ok``。
 
+还有一类是「**命令名能进、但参数要逐条查**」的
+--------------------------------------------------
+`sed` / `awk` / `test`：命令本身只读，参数却能写盘或执行
+（`sed -i`、`sed 'w out'`、GNU sed 的 `e`、`awk 'BEGIN{system(...)}'`、
+`awk 'print > "f"'`）。这类命令放行——挡掉它们 agent 只会退回用 grep 反复试，
+实测一条评测用例因此从 5 步烧到 22 步——但参数按 `_READONLY_EXTRA_CHECKS`
+逐条查。
+
 已知漏判（写在这里而不是假装没有）
 ----------------------------------
 - ``$VAR``、反引号、``eval``：需要真正的 shell 解析器，收益不抵成本。
 - 可写工作区**不做命令白名单**（否则会拦掉正常的 git/npm 工作流），只查路径越界。
+- **只读区禁一切写入，但拦不到绕过工具的写入**：code 子 agent 的沙箱是「独立
+  venv + 同权限子进程」，它 Python 自己 ``open(path, 'w')`` 没人管。守卫已经接到
+  子 agent 的 ``kt.call`` 桥上，但那条路只覆盖「工具调用」。
+  这**不是漏洞，是产品决策**：只读约束的威胁模型是「第三方插件乱写用户文件」，
+  而 code 子 agent 跑的是大模型自己写的代码，所以它被显式标记为可写
+  （``keeper/agent/delegatee.py`` 的 ``Delegatee.writable``），守卫对它按可写区
+  处理。**只放开「能不能写工作区」，路径越界照样拦**——委派桥与主链路共用同一套
+  越界检查。
 所以本模块是「护栏」，不是「围栏」：挡误操作与越界，不替代人工确认。
 """
 from __future__ import annotations
@@ -36,7 +52,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Set
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 # 传进去就能执行任意代码的东西，永远不进白名单（``xargs rm`` 是经典手法）
 EXEC_WRAPPERS: FrozenSet[str] = frozenset({
@@ -54,6 +70,8 @@ FORBIDDEN_FLAGS = (
 _REDIRECT = re.compile(r"(?<![0-9>&])>>?(?![&0-9])")
 
 # 命令分隔符：把复合命令切开逐条看
+# 命令分隔符：切片段用。**引号内不切**（见 _segments 的说明），
+# 所以这里只作参考，真正的切分在 _segments 里逐字符做。
 _SPLIT = re.compile(r"\|\||&&|;|\n|\|")
 
 # ~ 开头 / .. 开头的路径逃逸
@@ -103,6 +121,11 @@ SAFE_COMMANDS: Dict[str, Optional[Set[str]]] = {
     "yq": None, "md5sum": None, "sha256sum": None,
     # find 进白名单，但 -exec/-delete/-ok 由 FORBIDDEN_FLAGS 单独禁
     "find": None, "fd": None,
+    # 条件判断：只读、且不执行任何东西（test / [ 是同一个内建）
+    "test": None, "[": None,
+    # 文本处理：默认只读，但各自有写盘 / 执行的门（-i / w / e、system()…），
+    # 由 _READONLY_EXTRA_CHECKS 逐条查
+    "sed": None, "awk": None,
     # 包管理器：只列只读子命令。装包是写操作，只读区拒绝
     "pip": {"list", "show", "freeze", "search", "check", "help", "config"},
     "pip3": {"list", "show", "freeze", "search", "check", "help", "config"},
@@ -119,6 +142,51 @@ SAFE_COMMANDS: Dict[str, Optional[Set[str]]] = {
     "hg": {"log", "status", "diff", "show"},
     "svn": {"log", "status", "diff", "info", "list"},
 }
+
+# 只读区里「命令本身只读、但参数能写盘 / 能执行」的少数命令：
+# **命令名放行，参数逐条查**。
+#
+# 为什么要放行
+# ------------
+# 这些命令**默认不写文件**（sed 不带 -i、awk 不重定向、test 只做判断）。
+# 把它们挡在白名单外，agent 就只能退回去用 grep 反复试——实测一条评测用例
+# 因为 ``test -f x`` 被拦，从 5 步变成 22 步（预算 8 步），token 翻了 2.7 倍。
+# 被拦一次就要换姿势重试，这个代价远大于命令本身的写风险。
+#
+# 为什么必须查参数
+# ----------------
+# 它们各自都有暗门：
+# - ``sed -i`` 原地改文件；``sed 'w out'`` 落盘；GNU sed 的 ``e`` 命令能执行 shell
+# - ``awk 'BEGIN{system("...")}'`` 能执行任意命令；``awk 'print > "f"'`` 能落盘
+#
+# 查不准的写法一律拒绝：宁可误杀，不可放过。
+_READONLY_EXTRA_CHECKS: Dict[str, Tuple[re.Pattern, str]] = {
+    "sed": (
+        re.compile(
+            # -i / -i.bak / -ni / --in-place / --in-place=.bak
+            r"(?:^|\s)(?:-[a-zA-Z]*i(?:\.[^\s]*)?|--in-place(?:\s*=\s*\S+)?)(?:\s|$)"
+            # w 命令：s/a/b/w out.txt —— 落盘。目标必须含词字符，避免把 s/w /x/ 误杀
+            r"|\bw\s+(?:[\"']?[\w./-]*\w[\w./-]*[\"']?)"
+            # e 命令（GNU）：s/a/b/e —— 执行模式空间。分隔符 / ; { } 之后才算独立命令
+            r"|(?:^|[;{}/])\s*e(?:\s|$|;|[\"'])",
+            re.IGNORECASE,
+        ),
+        "`sed` 的 -i / w / e 能改文件或执行命令，只读环境已禁用",
+    ),
+    "awk": (
+        re.compile(
+            # BEGIN{system("...")} —— 执行任意命令
+            r"system\s*\("
+            # cmd | getline —— 起子进程
+            r"|\bgetline\b"
+            # print > "文件" —— 落盘（目标必须是字符串字面量，避免误杀 $1 > 5 这类比较）
+            r"|\bprint\b[^;\n]*>\s*[\"'][^\"']+[\"']",
+            re.IGNORECASE,
+        ),
+        "`awk` 的 system() / getline / 输出重定向能执行命令或写文件，只读环境已禁用",
+    ),
+}
+
 
 # 解释器：一律拒绝，哪怕命令名看起来无害。``python -c`` 能做任何事。
 INTERPRETERS: FrozenSet[str] = frozenset({
@@ -200,8 +268,61 @@ def _segments(text: str) -> List[str]:
 
     必须切：``cd /tmp && rm -rf x`` 里每一条都要独立判定，否则只看第一个词
     会把 ``rm`` 放过去。
+
+    **引号内不切**（为什么要认引号）
+    ------------------------------
+    ``awk '{print $1}'`` 里的 ``;``、``grep 'a|b'`` 里的 ``|`` 都不是命令分隔符。
+    不认引号就会把正则 / 脚本切成碎片，再把碎片当命令名去查白名单——
+    实测 ``grep -E 'foo|bar' a.txt`` 在只读区被判成「``bar'`` 不在白名单」而拦下，
+    ``awk '{print $1}'`` 同理。agent 被拦一次就得换姿势重试，代价远超误判本身。
+
+    反过来，正因为引号内的内容不再被切开，``awk 'BEGIN{system("...")}'`` 会作为
+    **一整段**进入判定——所以只读区必须靠 _READONLY_EXTRA_CHECKS 查它的参数。
     """
-    return [s.strip() for s in _SPLIT.split(text or "") if s.strip()]
+    out: List[str] = []
+    cur: List[str] = []
+    quote = ""      # 当前所在的引号（' / " / `），空 = 不在引号里
+    i = 0
+    n = len(text or "")
+    while i < n:
+        ch = text[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                # 双引号里 \" 是转义，不算结束引号
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            # 转义字符：\; \/ \| 都不是分隔符
+            cur.append(ch)
+            cur.append(text[i + 1])
+            i += 2
+            continue
+        two = text[i:i + 2]
+        if two in ("||", "&&"):
+            out.append("".join(cur))
+            cur = []
+            i += 2
+            continue
+        if ch in ";|\n":
+            out.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
 
 
 def _head_words(seg: str) -> List[str]:
@@ -246,6 +367,93 @@ def _strip_heredocs(text: str) -> str:
     return "\n".join(out)
 
 
+def _quoted_positions(text: str) -> set:
+    """返回被引号包住的位置集合（引号本身也算在内）。
+
+    用途：判断某个 ``>`` / ``|`` 是不是**shell 语法**。引号里的 ``>`` 永远不是
+    重定向（shell 里 ``'>'`` 是文件名的一部分），引号里的 ``|`` 永远不是管道。
+    不认引号就会把 ``awk '$1 > 5'`` 的比较当成写文件、把 ``grep 'a|b'`` 的正则
+    当成管道。
+    """
+    pos: set = set()
+    quote = ""
+    i = 0
+    n = len(text or "")
+    while i < n:
+        ch = text[i]
+        if quote:
+            pos.add(i)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                pos.add(i + 1)
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            pos.add(i)
+            i += 1
+            continue
+        i += 1
+    return pos
+
+
+def _tokens(text: str) -> List[Tuple[str, bool]]:
+    """把命令文本切成 token：``(内容, 是否被引号包住)``。
+
+    引号感知是必须的：``grep 'a|b'`` 的正则、``awk '{print $1}'`` 的脚本里都有
+    ``|`` / ``;``，按空白和 ``|`` 硬切会把一个 token 切成两半，碎片再被当成
+    命令名 / 路径去判定——于是 ``grep -E 'foo|bar'`` 被判成「``bar'`` 不在白名单」。
+    """
+    out: List[Tuple[str, bool]] = []
+    cur = ""
+    quoted = False
+    started = False
+    quote = ""
+    i = 0
+    n = len(text or "")
+    while i < n:
+        ch = text[i]
+        if quote:
+            cur += ch
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                cur += text[i + 1]
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            quoted = True
+            started = True
+            cur += ch
+            i += 1
+            continue
+        if ch in " \t\n\r,;|&":
+            if started:
+                out.append((cur, quoted))
+            cur = ""
+            quoted = False
+            started = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            cur += ch + text[i + 1]
+            started = True
+            i += 2
+            continue
+        cur += ch
+        started = True
+        i += 1
+    if started:
+        out.append((cur, quoted))
+    return out
+
+
 def find_escapes(text: str) -> List[str]:
     """找出指向工作空间之外的路径：``~`` 开头、``..`` 开头、绝对路径。
 
@@ -265,7 +473,7 @@ def find_escapes(text: str) -> List[str]:
     # 注意：这里**不**按 ( ) 断词。路径 token 本就由空白 / 重定向分隔；按 ( ) 断
     # 只会把内联代码（如 node -e 的 (\d+)/.exec(s)[1];）碎成「/.exec」这种看着像
     # 干净绝对路径的假片段，造成误杀。$(...) 这类本就是守卫解析不了的已知盲区。
-    for raw in re.split(r"[\s,;|&]+", text or ""):
+    for raw, _quoted in _tokens(text):
         t = _unwrap(raw)
         if not t or _URLISH.match(t):
             continue
@@ -286,21 +494,26 @@ def find_escapes(text: str) -> List[str]:
     return hits
 
 
-def _redirect_targets(seg: str) -> List[str]:
+def _redirect_matches(seg: str) -> List[re.Match]:
+    """片段里**不在引号内**的输出重定向（``>`` / ``>>``）。
+
+    引号里的 ``>`` 永远不是重定向：``awk '$1 > 5'`` 是比较、``echo "a > b"`` 是
+    字符串——shell 里只有**未被引用**的 ``>`` 才是重定向。不认引号就会把
+    awk 的比较当成写文件而整条拦下。
+    """
+    q = _quoted_positions(seg)
+    return [m for m in _REDIRECT.finditer(seg) if m.start() not in q]
+
+
+def _redirect_targets(seg: str, matches: Optional[List[re.Match]] = None) -> List[str]:
     """取出片段里所有输出重定向（> / >>）后面的目标 token。"""
     out: List[str] = []
-    for m in _REDIRECT.finditer(seg):
+    for m in (matches if matches is not None else _redirect_matches(seg)):
         rest = seg[m.end():]
         mm = re.match(r"\s*([^\s;&|]+)", rest)
         if mm:
             out.append(mm.group(1))
     return out
-
-
-def _inside_any(path: str, roots: Optional[List[Path]]) -> bool:
-    if not roots:
-        return False
-    return any(is_inside(path, r) for r in roots)
 
 
 def _norm(p: str) -> str:
@@ -329,9 +542,7 @@ def is_inside(path: str, root: Optional[Path]) -> bool:
 # ---------------------------------------------------------------- 判定
 
 
-def _judge_segment(
-    seg: str, read_only: bool, allowed_roots: Optional[List[Path]] = None
-) -> Optional[str]:
+def _judge_segment(seg: str, read_only: bool) -> Optional[str]:
     """判定单个命令片段；返回拒绝原因，放行返回 ``None``。"""
     words = [w for w in re.split(r"\s+", seg) if w]
     if not words:
@@ -385,23 +596,32 @@ def _judge_segment(
                 f"{shown} 不是只读操作（该命令允许的子命令：{'、'.join(sorted(allowed))}）"
             )
 
-    # 4) 输出重定向：落文件就是写。例外：重定向目标是工作空间 / 会话草稿区内部
-    #    （agent 自己的可写区，写这里不算越界）；只拦真正指向根外的绝对路径。
-    if read_only and _REDIRECT.search(seg):
-        ok = True
-        for tgt in _redirect_targets(seg):
-            if tgt.startswith("/"):
-                if not _inside_any(tgt, allowed_roots):
-                    ok = False
-                    break
-            else:
-                # 相对路径落点未知（cwd 不一定是工作空间），保守拦截
-                ok = False
-                break
-        if not ok:
+    # 3.5) 「命令只读、参数能写 / 能执行」的那几个：命令名放行，参数逐条查。
+    # 详见 _READONLY_EXTRA_CHECKS 的说明（sed -i / w / e、awk system() / getline）。
+    extra = _READONLY_EXTRA_CHECKS.get(cmd)
+    if extra is not None:
+        pat, reason = extra
+        if pat.search(seg):
+            return reason
+
+    # 4) 输出重定向：落文件就是写。只读区里**一律禁**——包括指向工作区内部的
+    #    绝对路径。
+    #
+    #    ⚠️ 以前有个例外：「重定向目标是工作空间 / 会话草稿区内部就放行」。
+    #    那是**可写区**的思路，被留在只读区的判定里就成了洞：只读工作区里
+    #    ``cat /abs/workspace/data.csv > /abs/workspace/data_copy.csv`` 直接
+    #    写成了文件（评测里 `read-only-write-refused` 就这样红过一次）。
+    #    只读就是只读：写入一律禁，唯一例外是丢输出（2>/dev/null）。
+    #
+    #    引号里的 > 不算重定向（awk 的比较、echo 的字符串）。
+    redirects = _redirect_matches(seg)
+    if read_only and redirects:
+        for tgt in _redirect_targets(seg, redirects):
+            if tgt.rstrip("/") in SAFE_DEVICE_PATHS or tgt.startswith("/dev/fd/"):
+                continue  # 丢弃输出，不落盘
             return (
                 f"`{cmd}` 带了输出重定向（> / >>），会写文件，只读环境已禁用"
-                f"（写文件请用会话工作区的绝对路径）"
+                f"（要写文件请让用户提供可写工作区）"
             )
     return None
 
@@ -470,7 +690,7 @@ def check_call(
         return None
 
     for seg in _segments(text):
-        reason = _judge_segment(seg, read_only=True, allowed_roots=roots)
+        reason = _judge_segment(seg, read_only=True)
         if reason:
             return f"只读工作空间下拒绝执行：{reason}"
     return None

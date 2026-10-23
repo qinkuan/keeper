@@ -5,11 +5,14 @@
     python -m keeper.main --config <config.yaml> [port]
 
 职责：
-1. 读框架配置（server 端口 / 鉴权）；
+1. 读框架配置（server 端口等）；
 2. 建表（幂等）；
 3. 从库装载所有 active agent 到同一进程（每个 agent 一个实例，按 agent_id 路由）；
 4. 起 HTTP：对话/配置接口挂在 /agents/{agent_id} 下；前端（web/dist）作为站点根
    被同源托管——/ 是 landing 页（列所有 agent），点进去 ?agent=<id> 进入对话。
+
+信任边界：keeper 是**本机单用户**应用，没有入站认证。正式入口是桌面壳；
+命令行形态用于演示。详见 ``doc/security.md``。
 
 A2A 入站：**按目标 agent 路由**——每个已装载 agent 各有自己的端点
 ``POST /agents/{agent_id}/a2a`` 与 ``GET /agents/{agent_id}/.well-known/agent.json``。
@@ -25,8 +28,8 @@ from pathlib import Path
 # 支持直接运行本文件（IDE 右键 Run/Debug、python keeper/main.py）。
 # 坑：直接运行时 sys.path 里会有脚本所在目录 keeper/，它与 keeper 包同名，
 # 若其中存在 keeper.py 就会遮蔽真正的包。所以先摘掉该目录，再把项目根插到最前。
-_HERE = str(Path(__file__).resolve().parent)         # .../niubiplatform/keeper
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])  # .../niubiplatform
+_HERE = str(Path(__file__).resolve().parent)         # .../keeper/keeper
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])  # .../keeper
 sys.path[:] = [p for p in sys.path if p != _HERE]
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -91,8 +94,13 @@ def _setup_logging() -> None:
 
 
 def make_app():
-    """构建 FastAPI 应用：入站认证 + CORS + 业务路由（对话）+ 前端静态托管。"""
-    from fastapi import Depends, FastAPI
+    """构建 FastAPI 应用：CORS + 业务路由（对话）+ 前端静态托管。
+
+    **没有入站认证**：keeper 是本机单用户应用，桌面壳是唯一的正式入口，
+    命令行形态只用于演示。信任边界是「本机只有你一个人用 keeper」——
+    详见 ``doc/security.md``。
+    """
+    from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
 
     from keeper.chat.api import router as chat_router
@@ -100,18 +108,9 @@ def make_app():
     from keeper.agent.api import router as agents_router
     from keeper.llm.api import models_router
     from keeper.observability.api import router as metrics_router
-    from keeper.auth.api import check as check_token
     from keeper.framework.api import router as framework_router
 
     app = FastAPI(title="Keeper")
-
-    # 入站认证：**所有业务路由**都要带 token（理由见 keeper/auth/api.py 的模块文档：
-    # CORS 挡不住跨站"发请求"，GET 连预检都不触发，所以裸奔时用户打开的任意网页
-    # 就能驱动本机 agent 干活）。
-    #
-    # 挂 router 依赖而不是 HTTP 中间件，是为了让静态资源（web/dist 的 html/js/css，
-    # 浏览器加载它们时不会带自定义头）不受影响 —— 只挡 API，不挡页面本身。
-    auth_deps = [Depends(check_token)]
 
     # 用户设置：把「代码里有、settings.yaml 里还没写」的键按默认值补进去。
     # 目的不是改行为（补的值就等于默认值），而是让本机那份文件始终是**全量配置**：
@@ -135,48 +134,46 @@ def make_app():
     )
 
     # 对话 / 配置接口：/agents/{agent_id}/...（按 agent 路由到本进程内实例）
-    app.include_router(chat_router, dependencies=auth_deps)
+    app.include_router(chat_router)
     # 用户空间模块（用户自管的命名文件路径）
-    app.include_router(user_space_router, dependencies=auth_deps)
-    # 本地运行时只保留 agent 相关管理接口（配置缓存 / 热重载）。
-    # mcp / skill / tool 的定义已统一归 platform 管，keeper 不再提供也不再维护。
-    app.include_router(agents_router, dependencies=auth_deps)
+    app.include_router(user_space_router)
+    # agent 的本地增删改（本地创建 / 停用 / 插件绑定 / 模型绑定）
+    app.include_router(agents_router)
     # 插件库（只读：库根路径 + 库里有哪些插件）
     from keeper.plugin.api import router as plugins_router
 
-    app.include_router(plugins_router, dependencies=auth_deps)
+    app.include_router(plugins_router)
     # 模型管理（本地维护的模型预设；agent 通过绑定表引用）
-    app.include_router(models_router, dependencies=auth_deps)
+    app.include_router(models_router)
     # 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件
     from keeper.agent.delegatee_api import router as delegatee_router
 
-    app.include_router(delegatee_router, dependencies=auth_deps)
+    app.include_router(delegatee_router)
     # 会话回收站：已删除会话（软删除）的列表 + 恢复
     from keeper.chat.api import trash_router
 
-    app.include_router(trash_router, dependencies=auth_deps)
+    app.include_router(trash_router)
     # 可观测：用量聚合查询（/metrics/...），数据来自 llm_calls 事实表
-    app.include_router(metrics_router, dependencies=auth_deps)
+    app.include_router(metrics_router)
     # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/evals/api.py）
     from keeper.evals.api import router as evals_router
 
-    app.include_router(evals_router, dependencies=auth_deps)
+    app.include_router(evals_router)
     # 设置：本地可观测 / 调试开关（写回 ~/.keeper/settings.yaml，**不碰**
     # config.yaml —— 元配置只由人手动改，见 keeper/setting/user_settings.py）
     from keeper.setting.api import router as settings_router
 
-    app.include_router(settings_router, dependencies=auth_deps)
+    app.include_router(settings_router)
     # framework 环境（~/.keeper/framework 下集中管理的 python / node 运行时）
-    app.include_router(framework_router, dependencies=auth_deps)
+    app.include_router(framework_router)
     # A2A 入站：按 agent 路由，每个已装载 agent 各有自己的端点
     # POST /agents/{agent_id}/a2a 与 GET /agents/{agent_id}/.well-known/agent.json
     from keeper.a2a import build_a2a_router
 
-    app.include_router(build_a2a_router(), dependencies=auth_deps)
+    app.include_router(build_a2a_router())
 
-    # 健康检查**故意不带**认证：桌面壳就是靠它判断"内核起来了没"
-    # （desktop/sidecar.js 的 waitHealthy）。它只返回 ready 标志、不含任何业务
-    # 数据，暴露它没有风险；真要收紧可以在它里面回显一个随机 nonce 让 sidecar 比对。
+    # 健康检查：桌面壳靠它判断"内核起来了没"（desktop/sidecar.js 的 waitHealthy）。
+    # 它只返回 ready 标志、不含任何业务数据。
     @app.get("/health")
     async def health():
         return {
@@ -245,53 +242,17 @@ def main() -> None:
             rest.append(a)
             i += 1
 
-    cfg = load_config(cfg_path)   # 框架：端口 / 鉴权
+    cfg = load_config(cfg_path)   # 框架：端口等
     host, port = cfg.host, cfg.port
     if rest:
         port = int(rest[0])   # 命令行位置参数优先级最高
 
-    # 入站认证：token 从环境变量（桌面壳每次启动现生成）或 config.yaml 取；
-    # 两者都没有时，再退回 settings.yaml 里由设置页生成/保存的那个。
-    # 详见 keeper/auth/api.py —— 那里写清了为什么裸奔的本地内核不能接受。
-    from keeper.auth import api as auth_mod
-    from keeper.setting import section as settings_section
-
-    token, source = auth_mod.resolve_token(cfg)
-    if not token:
-        saved_token = (settings_section("auth").get("token") or "").strip()
-        if saved_token:
-            token, source = saved_token, "settings.yaml"
-    auth_mod.configure(token, source)
-    # 应用设置页里用户显式的开/关：存了才覆盖，没存就沿用「有无 token」的默认。
-    # 这样「设置页关掉认证」能跨重启生效，而不只是当次运行有效。
-    auth_cfg = settings_section("auth")
-    if "enabled" in auth_cfg:
-        auth_mod.set_enabled(bool(auth_cfg.get("enabled")))
-
     logger.info("监听地址: %s:%d", host, port)
-    logger.info("入站认证: %s", auth_mod.describe())
-    if auth_mod.is_enabled() and not os.getenv("KEEPER_TOKEN"):
-        # 命令行形态：普通浏览器里没有 preload 桥，页面拿不到 token。所有请求都会
-        # 401 —— 所以必须给一条"带 token 的直达 URL"，并告诉用户从它进去。
-        # 页面拿到后会把它存进 sessionStorage 并把地址栏洗掉（见 web/src/api/client.ts
-        # 的 authToken）。
-        logger.info("请用下面这条带 token 的链接打开（token 会自动从地址栏清掉）：")
-        logger.info("    http://%s:%d/?keepertoken=%s", host, port, token)
-    if not auth_mod.is_enabled():
+    if host not in ("127.0.0.1", "localhost", "::1"):
         logger.warning(
-            "⚠ 未启用入站认证：任何能访问 %s:%d 的进程都可以调用全部接口，"
-            "其中包含能让 agent 执行本机命令的对话接口。而 CORS 挡不住跨站"
-            "发请求——你打开的任意网页都能打到这个端口。"
-            "修法：config.yaml 里填 server.auth.token，或设环境变量 KEEPER_TOKEN；"
-            "桌面形态（desktop/start_desktop.sh）会自动处理，不用管。",
-            host,
-            port,
-        )
-    elif host not in ("127.0.0.1", "localhost", "::1"):
-        logger.warning(
-            "⚠ 开启了认证但监听 %s（不是回环）：token 解决的是「谁能访问这个端口」，"
-            "不是「访问者是谁」。token 一旦泄露，局域网内照样能被用，"
-            "所以非本机访问场景仍应改成 127.0.0.1 + 别的网络层管控。",
+            "⚠ 监听 %s（不是回环）：本机单用户形态下，内核没有入站认证，"
+            "同网段的设备也能直接调用全部接口（含能执行本机命令的对话接口）。"
+            "只在本机用请改成 127.0.0.1。",
             host,
         )
 

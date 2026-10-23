@@ -158,22 +158,17 @@ async def _migrate_agent_loaded(conn) -> None:
 
 
 async def _migrate_agent_origin(conn) -> None:
-    """agent 补 ``origin`` 列：区分「平台同步来的」和「本机创建的」（存量库升级）。
+    """agent 补 ``origin`` 列，并把历史值统一归一成 ``local``。
 
-    **为什么必须有这个字段**
+    **这一列现在是历史字段**
     ----------------------
-    本地表里的 agent 一直混着两种来源：平台同步下来的**副本**，和本机创建的。
-    两者 id 都由平台/ULID 生成，**没有字段能区分它们**，于是出了两个问题：
+    曾经它区分「从平台同步下来的副本」（platform）与「本机创建的」（local）：
+    两类 agent 混在同一张表里而 id 分别来自平台和本地 ULID，没有它就没法判断
+    某行是不是平台的镜像，于是同一个 agent 在 UI 上显示两遍。
 
-    1. UI 上同一个 agent 显示两遍（本地列表 + 平台列表），因为无法判断某行
-       是不是平台的镜像；
-    2. 更糟的是：在本地改了平台 agent 的绑定（比如勾插件），下次点「装载」时
-       ``sync_agent`` 的 ``_replace_bindings`` 是**先删后插**，本地改动直接被冲
-       掉——而且没有任何提示。
-
-    存量行一律回填 ``platform``：加这一列之前，本地表里的每一行都是
-    ``sync_agent`` 写进来的（本地创建 agent 是这之后才有的能力），所以这个
-    回填值对存量数据是准确的。
+    平台对接已整体移除——keeper 现在是本机单用户应用，库里有的就是本机的。
+    所以这里做两件事：给老库补上这一列（不让 ORM 读不到列直接炸），
+    并把历史 ``platform`` 归一成 ``local``（语义正确，也让 UI 口径一致）。
     """
     rows = (await conn.exec_driver_sql("PRAGMA table_info(agent)")).fetchall()
     if not rows:
@@ -181,9 +176,11 @@ async def _migrate_agent_origin(conn) -> None:
     existing = {r[1] for r in rows}
     if "origin" not in existing:
         await conn.exec_driver_sql(
-            "ALTER TABLE agent ADD COLUMN origin VARCHAR(16) DEFAULT 'platform'"
+            "ALTER TABLE agent ADD COLUMN origin VARCHAR(16) DEFAULT 'local'"
         )
-    await conn.exec_driver_sql("UPDATE agent SET origin = 'platform' WHERE origin IS NULL")
+    await conn.exec_driver_sql("UPDATE agent SET origin = 'local' WHERE origin IS NULL")
+    # 平台没了，「平台同步来的」这个来源就不存在了：那些行现在就是本机的 agent。
+    await conn.exec_driver_sql("UPDATE agent SET origin = 'local' WHERE origin = 'platform'")
 
 
 async def _migrate_drop_plugin_tables(conn) -> None:

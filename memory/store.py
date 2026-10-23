@@ -267,7 +267,13 @@ class SessionMemory:
 
     @staticmethod
     def _turn_blocks(steps: List[dict]):
-        """遍历步骤生成 ``(role, content)`` 片段；think 跳过以省 token。"""
+        """遍历步骤生成 ``(role, content)`` 片段；think 跳过以省 token。
+
+        格式与主循环的**协议本体一致**（XML 标签）：记忆块也是喂给模型的
+        「输出范例」，写成旧格式模型就会照着旧格式写。
+        """
+        from ..agent.protocol import join_blocks, render
+
         blocks = []
         for st in steps or []:
             kind = st.get("kind")
@@ -275,14 +281,27 @@ class SessionMemory:
             inp = st.get("input")
             out = st.get("output")
             if kind == "tool":
-                head = (
-                    f"THOUGHT: (调用工具)\nACTION: {tool or 'tool'}"
-                    f"\nACTION_INPUT: {inp or ''}"
+                head = join_blocks(
+                    [
+                        render("THOUGHT", "(调用工具)"),
+                        render("ACTION", tool or "tool"),
+                        render("ACTION_INPUT", inp or ""),
+                    ]
                 )
                 blocks.append(("assistant", head))
                 blocks.append(("tool", out or ""))
             elif kind == "ask":
-                blocks.append(("assistant", f"THOUGHT: (等待用户补充)\nASK: {out or ''}"))
+                blocks.append(
+                    (
+                        "assistant",
+                        join_blocks(
+                            [
+                                render("THOUGHT", "(等待用户补充)"),
+                                render("ASK", out or ""),
+                            ]
+                        ),
+                    )
+                )
             elif kind == "human_answer":
                 blocks.append(("user", f"用户补充：{out or ''}"))
         return blocks

@@ -8,7 +8,6 @@ import {
   apiListPlugins,
   apiSetAgentEnabled,
   apiSetLocalAgentPlugins,
-  unloadAgent,
 } from "../api/client";
 import type { LocalAgent } from "../api/types";
 import { Hint, PageHeader, Section } from "../components/ui/Page";
@@ -26,16 +25,13 @@ const ROW_BTN =
   "inline-flex h-6 items-center gap-1 rounded-md border border-line px-2 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50";
 
 /**
- * 智能体 →「我的智能体」tab：**我已有的**（本地创建的 + 从平台装载的）。
+ * 智能体 →「我的智能体」tab：**本机全部的** agent。
  *
- * 平台上「有什么、还没拿过来的」在同页的「智能体市场」tab；这里只管库存。
- * 两边按 origin 天然分界，所以同一个 agent 不会显示两遍。
+ * keeper 是本机单用户应用，agent 全部在本机创建——没有外部来源，
+ * 所以这里没有「来源」之分，列表就是库存。
  *
  * 每行一个**启用开关**（Switch），它是决定 agent 跑不跑、进不进概览的唯一开关，
- * 缺省是开的。停用不会删任何东西，也不会被下一次平台同步撤销——写的是
- * override 表，不是 status。
- *
- * 只有本地创建的（origin=local）能删：平台 agent 的配置归平台，删了还得重装。
+ * 缺省是开的。停用不会删任何东西，写的是 override 表，不是 status。
  */
 export default function AgentList({
   onCreate,
@@ -79,15 +75,6 @@ export default function AgentList({
     onError: (e: Error) => toast.error("操作失败：" + e.message),
   });
 
-  const unloadM = useMutation({
-    mutationFn: (id: string) => unloadAgent(id),
-    onSuccess: () => {
-      toast.success("已卸载（配置缓存保留，重新装载即可再跑）");
-      refresh();
-    },
-    onError: (e: Error) => toast.error("卸载失败：" + e.message),
-  });
-
   const setPluginsM = useMutation({
     mutationFn: ({ id, plugins }: { id: string; plugins: string[] }) =>
       apiSetLocalAgentPlugins(id, plugins),
@@ -115,9 +102,6 @@ export default function AgentList({
       render: (r) => (
         <span className="flex items-center gap-1.5">
           <span className="truncate font-medium text-ink-strong">{r.name}</span>
-          <Pill tone={r.origin === "local" ? "green" : "blue"}>
-            {r.origin === "local" ? "本地创建" : "平台装载"}
-          </Pill>
         </span>
       ),
     },
@@ -190,42 +174,24 @@ export default function AgentList({
       width: 210,
       render: (r) => (
         <span className="flex flex-wrap items-center gap-1">
-          {r.origin === "platform" ? (
-            // 只有「卸载」。卸载后它就从本页消失（本地配置一并清掉），装回去去
-            // 「智能体市场」——那边按本地装载状态显示「装载」/「重新装载」。
-            <button
-              type="button"
-              disabled={unloadM.isPending && unloadM.variables === r.id}
-              onClick={() => unloadM.mutate(r.id)}
-              className={ROW_BTN}
-            >
-              {unloadM.isPending && unloadM.variables === r.id && (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              )}
-              卸载
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                setPluginEdit(r);
-                setPluginSel(r.plugins ?? []);
-              }}
-              className={ROW_BTN}
-            >
-              管理插件
-            </button>
-          )}
-          {r.origin === "local" && (
-            <ConfirmButton
-              resetKey={confirmDelReset}
-              disabled={deleteM.isPending && deleteM.variables === r.id}
-              onConfirm={() => deleteM.mutate(r.id)}
-              className={cn(DANGER_BTN, "h-6 text-[12px]")}
-            >
-              删除
-            </ConfirmButton>
-          )}
+          <button
+            type="button"
+            onClick={() => {
+              setPluginEdit(r);
+              setPluginSel(r.plugins ?? []);
+            }}
+            className={ROW_BTN}
+          >
+            管理插件
+          </button>
+          <ConfirmButton
+            resetKey={confirmDelReset}
+            disabled={deleteM.isPending && deleteM.variables === r.id}
+            onConfirm={() => deleteM.mutate(r.id)}
+            className={cn(DANGER_BTN, "h-6 text-[12px]")}
+          >
+            删除
+          </ConfirmButton>
         </span>
       ),
     },
@@ -262,16 +228,14 @@ export default function AgentList({
       ) : (
         <PageHeader
           title="智能体"
-          desc="这里是我已有的 agent：本地创建的 + 从平台装载的"
+          desc="这里是我本机的全部 agent"
           actions={headerActions}
         />
       )}
 
       <div className="mb-3">
         <Hint>
-          启用开关决定它跑不跑、进不进概览，缺省是开的；停用不会删东西，也不会被下一次平台同步撤销。
-          平台上还没拿过来的 agent 在
-          <strong className="text-ink-strong">智能体市场</strong>那个 tab 里。
+          启用开关决定它跑不跑、进不进概览，缺省是开的；停用不会删任何东西。
         </Hint>
       </div>
 
@@ -282,7 +246,7 @@ export default function AgentList({
           rowKey={(r) => r.id}
           loading={listQ.isLoading}
           minWidth={980}
-          empty="还没有 agent——点右上角「创建 Agent」，或去智能体市场装载"
+          empty="还没有 agent——点右上角「创建 Agent」建一个"
         />
       </Section>
 

@@ -109,7 +109,6 @@ async def trigger_run(
         None, description="用例集名，多个用逗号分隔；不传则全部"
     ),
     case_timeout: int = Query(300, ge=30, le=1800),
-    online: bool = Query(False, description="是否重新下载插件资源（默认离线）"),
     baseline: Optional[str] = Query(
         None,
         description=(
@@ -144,8 +143,6 @@ async def trigger_run(
         cmd += ["--agent", agent_id]
     for s in suites:
         cmd += ["--suite", s]
-    if online:
-        cmd.append("--online")
     if baseline:
         cmd += ["--baseline", baseline]
 

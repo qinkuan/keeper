@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 
 from ..mcp.locate import ExecutableNotFoundError
-from ..plat.fetcher import FetchError
 from ..plugin import (
     agent_plugins_dir,
     any_marker_present,
@@ -47,6 +46,15 @@ from ..store import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PluginManifestError(ValueError):
+    """插件清单解析失败。
+
+    清单是插件的"真源"：解析不了就没法知道这个插件提供哪些工具 / 技能。
+    装配期就抛出来（而不是等到用的时候才发现），错误信息里带上是哪个包。
+    """
+
 
 # MCP 组件的 server 名与工具名的分隔符（与 MCPSession.prefixed 一致）
 # （插件清单文件名与格式探测见 plugin/formats.py——keeper-plugin.json /
@@ -136,7 +144,17 @@ class AgentConfig:
 
 
 # 工作区统一根：下面分 user / agent / session 三层，分别属于用户、agent、会话。
-WORKSPACE_ROOT = Path.home() / ".keeper" / "workspace"
+#
+# 可用环境变量 ``KEEPER_WORKSPACE_ROOT`` 覆盖。为什么要它：
+# 会话空间是**运行期唯一的工作目录**（见 chat/service.py 的 resolve_workspace），
+# 评测 / 测试每跑一条用例就会生成一个会话空间目录。默认落在 ``~/.keeper/workspace``
+# 下，验证轮次会不停往用户家目录里堆垃圾。给评测指一个临时根，隔离才真正成立。
+# 注意：这是**导入时**求值的模块级常量——要换根必须在 import keeper 之前设好
+# 环境变量（见 keeper/evals/run.py）。
+WORKSPACE_ROOT = Path(
+    os.environ.get("KEEPER_WORKSPACE_ROOT")
+    or (Path.home() / ".keeper" / "workspace")
+)
 
 
 def default_workspace_root() -> Path:
@@ -611,7 +629,7 @@ def _read_plugin_manifest(dest: Path) -> Dict[str, Any]:
     - claude 格式读 ``.claude-plugin/plugin.json``（name/version/description 对齐）。
 
     清单**可选**：只有 SKILL.md 的纯知识包可以不写，按空清单处理。
-    解析失败抛 ``FetchError``——装载期就暴露，而不是等到用的时候才发现。
+    解析失败抛 ``PluginManifestError``——装载期就暴露，而不是等到用的时候才发现。
     """
     fmt = detect_format(dest)
     if fmt is None:
@@ -619,7 +637,7 @@ def _read_plugin_manifest(dest: Path) -> Dict[str, Any]:
     try:
         return fmt.read_manifest(dest)
     except ValueError as e:
-        raise FetchError(str(e)) from e
+        raise PluginManifestError(f"{dest.name} 的清单解析失败：{e}") from e
 
 
 _FRONTMATTER_RE = re.compile(
@@ -701,7 +719,7 @@ def _split_skill_frontmatter(raw: str) -> "tuple[str, Dict[str, Any]]":
     - ``description``：**什么时候用**——常驻上下文的 L1 概要，按需加载的判据；
     - ``always``     ：作者声明「这是行为规矩」，正文常驻。
 
-    见 ``doc/capability-loading-design.md`` 第二节（L1 / L2 拆分）。
+    见 ``doc/capability-loading.md`` 第二节（L1 / L2 拆分）。
     """
     m = _FRONTMATTER_RE.match(raw)
     if not m:

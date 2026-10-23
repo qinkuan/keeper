@@ -27,49 +27,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ServerAuth:
-    """入站身份配置。
-
-    ``token`` 是**本地进程间**的入场券，不是用户身份：所有请求都要在
-    ``X-Keeper-Token`` 头里带上它，否则 401。
-
-    为什么要这个：内核有能执行命令的路径（chat → agent 工具 → subprocess），
-    而 CORS 拦不住跨站**发请求**（GET 连预检都不触发）。裸奔的话，用户打开的
-    任意网页就能驱动本机 agent 干活。详见 ``keeper/api/auth.py``。
-
-    桌面形态不用管这一项——``desktop/sidecar.js`` 每次启动现生成随机 token，
-    经环境变量传进来。命令行形态在此填一个足够长的随机串即可（留空 = 不启用认证，
-    启动时会有警告）。
-    """
-
-    enabled: bool = False
-    default_initiator_id: Optional[int] = None
-    token: str = ""
-
-
-@dataclass
 class WorkspaceSection:
     """本地工作区默认值。
 
-    **平台不维护工作区**——工作区在哪、是否只读，是客户端自己的事。
+    工作区在哪、是否只读，完全是本机的事——没有外部配置源来管它。
     ``root`` 下按 agent 名字各自一个目录；``path`` 不指定时装配器会自动算。
     """
 
     kind: str = "local"
     root: str = "~/.keeper/workspace/user"
     read_only: bool = False
-
-
-@dataclass
-class PlatformSection:
-    """平台（配置之源）的接入信息。
-
-    本地应用凭 token 调 ``GET /api/me/agents`` 拉"我已添加"的 agent 配置就地装载。
-    平台不参与运行时协作，这里只存"去哪拉、凭什么拉"。
-    """
-
-    url: str = "http://localhost:9095"
-    token: str = ""
 
 
 @dataclass
@@ -187,7 +154,7 @@ class ContextSection:
     compact_min_interval: int = 5      # 两次压缩之间至少隔几步（防抖动）
     keep_recent_steps: int = 6         # 最近这几步永远保留原文
     compact_max_chars: int = 1500      # 生成的骨架摘要上限
-    # ---- 技能按需加载（见 doc/capability-loading-design.md）----
+    # ---- 技能按需加载（见 doc/capability-loading.md）----
     # 每轮开头系统要不要替模型把技能正文取来、以及怎么挑：
     #   off     = 不预加载：只有概要常驻，正文等模型自己按名字读（最纯粹的按需）
     #   keyword = 拿技能 keywords 跟用户问题做包含匹配，命中才取（零成本）
@@ -298,7 +265,6 @@ class KeeperConfig:
 
     host: str = "127.0.0.1"
     port: int = 8080
-    auth: ServerAuth = field(default_factory=ServerAuth)
     # 用哪个 agent 画像：装配器据此去数据库的 agent 表读（name 与 id 二选一）
     agent_name: Optional[str] = None
     agent_id: Optional[str] = None
@@ -306,13 +272,11 @@ class KeeperConfig:
     # 上面两个是"这个进程跑哪个 agent"（单 agent 部署），core 是"会话默认找谁"
     # （多 agent 部署下仍要有一个主脑）。留空时回落，所以不加这一段也照旧运行。
     core_agent: AgentSection = field(default_factory=AgentSection)
-    # 上游配置平台（拉 agent 定义用）
-    platform: PlatformSection = field(default_factory=PlatformSection)
     # framework 运行时下载源（镜像 / 自建）
     framework: FrameworkSection = field(default_factory=FrameworkSection)
-    # 本地默认大模型配置：**平台不维护 model**，用哪个模型是客户端自己的事
+    # 本地默认大模型配置：用哪个模型完全是本机自己的事
     llm: Dict[str, Any] = field(default_factory=dict)
-    # 本地默认工作区（平台同样不维护）
+    # 本地默认工作区
     workspace: WorkspaceSection = field(default_factory=WorkspaceSection)
     # 按 agent（id 或 name）的本地覆盖：{"旅游小助手": {"llm": {...}, "workspace": {...}}}
     agent_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -331,10 +295,8 @@ class KeeperConfig:
     def from_dict(cls, d: Dict[str, Any]) -> "KeeperConfig":
         d = dict(d)
         server_section = d.pop("server", {}) or {}
-        auth_section = server_section.get("auth") or {}
         agent_section = d.pop("agent", {}) or {}
         core_section = d.pop("core_agent", {}) or {}
-        platform_section = d.pop("platform", {}) or {}
         framework_section = d.pop("framework", {}) or {}
         llm_section = d.pop("llm", {}) or {}
         workspace_section = d.pop("workspace", {}) or {}
@@ -347,20 +309,11 @@ class KeeperConfig:
         return cls(
             host=server_section.get("host") or "127.0.0.1",
             port=int(server_section.get("port") or 8080),
-            auth=ServerAuth(
-                enabled=bool(auth_section.get("enabled", False)),
-                default_initiator_id=auth_section.get("default_initiator_id"),
-                token=auth_section.get("token") or "",
-            ),
             agent_name=agent_section.get("name"),
             agent_id=agent_section.get("id"),
             core_agent=AgentSection(
                 dir=core_section.get("dir"),
                 id=core_section.get("id"),
-            ),
-            platform=PlatformSection(
-                url=platform_section.get("url") or "http://localhost:9095",
-                token=platform_section.get("token") or "",
             ),
             framework=FrameworkSection(
                 python=framework_section.get("python") or "",
@@ -539,7 +492,7 @@ def save_agent_env(agent_id: str, python: str, node: str) -> None:
     与 ``load_config`` 共用同一份 config.yaml，只动 ``agent_overrides`` 小节，
     其余配置原样保留。传空字符串表示清空（回退到 framework 全局默认值）。
 
-    装载时 ``plat.sync._local_defaults`` 会按 ``agent_overrides`` → 全局默认
+    装载时 ``agent.config`` 会按 ``agent_overrides`` → 全局默认
     的顺序解析，所以这里写下的路径就是该 agent 实际使用的解释器。
     """
     p = default_config_path()
@@ -572,7 +525,6 @@ def save_settings(
     prompt_dump: Optional[Dict[str, Any]] = None,
     a2a: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
-    auth: Optional[Dict[str, Any]] = None,
 ) -> None:
     """保存用户设置（写 ``settings.yaml``，**不碰** config.yaml）。
 
@@ -590,5 +542,4 @@ def save_settings(
         prompt_dump=prompt_dump,
         a2a=a2a,
         context=context,
-        auth=auth,
     )

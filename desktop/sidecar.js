@@ -19,14 +19,8 @@
  *    loadURL 会先白屏再刷新，所以轮询健康接口，通了才开窗。
  * 3. **退出收干净**：走 before-quit 主动终止，否则关窗后 Python 变孤儿进程，
  *    下次启动又会撞数据库。
- * 4. **每次启动现生成入站 token**：内核里有能让 agent 执行本机命令的接口，而这个
- *    进程绑在回环端口上——同一 WiFi 下的设备够不着，但**用户打开的任意网页**够得着
- *    （CORS 只拦读响应、不拦发请求，GET 连预检都不触发）。token 让那些网页猜不到
- *    入场券。生成在这里而不是让用户配，是因为：随机的才安全，写进 config.yaml 的
- *    迟早会被提交进仓库或者在截图里泄露。
  */
 const { spawn } = require('child_process');
-const crypto = require('crypto');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -115,10 +109,6 @@ async function startSidecar({ onLog } = {}) {
       throw new Error(`找不到配置文件：${config}`);
     }
 
-    // 入站 token：32 字节 CSPRNG，base64url（无 +/= ，塞进 header 不用转义）。
-    // 每次启动都换，纵使有一次泄露也只影响那一次会话。
-    const token = crypto.randomBytes(32).toString('base64url');
-
     const child = spawn(
       python,
       ['-m', 'keeper.main', '--config', config, String(port)],
@@ -127,8 +117,6 @@ async function startSidecar({ onLog } = {}) {
         env: {
           ...process.env,
           PORT: String(port),
-          // 内核据此启用入站认证（见 keeper/api/auth.py）
-          KEEPER_TOKEN: token,
           /*
            * 内核日志落盘。stdio 是 pipe，全靠 onLog 转给窗口上的日志面板——而面板
            * 只在窗口活着时才有。浏览器僵死恰恰是最需要日志的时候，那次排查就是因为
@@ -161,7 +149,7 @@ async function startSidecar({ onLog } = {}) {
 
     await waitHealthy(port, 120000);
 
-    state = { child, port, token, url: `http://127.0.0.1:${port}` };
+    state = { child, port, url: `http://127.0.0.1:${port}` };
     return state;
   })();
 

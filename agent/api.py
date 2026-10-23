@@ -1,19 +1,11 @@
-"""agent 的装载 / 卸载 + **本地** agent 的增删改。
+"""agent 的本地增删改 + 停用 / 启动。
 
-两套并存，各管一段：
+keeper 是**本机单用户**应用：没有外部配置源，agent 画像、能力绑定、插件链接
+全部在本地维护。插件只来自本机插件库目录（``~/.keeper/plugins``），
+用**符号链接**绑定到 ``~/.keeper/agents/<id>/plugins/<name>``（见 ``keeper/plugin/lib.py``）。
 
-1. **本地创建**（``POST /manage/agents`` 等）：画像与能力绑定都落本地库，
-   插件来自本地插件库目录。这条路**不碰平台**——本机自用的 agent 不需要
-   联网、不需要注册到任何中心。
-2. **装载 / 卸载**（``load`` / ``unload``）：从平台拉配置 → 落本地库 → 装配。
-   平台 agent 走这条。
-
-两者的配置都存在同一张 ``agent`` 表里，**不会互相覆盖**：``sync_agent`` 只在
-``load`` 接口里被调用（且只接受平台上的 agent），本地创建的 agent 永远不经过
-它，所以它的绑定不会被整体替换掉。
-
-插件绑定落到 ``~/.keeper/agents/<id>/plugins/<name>`` 的**符号链接**，指向插件库
-里的真实目录（见 ``keeper/plugin/lib.py``）。
+「停用 / 启动」走 ``PATCH /{agent_id}/enable``（唯一开关，缺省开）；
+``POST /{agent_id}/unload`` 只释放运行时实例，不动配置与插件绑定。
 """
 from __future__ import annotations
 
@@ -52,11 +44,11 @@ async def _set_loaded(agent_id: str, loaded: bool) -> None:
 
 
 def _purge_agent_resources(agent_id: str) -> bool:
-    """删掉该 agent 的下载目录 ``~/.keeper/agents/<agent_id>``。
+    """删掉该 agent 的插件链接目录 ``~/.keeper/agents/<agent_id>``。
 
-    里面只是从平台拉下来的资源代码（mcp / skill / tool），删掉不影响配置——
-    再次装载时 ``_fetch_agent_resources`` 会重新下载，所以可以安全清理。
-    工作区目录（``~/.keeper/workspace/user/<name>``）**不动**：那里可能存着用户自己的文件。
+    里面装的是**插件符号链接**（指向插件库里的真实目录），删掉不影响插件库本身，
+    也不影响 agent 的画像 / 模型绑定——那几项在库里。
+    工作区目录（``~/.keeper/workspace/...``）**不动**：那里可能存着用户自己的文件。
     """
     from keeper.agent.config import default_agent_resource_root
 
@@ -64,21 +56,48 @@ def _purge_agent_resources(agent_id: str) -> bool:
     if not root.is_dir():
         return False
     shutil.rmtree(root, ignore_errors=True)
-    logger.info("已删除 agent 资源目录: %s", root)
+    logger.info("已删除 agent 插件链接目录: %s", root)
     return True
 
 
-@router.post("/{agent_id}/load")
-async def load_agent(agent_id: str) -> dict:
-    """装载：从平台拉该 agent 的配置 → 落本地库 → 装配成实例并注册。
+async def _assert_name_free(agent_id: str, name: str) -> None:
+    """创建 agent 前查重名。
 
-    平台改完配置再调一次，会覆盖本地缓存并重建实例（旧的先释放，避免资源泄漏）。
-    装载成功后置 ``loaded=True``，之后重启会自动装配。
+    ``agent.name`` 上有唯一约束，但约束是在最内层 INSERT 时才炸的——那种 500
+    完全看不出是重名。这里提前拦住，并把撞的是谁说清楚。
+    """
+    name = (name or "").strip()
+    if not name:
+        return
+    from sqlalchemy import select
 
-    **装载前查重名**：`agent.name`` 上有唯一约束，而平台分配的 id 和本地生成的
-    id 是两套体系——本地先建了个叫 ``assistant`` 的 agent，平台上又同步下来一个
-    同名的，两边 id 不同、约束就会在 INSERT 时炸成 500。这里提前拦住并说清楚
-    撞的是谁，因为那种 500 从报错里完全看不出是重名。
+    from keeper.store import Agent as AgentRow
+    from keeper.store import get_session_factory
+
+    async with get_session_factory()() as db:
+        dup = (
+            await db.execute(select(AgentRow).where(AgentRow.name == name))
+        ).scalars().first()
+    if dup is None or dup.id == agent_id:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"已经有一个同名的 agent「{name}」（id={dup.id}）。"
+            f"请先把那个改名或删除。"
+        ),
+    )
+
+
+@router.post("/{agent_id}/start")
+async def start_agent(agent_id: str) -> dict:
+    """启动：把库里的配置装配成运行时实例并注册。
+
+    「停用 / 启动」与 agent 的**配置**无关——配置在库里改，运行时实例在这里
+    重建。启动前查重名，避免两个实例抢同一个 id。
+
+    缺模型 / 插件起不来是常态：返回 200 + 可读原因，而不是 500，
+    前端要能显示"已启动但起不来"，用户补完模型 / 插件还能再点一次。
     """
     from sqlalchemy import select
 
@@ -88,40 +107,9 @@ async def load_agent(agent_id: str) -> dict:
         register_keeper,
         unregister_keeper,
     )
-    from keeper.plat import fetch_my_agents
-    from keeper.plat import sync_agent
-
-    agents = await fetch_my_agents()
-    target = next((a for a in agents if a.get("id") == agent_id), None)
-    if target is None:
-        raise HTTPException(
-            status_code=404, detail="平台上没有这个 agent，或它不在「我已添加」里"
-        )
-
-    logger.info(
-        "装载开始 agent=%s 名称=%s 平台声明的插件=%s",
-        agent_id,
-        target.get("name"),
-        [p.get("name") for p in (target.get("plugin") or []) if p],
-    )
-
-    await _assert_name_free(agent_id, target.get("name") or "")
-
-    await sync_agent(target)
-
-    await _fetch_platform_plugins(agent_id, target)
 
     from ..store import AgentCapabilityOverride, get_session_factory
 
-    # 这里曾经调 _ensure_default_llm 给没模型的 agent 自动绑第一个预设。现已移除：
-    # 模型的唯一来源是「模型管理页配好 → 这里显式绑定」，自动兜底会替用户做这个
-    # 决定——他明明选了另一个模型（或一个都不想要），却因为"建 agent 时库里恰好有
-    # 一个"而被绑上，且界面上看不出是谁替他选的。
-    # 现在没绑定就是没绑定：agent 以纯索引模式装起来（不调模型），并在日志和
-    # agent 信息里明确告诉用户去绑定。
-
-    # 本地已停用的话，只把配置拉下来，不进运行时——否则「停用」会被这次装载
-    # 悄悄撤销，用户会以为开关坏了
     async with get_session_factory()() as db:
         off = (
             await db.execute(
@@ -136,9 +124,8 @@ async def load_agent(agent_id: str) -> dict:
         return {
             "ok": True,
             "id": agent_id,
-            "name": target.get("name"),
             "running": False,
-            "reason": "配置已下载，但该 agent 在本地处于停用状态",
+            "reason": "该 agent 在本地处于停用状态",
         }
 
     old = get_keeper(agent_id)
@@ -149,30 +136,29 @@ async def load_agent(agent_id: str) -> dict:
     try:
         agent = await build_agent(agent_id=agent_id)
     except Exception as e:  # noqa: BLE001 缺模型 / 插件起不来都是常态
-        # 配置已经落到本地了，只是没跑起来。返回 200 + 可读原因，而不是 500：
-        # 前端要能显示"已装载但起不来"，用户补完模型/插件还能再点一次。
-        logger.warning("agent %s 装载后无法启动: %s", agent_id, e)
+        logger.warning("agent %s 启动后无法运行: %s", agent_id, e)
         await _set_loaded(agent_id, True)
         return {
             "ok": True,
             "id": agent_id,
-            "name": target.get("name"),
+            "name": agent_id,
             "running": False,
             "reason": str(e),
         }
     register_keeper(agent_id, agent)
-    # 标记已装载：下次重启自动装配（之前卸载过的话这里会重新打开）
+    # 标记已启动：下次重启自动装配
     await _set_loaded(agent_id, True)
-    logger.info("装载完成 agent=%s 名称=%s（已注册运行时实例）", agent_id, agent.name)
+    logger.info("启动完成 agent=%s 名称=%s（已注册运行时实例）", agent_id, agent.name)
     return {"ok": True, "id": agent_id, "name": agent.name, "running": True}
 
 
 @router.post("/{agent_id}/unload")
 async def unload_agent(agent_id: str) -> dict:
-    """卸载：释放实例 + 标记已卸载（重启不再装配）+ 清掉下载目录。
+    """停止：释放运行时实例 + 标记为「未启动」（重启不再自动装配）。
 
-    只清「下载下来的资源代码」与运行时实例，**保留本地配置缓存**，
-    所以再次点「装载」就能恢复（代码会重新下载）。
+    **不删任何东西**：画像、模型绑定、插件链接全留着，重新点「启动」就回来了。
+    （早期这里会连带删掉插件目录，那是"从平台下载的副本"时代的遗留——
+    现在插件只是符号链接，删掉等于悄悄清了用户的插件绑定。）
     """
     from keeper.agent.keeper import get_keeper, unregister_keeper
 
@@ -181,21 +167,18 @@ async def unload_agent(agent_id: str) -> dict:
         await agent.shutdown()
         unregister_keeper(agent_id)
 
-    # 即使本进程里没这个实例（比如上次装配失败），也要把「已卸载」落库——
+    # 即使本进程里没这个实例（比如上次装配失败），也要把「未启动」落库——
     # 否则重启时 build_all_agents 还会把它装回来。
     await _set_loaded(agent_id, False)
-    removed_dir = _purge_agent_resources(agent_id)
     logger.info(
-        "卸载完成 agent=%s 运行时实例=%s 删除目录=%s",
+        "停止完成 agent=%s 运行时实例=%s",
         agent_id,
         "已释放" if agent is not None else "本进程没有（仅清标记）",
-        removed_dir or "（无）",
     )
     return {
         "ok": True,
         "id": agent_id,
         "unloaded": agent is not None,
-        "removed_dir": removed_dir,
     }
 
 
@@ -328,143 +311,6 @@ async def _rebuild_if_enabled(agent_id: str) -> tuple:
         return False, str(e)
     register_keeper(agent_id, agent)
     return True, ""
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 本地 agent 的增删改
-#
-# 「本地创建」这条路不经过平台：画像、能力绑定、插件链接都落本地。已有的
-# ``load`` 接口只接受平台上的 agent，所以本地 agent 不会被 ``sync_agent`` 的
-# 「先删后插」覆盖掉绑定（见 keeper/plat/sync.py 的 _replace_bindings）。
-# ──────────────────────────────────────────────────────────────────────────
-
-
-async def _fetch_platform_plugins(agent_id: str, target: Dict[str, Any]) -> None:
-    """把平台下发的插件**真下载**到 ``~/.keeper/agents/<id>/plugins/<name>`` 并固定。
-
-    为什么平台 agent 不用链接
-    --------------------------
-    两类 agent 的**可变性**本来就不一样，不该共用一套机制：
-
-    - **平台 agent**：配置归平台，插件也归平台（平台下发的名单 + source）。
-      它的插件是不可变的、自包含的一份——直接把文件下载进来，版本就固定住了，
-      不受本机插件库变动的影响。也不支持在本地改它的插件（改了下次同步会没）。
-    - **本地 agent**：插件从本机 ``~/.keeper/plugins`` 里挑，用**符号链接**引用。
-      库里改了所有引用它的 agent 立刻生效，这正是本地维护想要的效果。
-
-    「固定」的具体含义
-    ------------------
-    已经在 agent 目录里的插件**不重复下载**（不管平台那边 main 分支动没动）。
-    重新装载只会补缺失的，不会悄悄覆盖——否则每次点「重新装载」都可能拿到
-    一份不同的代码，那样"版本"就无从谈起。
-
-    下载失败只跳过并告警，不阻断装载：网络抖一下不该让整个 agent 装不上。
-    """
-    from ..plugin import agent_plugins_dir
-    from ..plat.fetcher import FetchError, fetch_resource
-
-    got: List[str] = []
-    skipped: List[str] = []
-    failed: List[str] = []
-
-    for pl in target.get("plugin") or []:
-        pl = pl or {}
-        name = pl.get("name")
-        if not name:
-            continue
-        dest = agent_plugins_dir(agent_id) / name
-        src = pl.get("source") or {}
-        logger.info(
-            "处理插件资产 agent=%s 插件=%s 目标=%s kind=%s url=%s",
-            agent_id, name, dest, (src.get("kind") or "-"), src.get("url") or "-",
-        )
-        if dest.is_dir() and not dest.is_symlink():
-            logger.info(
-                "  插件 %s 已是固定副本，跳过下载（要重新拉取需先删目录 %s）", name, dest
-            )
-            skipped.append(name)  # 已经固定过了，不动它
-            continue
-
-        kind = (src.get("kind") or "").lower()
-        if kind == "local":
-            # 平台指明的就是本机路径（比如体积大、不便走网络的二进制），
-            # 建链接即可，不复制
-            from ..plugin import link_plugin
-
-            from pathlib import Path as _P
-
-            p = _P(src.get("url") or "").expanduser()
-            if not p.is_dir():
-                failed.append(f"{name}(本机路径不存在)")
-                continue
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if dest.is_symlink() or dest.exists():
-                    dest.unlink()
-                dest.symlink_to(p, target_is_directory=True)
-                logger.info("  插件 %s 建成本机链接 -> %s", name, p)
-                got.append(name)
-            except OSError as e:
-                logger.warning("  插件 %s 建链接失败：%s", name, e)
-                failed.append(f"{name}({e})")
-            continue
-
-        if not src.get("url"):
-            logger.warning("  插件 %s 平台没给 source.url，跳过", name)
-            failed.append(f"{name}(平台没给 source)")
-            continue
-        try:
-            await fetch_resource(src, dest)
-            logger.info("  插件 %s 下载完成 -> %s", name, dest)
-            got.append(name)
-        except FetchError as e:
-            logger.warning("插件 %s 下载失败，跳过：%s", name, e)
-            failed.append(f"{name}({e})")
-        except Exception as e:  # noqa: BLE001 下载器本身的意外也不该拖垮装载
-            logger.warning("插件 %s 下载异常，跳过：%s", name, e)
-            failed.append(f"{name}({e})")
-
-    logger.info(
-        "插件资产处理完毕 agent=%s | 成功=%s | 跳过=%s | 失败=%s",
-        agent_id, got or "无", skipped or "无", failed or "无",
-    )
-    if failed:
-        logger.warning(
-            "agent %s 有插件没拿到（不影响其余能力，装载继续）: %s",
-            agent_id, "；".join(failed),
-        )
-
-
-async def _assert_name_free(agent_id: str, name: str) -> None:
-    """装载平台 agent 前查重名。
-
-    ``agent.name`` 上有唯一约束。平台分配的 id 与本地生成的 ULID 是**两套体系**，
-    所以完全可能出现「本地建了个 assistant，平台上又同步下来一个同名的」——
-    id 不同、约束成立，INSERT 会在最内层炸成 500，而那种报错完全看不出是重名。
-    这里提前拦住，并把撞的是谁说清楚（本地建的 / 平台同步下来的）。
-    """
-    name = (name or "").strip()
-    if not name:
-        return
-    from sqlalchemy import select
-
-    from keeper.store import Agent as AgentRow
-    from keeper.store import get_session_factory
-
-    async with get_session_factory()() as db:
-        dup = (
-            await db.execute(select(AgentRow).where(AgentRow.name == name))
-        ).scalars().first()
-    if dup is None or dup.id == agent_id:
-        return
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"平台上这个 agent 叫「{name}」，但本机已经有一个同名的"
-            f"（{'本地创建' if dup.origin == 'local' else '平台同步'}，id={dup.id}）。"
-            f"请先把那个改名或删除，再装载。"
-        ),
-    )
 
 
 class AgentCreateIn(BaseModel):
@@ -711,45 +557,23 @@ def _yaml_scalar(v: str) -> str:
 
 
 @router.get("")
-async def list_agents(origin: Optional[str] = None) -> Dict[str, Any]:
-    """列出 agent，可按来源过滤。
+async def list_agents() -> Dict[str, Any]:
+    """列出本机所有 agent。
 
-    **默认只返回本机创建的（``origin=local``）**：平台同步下来的行是平台的镜像，
-    它们的配置所有权在平台，放进「本地 Agent」列表里只会和下面的平台列表重复
-    显示同一个 agent，而且用户在那里改绑定会被下次 ``sync_agent`` 静默冲掉。
-    要看全部传 ``?origin=all``（排查时有用）。
+    **不再按来源过滤**：以前有「平台同步下来的」和「本机创建的」两套来源，
+    列表默认只给后者，前者要去「智能体市场」看。现在没有外部来源了——
+    库里有的就是本机的，全部列出（``origin`` 只是历史字段，UI 不再据此分支）。
 
     每个 agent 带 ``missing_plugins``：勾了但链接不可用（库里目录被删了），
     装起来会少这些工具——不显式告诉 UI 的话，症状是「勾了却没这个工具」。
     """
-    from sqlalchemy import and_, or_, select
+    from sqlalchemy import select
 
     from keeper.plugin import agent_plugins_dir, linked_plugins
     from keeper.store import Agent as AgentRow
     from keeper.store import AgentCapabilityOverride, get_session_factory
 
     q = select(AgentRow).order_by(AgentRow.name)
-    if origin in (None, "", "local"):
-        # 默认只给本机创建的。平台镜像也塞进来会有两个后果：UI 上和平台列表
-        # 显示同一个 agent 两遍；用户在这里改它的绑定会被下次 sync_agent 冲掉。
-        q = q.where(AgentRow.origin == "local")
-    elif origin == "platform":
-        q = q.where(AgentRow.origin == "platform")
-    elif origin == "all":
-        # 「库存」= 本地创建的 ∪ **已装载的**平台 agent。
-        # 卸载过的平台 agent 不该出现在这里：它的配置已经从本机清掉了，留一行
-        # 只会让人以为还在。要再装回去去「智能体市场」——那边按这个字段决定
-        # 显示「装载」还是「重新装载」。
-        q = q.where(
-            or_(
-                AgentRow.origin == "local",
-                and_(AgentRow.origin == "platform", AgentRow.loaded.is_not(False)),
-            )
-        )
-    else:
-        raise HTTPException(
-            status_code=400, detail="origin 只能是 local / platform / all"
-        )
 
     factory = get_session_factory()
     async with factory() as db:
@@ -779,7 +603,9 @@ async def list_agents(origin: Optional[str] = None) -> Dict[str, Any]:
             {
                 "id": r.id,
                 "name": r.name,
-                "origin": r.origin or "platform",
+                # 历史字段：曾经区分「平台同步来的 / 本机创建的」。现在没有外部
+                # 来源了，只保留给旧数据看，UI 不再据此分支。
+                "origin": r.origin or "local",
                 "description": r.description,
                 "status": r.status,
                 # 本地启用开关（唯一开关，缺省开）。平台同步不碰这张 override
@@ -801,15 +627,14 @@ async def list_agents(origin: Optional[str] = None) -> Dict[str, Any]:
 async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
     """创建本地 agent：落库 + 落插件绑定 + 建插件链接 + **立刻装配成实例**。
 
-    **创建即装载。** 「装载」是从平台拉配置（`load_agent`）的叫法，只对平台 agent
-    有意义；本地 agent 根本没有平台配置可拉，所以创建完就直接进运行时——
-    否则它不会出现在概览里，用户还得再点一次装载，而那一层对它是多余的。
+    **创建即启动。** 配置全在本机，创建完就直接进运行时——否则它不会出现在
+    概览里，用户还得再点一次启动，而那一层对它是多余的。
 
     顺序是「先建链接 → 落库 → 装配」，任一步失败都**回滚干净**：
     链接是纯文件操作、可以撤；行删掉；已经起来的实例 shutdown + 注销。
     不回滚的话库里会留下一个指向半成品链接的 agent，比直接报错难查得多。
 
-    停用 / 启用走 ``PATCH /manage/agents/{id}``（改 ``status``），不用卸载。
+    停用 / 启用走 ``PATCH /manage/agents/{id}/enable``（唯一开关，缺省开）。
     """
     from sqlalchemy import select
 
@@ -823,61 +648,20 @@ async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400, detail=f"status 只能是 {'/'.join(_AGENT_STATUS)}"
         )
+    # 重名提前拦：``agent.name`` 上有唯一约束，但约束要到 INSERT 最内层才炸，
+    # 那种 500 完全看不出是重名。这里给一条能看懂的 409。
+    await _assert_name_free("", name)
     plugins = _resolve_plugins(body.plugins)
     _env_gate(plugins)  # 环境不满足 → 拒绝，不留半成品
 
     factory = get_session_factory()
     async with factory() as db:
-        # 工作区：给了 space_id 就按用户空间那条记录取路径与只读，别让调用方
-        # 自己传——两个来源必须是一个，否则会出现「用户空间是可写的、agent
-        # 画像写着只读，装配期按后者把写类工具丢了」这种静默失效。
-        if False:
-            from keeper.store import UserSpace as UserSpaceRow
-
-            space = await db.get(UserSpaceRow, body.workspace_space_id)
-            if space is None:
-                names = (
-                    await db.execute(
-                        select(UserSpaceRow.name).where(
-                            UserSpaceRow.id == body.workspace_space_id
-                        )
-                    )
-                ).scalars().first()
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"用户空间不存在：{body.workspace_space_id}"
-                        + (f"（{names} 已被删除）" if names else "")
-                    ),
-                )
-            ws_kind, ws_path = "local", space.path
-            logger.info(
-                "创建 agent %s：工作区=%s（user_space「%s」read_only=%s，"
-                "只读标志存在那条记录上，agent 侧不存）",
-                name, ws_path, space.name, bool(space.read_only),
-            )
-        elif body.workspace_path:
-            # 兼容旧调用：直接给了路径。**要求它在「用户空间」里登记过**——
-            # 只读的判断依据是 user_space.read_only，没登记就没有依据，而静默
-            # 按可写处理等于凭空给写权限，按只读处理又会让人以为「这目录不能写」。
-            # 两个都不行，所以明确报错。
-            from keeper.store import UserSpace as UserSpaceRow
-
-            space = (
-                await db.execute(
-                    select(UserSpaceRow).where(UserSpaceRow.path == body.workspace_path)
-                )
-            ).scalars().first()
-            if space is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"工作区目录未在「用户空间」登记：{body.workspace_path}。"
-                        "工作区必须先登记才能绑定（只读与否由那条记录决定）。"
-                        "请到「用户空间」补一条，或改用创建表单里的下拉框选择。"
-                    ),
-                )
-            ws_kind, ws_path = "local", space.path
+        # 工作区**不属于 agent**：它是会话级的绑定（会话页顶栏切换），
+        # agent 装配时永远用「我的空间」里的 default。
+        # 这里曾经有一整套「给 agent 绑工作区」的分支（按 user_space 取路径与只读），
+        # 但那个模型早已从 AgentCreateIn 里移除，函数体却还在读 body.workspace_path
+        # —— 于是**创建 agent 必然 500**（AttributeError）。
+        # 现在工作区不再随 agent 走，这段整体删除。
 
         dup = (
             await db.execute(select(AgentRow).where(AgentRow.name == name))
@@ -901,7 +685,7 @@ async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
         row = AgentRow(
             id=agent_id,
             name=name,
-            origin="local",  # 本机创建；平台同步来的行恒为 platform
+            origin="local",  # 历史字段：本机创建
             description=body.description,
             persona=body.persona,
             status=body.status,
@@ -912,6 +696,10 @@ async def create_agent(body: AgentCreateIn) -> Dict[str, Any]:
         # 插件绑定 = 链接目录里有什么，不落表。链接在 _ensure_plugin_links /
         # 创建前就已经建好了（见上面的 link_plugin 循环）。
         # 模型同理：不自动兜底。没绑定就是没绑定，由用户在模型信息里显式选。
+        #
+        # **必须 commit**：下面 build_agent() 是按 id 回读这张表的，不提交的话
+        # 那一刻行还不存在，装配会报「数据库里没有这个 agent 画像」。
+        await db.commit()
 
     # 装配成实例（创建即装载，且默认启用——本地开关是唯一开关，缺省开）。
     # 失败要连库带链接一起撤：留一个 build 不起来的 agent 在库里，用户看到的

@@ -23,7 +23,8 @@
 
 ## 二、L1 / L2 拆分
 
-**插件是唯一的一等公民**——不管是 MCP 组件还是 bin 组件，都按同一套规则拆：
+**插件的「知识组件」是一等公民**——技能（SKILL.md）按同一套规则拆；
+插件的 MCP / bin 组件走工具分组那一路。
 
 | 层 | 内容 | 何时进上下文 |
 |---|---|---|
@@ -32,22 +33,24 @@
 
 L1 的来源：
 
-- 技能：`skills/SKILL.md` 里的 `description`（或 skills 包的 `default_summary`）
+- 技能：`skills/SKILL.md` frontmatter 里的 `description`；
+  没写 `description` 的技能**按常驻全文处理**（见 `agent/config.py::_split_skill_frontmatter`
+  与第八节的兼容规则）
 - MCP 组件：插件清单里的 `summary` 字段
 - 工具分组：`group_summaries`（`agent/config.py` 装配时收集）
+
+> **内置工具不走按需加载**：`fs.deliver` / `task.mark_item_done` 常驻在工具表里
+> （`tools/builtin/registry.py`），它们没有 L1/L2 之分。
 
 ### 2.1 常驻范围：`always: true`
 
 ```python
-# skill/base.py:25
+# skill/base.py
 always: bool = False
 ```
 
-`always: true` 的技能**正文常驻** system prompt，不走按需加载：
-
-```357:358:keeper/agent/process.py
-            if s.system_prompt and bool(getattr(s, "always", False))
-```
+`always: true` 的技能**正文常驻** system prompt，不走按需加载
+（判断点在 `agent/process.py` 的常驻技能筛选处）。
 
 适用：行为约束型技能（比如 `plugin-authoring` 规定「写完代码必须自己跑」），
 它每轮都要生效，不适合"用时才加载"。
@@ -57,7 +60,7 @@ always: bool = False
 ## 三、统一加载接口：`load_capabilities`
 
 ```python
-# agent/process.py:60
+# agent/process.py
 _CAP_LOADER = "load_capabilities"
 ```
 
@@ -67,7 +70,8 @@ _CAP_LOADER = "load_capabilities"
 模型看到「可用能力」清单（L1）后，确定要用某个就调：
 
 ```
-ACTION load_capabilities {"keys": ["codebase-memory"]}
+<ACTION>load_capabilities</ACTION>
+<ACTION_INPUT>{"keys": ["codebase-memory"]}</ACTION_INPUT>
 ```
 
 三条硬规则（`_load_capabilities` 实现）：
@@ -124,15 +128,13 @@ messages 侧追加只影响尾部。
 
 插件作者需要提供的（缺了就退化成整包常驻）：
 
+清单格式有两种（`plugin/formats.py::detect_format` 自动识别）：
+`keeper-plugin.json`（keeper 格式）与 `.claude-plugin/plugin.json`（Claude 格式）。
+
 ```json
 {
   "skill": "skills/SKILL.md",
-  "skills": {
-    "my-skill": {
-      "description": "一句话：什么时候用（L1）",
-      "always": false
-    }
-  },
+  "skills": ["skills/other.md"],
   "mcpServers": {
     "server": {
       "summary": "一句话：这个 server 干嘛的（L1）",
@@ -148,6 +150,37 @@ messages 侧追加只影响尾部。
   ]
 }
 ```
+
+`skills/` 目录**自动发现**（`skills/SKILL.md`、`skills/<name>/SKILL.md`、
+`skills/<name>.md` 三种布局都认），清单里的 `skill` / `skills` 只是补充，
+用来指向**非默认位置**的文件。
+
+技能的 frontmatter（写在 SKILL.md 顶部）：
+
+```markdown
+---
+description: 一句话：什么时候用（L1）
+always: false
+keywords: [触发词, 触发词]
+tools: [run, read]
+---
+```
+
+- **没写 `description` 的旧技能一律按常驻全文处理**：省 token 的前提是模型能靠概要
+  判断要不要用；概要都没有就摘掉正文，等于让能力凭空消失。
+- `keywords` 供**系统侧预加载**匹配（见下节）。
+- `tools` 只是**软标注**（告诉模型这个技能擅长哪些工具），不控制工具可用性。
+
+---
+
+## 七之二、系统侧预加载（与模型自选并行）
+
+除了模型自己调 `load_capabilities`，系统侧还有一条并行路径：
+`config.yaml` 的 `context.capability_preload`（`off` / `keyword` / `auto`，默认 `auto`），
+由 `agent/process.py::_preload_capabilities` 在每轮开头按用户问题里的关键词
+**自动**把匹配的技能正文拉进上下文。
+
+两条路径不冲突：系统预加载解决"模型不知道该加载什么"，模型自选解决"这轮用不上"。
 
 ---
 

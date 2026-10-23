@@ -47,7 +47,7 @@ import { Stat } from "./components/ui/Stat";
  * - **对话**：点一下开一段新对话并进去。它是侧栏里的**主动作**，但形式上和
  *   「智能体」一样是导航项 —— 因为两者回答的是同一个问题："我要干什么"，
  *   而不是一个是动作、一个是页面。点击时会先建好会话（见 startChat）。
- * - **智能体**：装下「我的智能体 / 我的插件 / 智能体市场」三个 tab。
+ * - **智能体**：装下「我的智能体 / 我的插件」两个 tab。
  *
  * 会话记录本身（增删改查）搬进了对话页的「会话管理 / 任务管理」面板：那是会话
  * 真正待着的地方，把它们拆在两个界面只会让人找不到重命名和删除。
@@ -103,7 +103,7 @@ type Route = {
   page: string;
   agentId?: string;
   /**
-   * 「智能体」页当前停在哪个 tab（我的智能体 / 我的插件 / 智能体市场）。
+   * 「智能体」页当前停在哪个 tab（我的智能体 / 我的插件）。
    *
    * 放路由里而不是组件内部 state：点侧栏「智能体」要能回到第一个 tab（而不是
    * 记住上次那个），从「创建 Agent」返回也要能精确落回「我的智能体」。缺省即第一个。
@@ -492,7 +492,12 @@ export default function App() {
               而这正是本次要消灭的决策成本（侧栏「开始对话」直接落核心 agent）。
               「智能体」页继续承担"装载 / 配置 / 管理"的职能。 */}
           {route.page === "agents" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+            /* box-border：项目关了 Tailwind preflight，box-sizing 是 content-box，
+               h-full（height:100%）之外还要再加 py-6 的 48px 内边距——容器比父级
+               高出 48px，而 main 是 overflow-hidden，底部那截被裁掉且滚不到。
+               症状：页面滚到底，最后一块仍然贴着窗口底边，没有留白。
+               改成 border-box 后内边距算进高度里，底部留白才露得出来。 */
+            <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
               <AgentsHubPage
                 tab={agentTab}
                 onTabChange={(t) => setRoute({ page: "agents", agentTab: t })}
@@ -505,7 +510,7 @@ export default function App() {
             </div>
           )}
           {route.page === "agent-create" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+            <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
               <AgentCreatePage
                 onDone={() => setRoute({ page: "agents", agentTab })}
               />
@@ -569,12 +574,12 @@ export default function App() {
             </div>
           )}
           {route.page === "trash" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+            <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
               <RecycleBinPage />
             </div>
           )}
           {route.page === "models" && (
-            <div className="h-full animate-fade-up overflow-auto px-7 py-6">
+            <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
               <ModelManage />
             </div>
           )}

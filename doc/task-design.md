@@ -154,6 +154,24 @@ draft ──> planning ──> plan_review ──> executing ──> waiting_rev
 
 ---
 
+## 六之二、会话运行模式（`chat_sessions.mode`）
+
+任务模式是**会话的一种组织方式**，与「运行模式」是两个维度：
+
+| mode | 含义 | 执行体 |
+|---|---|---|
+| `normal` | 标准 ReAct 多步循环 | `agent/process.py` |
+| `simple` | 快捷模式：不做多步 ReAct | `agent/simple_process.py` |
+| `ptc` | 代码沙箱模式 | `agent/ptc_sandbox.py` |
+
+任务会话与 `mode` 正交：任务可以跑在 `normal` 上（常规），
+`mode` 决定**这一轮怎么执行**，任务决定**这一轮要完成什么**。
+
+> 注意：`simple` / `ptc` 模式**不做上下文治理**（外部化 + 压缩），
+> 那套机制是围绕 ReAct 多步循环设计的。
+
+---
+
 ## 七、上限与保护
 
 | 保护项 | 机制 |

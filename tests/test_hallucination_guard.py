@@ -73,9 +73,64 @@ def test_real_obs_is_engine_injected():
     print("  OK 输出里的 OBSERVATION 一律判幻觉")
 
 
+def test_xml_protocol_shape():
+    """XML 协议形态（现行协议本体）下的幻觉判定。
+
+    协议改成 XML 标签后，幻觉的**两条判据**要跟着换形状：
+    自编 ``<OBSERVATION>``、一轮多个 ``<THOUGHT>``。
+    """
+    # 自编回执 → 幻觉
+    fake = (
+        "<THOUGHT>先写文件</THOUGHT>\n"
+        "<ACTION>fs.write_file</ACTION>\n"
+        '<ACTION_INPUT>{"path": "a.html"}</ACTION_INPUT>\n'
+        "<OBSERVATION>已写入 a.html</OBSERVATION>\n"
+    )
+    reason = detect_hallucination(fake)
+    assert reason, "XML 形态的自编 <OBSERVATION> 没被检出"
+    d = P.parse(fake, 1)
+    assert d.kind == "hallucination", f"期望 hallucination，实际 {d.kind}"
+    print(f"  OK XML 自编回执判幻觉: {reason!r}")
+
+    # 一轮两个 <THOUGHT> → 幻觉（它在替引擎编排后续轮次）
+    two = (
+        "<THOUGHT>先写文件</THOUGHT>\n"
+        "<ACTION>fs.write_file</ACTION>\n"
+        '<ACTION_INPUT>{"path": "a.html"}</ACTION_INPUT>\n'
+        "<THOUGHT>再交付一下</THOUGHT>\n"
+        "<ACTION>fs.deliver</ACTION>\n"
+        '<ACTION_INPUT>[]</ACTION_INPUT>\n'
+    )
+    reason = detect_hallucination(two)
+    assert reason, "XML 形态的一轮多 THOUGHT 没被检出"
+    assert P.parse(two, 1).kind == "hallucination"
+    print(f"  OK XML 一轮多 THOUGHT 判幻觉: {reason!r}")
+
+    # 正常 XML 输出不误判
+    ok_cases = [
+        (
+            "单 THOUGHT + 单 ACTION",
+            "<THOUGHT>先看目录</THOUGHT>\n<ACTION>bash</ACTION>\n"
+            '<ACTION_INPUT>{"command": "ls"}</ACTION_INPUT>\n',
+        ),
+        ("纯 FINAL", "<FINAL>已完成</FINAL>\n"),
+        ("ASK", "<THOUGHT>信息不足</THOUGHT>\n<ASK>用哪个目录？</ASK>\n"),
+        (
+            "正文里提到 OBSERVATION 字样",
+            "<THOUGHT>看看回执里写了什么</THOUGHT>\n<ACTION>bash</ACTION>\n"
+            '<ACTION_INPUT>{"command": "cat OBSERVATION.md"}</ACTION_INPUT>\n',
+        ),
+    ]
+    for name, text in ok_cases:
+        assert detect_hallucination(text) == "", f"误判: {name}"
+        assert P.parse(text, 1).kind != "hallucination", f"误判: {name}"
+        print(f"  OK XML 未误判: {name}")
+
+
 if __name__ == "__main__":
     test_real_dump_is_detected()
     test_normal_responses_not_flagged()
     test_obs_inside_content_not_flagged()
     test_real_obs_is_engine_injected()
+    test_xml_protocol_shape()
     print("\n全部通过")

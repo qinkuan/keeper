@@ -1,4 +1,4 @@
-// keeper 服务的响应类型（对应 niubi_platform/keeper/keeper.py 的 FastAPI 端点）
+// keeper 服务的响应类型（对应 keeper/ 下的 FastAPI 端点）
 
 export interface Health {
   ok: boolean;
@@ -10,11 +10,12 @@ export interface AgentItem {
   id: string;
   name: string;
   /**
-   * 来源：platform=平台同步下来的（改了要回平台改），local=本机创建的。
-   * 两类混在同一张表里，没有这个字段就分不清卡片上这个 agent 该去哪改配置。
+   * 来源：core=核心 agent（从本地目录构建，不在 agents 表里）。
+   * 其余取值是历史字段（曾经区分「外部同步来的 / 本机创建的」），现在没有外部
+   * 配置源了，库里有的就是本机的——UI 不再据此分支。
    */
-  origin?: "platform" | "local";
-  /** 简介（来自平台配置的本地缓存），概览卡片展示用 */
+  origin?: "local" | "core";
+  /** 简介，概览卡片展示用 */
   description?: string | null;
   ready: boolean;
   mcp_connected: boolean;
@@ -22,50 +23,6 @@ export interface AgentItem {
   a2a_url?: string | null;
 }
 
-// ---- 平台（配置之源）----
-// mcp / skill / tool / agent 的定义统一由 platform 管理，keeper 只负责运行。
-// 智能体页直接读平台，因此这里只保留"读"所需的字段。
-/**
- * 平台侧的 agent 画像。
- *
- * 注意：**不含** llm / workspace_kind / workspace_path / workspace_read_only——
- * 那几项已划归客户端（keeper）本地配置，平台不再下发（见 platform 的
- * ``_drop_agent_local_columns``）。这里要与平台 ``AgentOut`` 保持一致。
- */
-export interface PlatformAgent {
-  id: string;
-  name: string;
-  description?: string | null;
-  persona: string;
-  status: string;
-  owner_id?: string | null;
-  bindings: { id: string; agent_id: string; kind: string; ref_name: string }[];
-  created_at: string;
-  updated_at: string;
-}
-
-/**
- * 市场里的一条 agent：平台上全部定义 + **当前用户是否已添加**。
- *
- * 只有「已添加」的才会出现在 `/api/me/agents` 里，也就是本地能装载的范围。
- * 因此在平台上"创建了 agent"≠"可以添加载"，这一列专门用来区分二者。
- */
-export interface MarketAgent {
-  id: string;
-  name: string;
-  description?: string | null;
-  status: string;
-  added: boolean;
-  env_dependencies: EnvDependency[];
-  created_at: string;
-}
-
-/** agent 运行所需的环境依赖：解释器种类 + 最低版本（可选最高版本，前端暂不填）。 */
-export interface EnvDependency {
-  kind: string; // "python" | "node"
-  min_version: string; // 最低版本，如 "3.11"
-  max_version?: string | null; // 服务端预留的最高版本约束口子
-}
 
 export interface SkillsResp {
   skills: string[];
@@ -927,19 +884,19 @@ export interface PluginLibraryResp {
   plugins: LibraryPlugin[];
 }
 
-/** 本地 agent（不来自平台） */
+/** 本机 agent（keeper 是本机单用户应用，库里有的就是本机的） */
 export interface LocalAgent {
   id: string;
   name: string;
-  /** 来源：local=本机创建。列表默认只返回 origin=local 的，所以这里恒为 local */
-  origin: "platform" | "local";
+  /** 历史字段：曾经区分「外部同步来的 / 本机创建的」。现在恒为 local，UI 不再据此分支。 */
+  origin: "local";
   description: string | null;
   status: string;
   /**
    * 本地启用开关（唯一开关，缺省 true）。
    *
-   * 和 status 分开是故意的：status 是平台侧的配置，会被同步覆盖；这个开关写
-   * 在 override 表里，平台同步不碰，所以「停用」不会在某次装载后悄悄失效。
+   * 和 status 分开是故意的：status 是 agent 画像的一部分；这个开关写在
+   * override 表里，是本地唯一的启停开关。
    */
   enabled: boolean;
   loaded: boolean;
@@ -993,13 +950,6 @@ export interface CoreAgentSettings {
   agents?: { id: string | null; name: string }[];
 }
 
-/** 入站认证开关（见 keeper/auth/api.py）。``token`` 仅在「开启时新生成」那一次才回传，
-    前端拿到后 adopt（存 sessionStorage）；平时不回传，避免把 token 撒进响应体。 */
-export interface AuthSettings {
-  enabled: boolean;
-  token?: string;
-}
-
 /** 本地设置（写回 config.yaml）：按管理的内容分段。
 
    注意**没有**核心 agent 段：核心 agent 由本地目录构建（agent.yaml / soul.md），
@@ -1008,8 +958,6 @@ export interface SettingsResp {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
-  /** 入站认证开关（运行时状态，来自 keeper.auth） */
-  auth: AuthSettings;
   /** 各对端当前的熔断状态（只读） */
   a2a_breakers: BreakerState[];
   /** 手动重置熔断后返回：重置了几个对端 */
@@ -1023,8 +971,6 @@ export interface SettingsInput {
   prompt_dump: PromptDumpSettings;
   a2a: A2ASettings;
   context: ContextSettings;
-  /** 入站认证开关；不传则不动（兼容旧调用） */
-  auth?: AuthSettings;
 }
 
 /** 趋势图上的一个点（一个时间桶） */

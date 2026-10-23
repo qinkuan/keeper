@@ -105,7 +105,7 @@ export function CoreAgentEditor() {
   return (
     <Stack>
       <p className="text-[12px] leading-6 text-ink-muted">
-        核心 agent 由本地目录构建，不在数据库里——所以它不能被卸载、也不参与平台同步。
+        核心 agent 由本地目录构建，不在数据库里——所以它不能被卸载。
         它就是那个目录里唯一的一个角色。
       </p>
 

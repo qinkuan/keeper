@@ -28,7 +28,7 @@ import { SegmentedControl } from "../components/ui/Segmented";
 import { Table } from "../components/ui/Table";
 import type { Column } from "../components/ui/Table";
 import { Stat } from "../components/ui/Stat";
-import { apiListAgents, apiReactParseStats } from "../api/client";
+import { apiListAgentsWithCore, apiReactParseStats } from "../api/client";
 
 const RANGES = [
   { label: "今天", value: "today", days: 1 },
@@ -44,9 +44,17 @@ export default function ObservabilityPage() {
   const [agentId, setAgentId] = useState<string | undefined>(undefined);
   const [range, setRange] = useState("7d");
 
-  const agentsQ = useQuery({ queryKey: ["obs-agents"], queryFn: apiListAgents });
+  /* 用 apiListAgentsWithCore：核心 agent 从本地目录构建、不在运行时实例表里，
+     默认列不出来。而用量 / 解析统计是按 agent_id 落库的，主脑的记录全在它
+     名下——不带它就选不到主脑（实测症状：可观测面板的 agent 下拉里找不到核心
+     agent）。 */
+  const agentsQ = useQuery({
+    queryKey: ["obs-agents"],
+    queryFn: apiListAgentsWithCore,
+  });
   const agents = agentsQ.data?.agents ?? [];
   // 没选就跟随第一个 agent：面板是"看某个 agent 表现"的，默认第一个最省事
+  // （核心 agent 排在第一位 → 默认看的就是主脑）
   const effectiveAgent = agentId ?? agents[0]?.id;
   const days = RANGES.find((r) => r.value === range)?.days ?? 7;
 
@@ -158,7 +166,12 @@ export default function ObservabilityPage() {
   ];
 
   return (
-    <div className="h-full overflow-auto px-7 py-6">
+    // box-border：项目关了 Tailwind preflight，box-sizing 是 content-box，
+    // 于是 h-full（height:100%）之外**还要再加** py-6 的 48px 内边距——容器比父级
+    // 高出 48px，而 main 是 overflow-hidden，底部那截被裁掉且滚不到。
+    // 症状：页面滚到底，逐条用例表的最后一行仍然贴着窗口底边，底部一点留白都没有。
+    // 改成 border-box 后内边距算进高度里，底部留白才真正露出来。
+    <div className="h-full box-border overflow-auto px-7 py-6">
       {/* 控制条：agent + 时间范围。三块面板共用同一个窗口 */}
       <div className="mb-6 flex flex-wrap items-center gap-3">
         <div className="w-[220px]">
@@ -168,7 +181,12 @@ export default function ObservabilityPage() {
             disabled={agentsQ.isLoading}
             options={[
               ...(agents.length
-                ? agents.map((a) => ({ value: a.id, label: a.name }))
+                ? agents.map((a) => ({
+                    value: a.id,
+                    // 标出核心 agent：它与数据库 agent 不同源（本地目录构建），
+                    // 同名时用户分不清自己看的是哪一个
+                    label: a.origin === "core" ? `${a.name}（核心）` : a.name,
+                  }))
                 : [{ value: "", label: "暂无已装载的 agent" }]),
             ]}
           />

@@ -578,6 +578,8 @@ class LangChainLLM:
             base_url=self.cfg.base_url,
             timeout=self.cfg.timeout,
             max_retries=self.cfg.max_retries,
+            # 绕开 httpx2 + 老 brotli 的解压崩溃（见 _http_default_headers）
+            default_headers=_http_default_headers(),
         )
 
     def _direct_payload(self, msgs: list) -> list:
@@ -893,6 +895,62 @@ def _expand_env(value: Optional[str]) -> Optional[str]:
     return value
 
 
+# ── 请求头：绕开 httpx2 + 老 brotli 的解压崩溃 ─────────────────────────────
+#
+# 症状：所有 LLM 调用报 ``APIConnectionError: Connection error``，但网络是通的
+# （同一个 URL 用 httpx 直连能拿到 401）。真实报错在更下面：
+#
+#   httpx2/_decoders.py → self._decompress(data, output_buffer_limit=...)
+#   TypeError: process() takes no keyword arguments
+#
+# 原因：httpx2 2.12 的 BrotliDecoder 走官方 brotli 的 ``Decompressor.process``，
+# 并给它传 ``output_buffer_limit`` 关键字——而官方 brotli（1.0.9）的
+# ``process()`` 只接受一个参数。httpx2 的默认 Accept-Encoding 里带 br
+# （装了 brotli 就会带），于是**读响应体的那一步**就炸，所有请求全军覆没。
+#
+# 绕过：请求头里只要 gzip / deflate，服务端就不会回 br，httpx2 改走 gzip 解码器。
+# 代价是失去 br 的压缩率——LLM 响应本来就不大，可以忽略。
+#
+# 为什么要探测而不是无条件加：brotli / httpx2 修好之后这段就该自动失效，
+# 不然白丢压缩率。探测方式是「空数据试调一次」，安全且确定。
+
+_HTTP_HEADERS_CACHE: Dict[str, bool] = {}
+
+
+def _brotli_incompatible() -> bool:
+    """当前环境的 brotli 是否与 httpx2 2.12 的解压调用不兼容。
+
+    判据只有一个：``Decompressor.process`` 收不收 ``output_buffer_limit``。
+    收不了就是会崩（httpx2 就是这么调的）。
+    """
+    cached = _HTTP_HEADERS_CACHE.get("brotli")
+    if cached is not None:
+        return cached
+    result = False
+    try:
+        import brotli  # type: ignore[import-not-found]
+
+        brotli.Decompressor().process(b"", output_buffer_limit=1024)
+    except ImportError:
+        result = False  # 没装 brotli，httpx2 根本不会用 br
+    except TypeError:
+        result = True
+    except Exception:  # noqa: BLE001 其它异常按「兼容」处理，别挡路
+        result = False
+    _HTTP_HEADERS_CACHE["brotli"] = result
+    return result
+
+
+def _http_default_headers() -> Dict[str, str]:
+    """LLM 客户端要带的额外请求头（目前只有绕 brotli 崩溃那一项）。
+
+    环境正常时返回空 dict——不往请求里塞任何多余的东西。
+    """
+    if not _brotli_incompatible():
+        return {}
+    return {"Accept-Encoding": "gzip, deflate"}
+
+
 def build_model(cfg: LLMConfig) -> Any:
     """根据 LLMConfig 现场构建一个 ChatModel 实例（用完即弃，不缓存）。"""
     from langchain.chat_models import init_chat_model
@@ -929,15 +987,27 @@ def build_model(cfg: LLMConfig) -> Any:
             base_url=cfg.base_url,
             timeout=cfg.timeout,
             stream_usage=True,
+            # 绕开 httpx2 + 老 brotli 的解压崩溃（见 _http_default_headers）
+            default_headers=_http_default_headers(),
         )
 
     # 其余 provider 仍走 init_chat_model，并尽量开启 stream_usage（不支持会回退）。
     kwargs["stream_usage"] = True
+    # default_headers 同理：支持的 provider 会带上，不支持的下面会去掉。
+    headers = _http_default_headers()
+    if headers:
+        kwargs["default_headers"] = headers
     try:
         return init_chat_model(**kwargs)
     except TypeError:
         kwargs.pop("stream_usage", None)
-        return init_chat_model(**kwargs)
+        try:
+            return init_chat_model(**kwargs)
+        except TypeError:
+            # 构造器不认 default_headers（部分 provider）→ 去掉再试。
+            # 少了这个头顶多是又碰上 brotli 那个崩溃，不会更糟。
+            kwargs.pop("default_headers", None)
+            return init_chat_model(**kwargs)
 
 
 def get_llm(cfg: Optional[Dict[str, Any]] = None) -> Optional[LLM]:

@@ -1,12 +1,11 @@
 import { PageHeader } from "../components/ui/Page";
 import { Tabs } from "../components/ui/Tabs";
 import AgentList from "./AgentList";
-import AgentMarketPage from "./AgentMarketPage";
 import PluginPage from "./PluginPage";
 
-/** 三个 tab 的 key。tab 放在路由里而不是组件内部 state：这样点侧栏「智能体」总能
+/** 两个 tab 的 key。tab 放在路由里而不是组件内部 state：这样点侧栏「智能体」总能
  *  回到第一个 tab，且从「创建 Agent」返回时能精确落回「我的智能体」。 */
-export const AGENT_TABS = ["mine", "plugins", "market"] as const;
+export const AGENT_TABS = ["mine", "plugins"] as const;
 export type AgentTab = (typeof AGENT_TABS)[number];
 
 export function isAgentTab(v: unknown): v is AgentTab {
@@ -14,7 +13,7 @@ export function isAgentTab(v: unknown): v is AgentTab {
 }
 
 /**
- * 智能体 —— 一个入口，三件事。
+ * 智能体 —— 一个入口，两件事。
  *
  * 原来「智能体 / 智能体市场 / 插件」是侧栏三个平级入口，但它们其实是同一件事的
  * 三个面：**我的智能体**（库存）、**我的插件**（能力来源）、**智能体市场**（目录）。
@@ -24,8 +23,8 @@ export function isAgentTab(v: unknown): v is AgentTab {
  * 合成一页后按 tab 分工：页头只留一个标题，操作按钮（刷新 / 创建）交给各自的 tab
  * （embedded 模式）。
  *
- * tab 内容**按需挂载**：切走就卸载。否则三个列表的查询会同时在跑——「智能体市场」
- * 要打平台接口，一直挂着就会在用户根本没看它的时候也发请求。
+ * 已经没有外部配置源了——keeper 是本机单用户应用，agent 全部在本机创建，
+ * 所以「智能体市场」这个 tab 随之消失。
  */
 export default function AgentsHubPage({
   tab,
@@ -40,7 +39,7 @@ export default function AgentsHubPage({
     <div className="mx-auto w-full max-w-[1180px]">
       <PageHeader
         title="智能体"
-        desc="我已有的智能体、它们用的插件，以及平台上还能装载什么。"
+        desc="我已有的智能体，以及它们用的插件。"
       />
 
       {/* mb-4 给 tab 栏与下方内容留呼吸位；Tabs 自带 border-b，这里不再重复描边 */}
@@ -51,13 +50,11 @@ export default function AgentsHubPage({
         items={[
           { key: "mine", label: "我的智能体" },
           { key: "plugins", label: "我的插件" },
-          { key: "market", label: "智能体市场" },
         ]}
       />
 
       {tab === "mine" && <AgentList onCreate={onCreate} embedded />}
       {tab === "plugins" && <PluginPage embedded />}
-      {tab === "market" && <AgentMarketPage embedded />}
     </div>
   );
 }

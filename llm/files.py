@@ -44,7 +44,7 @@ from .config import LLMConfig
 # 复用它而不是自己再写一份：api_key / base_url 在 llm_profiles 里可以写成
 # ${ENV_VAR} 引用环境变量（llm/client.py 的既有约定）。上传这条路同样吃这个
 # 约定，否则字面量 "${DEEPSEEK_KEY}" 会被当成真 key 发出去。
-from .client import _expand_env
+from .client import _expand_env, _http_default_headers
 
 # DeepSeek 的 Files API 是 OpenAI 兼容的，直接用官方 SDK（字段名 bytes / object /
 # purpose 与它期望的一致）。做 try 兜底：openai 平时只是 langchain-openai 的间接
@@ -180,7 +180,13 @@ class _DeepSeekUploader:
         if AsyncOpenAI is None:  # pragma: no cover - 环境没装 openai
             raise RuntimeError("openai SDK 未安装，无法上传文件（pip install openai）")
 
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=120)
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=120,
+            # 绕开 httpx2 + 老 brotli 的解压崩溃（见 client._http_default_headers）
+            default_headers=_http_default_headers(),
+        )
         # purpose 必须为 user_data（文档）。不设 expires_after → 永久有效。
         created = await client.files.create(
             file=(name or "upload", data, mime),

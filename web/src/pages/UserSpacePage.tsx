@@ -998,6 +998,13 @@ export default function UserSpacePage() {
     if (p) saveM.mutate(p);
   };
 
+  // 桌面原生能力是否可用：只有 Electron 壳会注入 window.keeperSpace。
+  // 网页形态下没有原生目录对话框，「选择文件夹」点了不会有任何反应。
+  const isDesktop = useMemo(
+    () => typeof (window as any).keeperSpace !== "undefined",
+    []
+  );
+
   const relPath = selectedFile
     ? selectedFile.slice(path.length).replace(/^\//, "") || "/"
     : "";
@@ -1024,8 +1031,11 @@ export default function UserSpacePage() {
               <div className="text-[15px] font-semibold text-ink-strong">
                 还没有配置「我的空间」
               </div>
-              <div className="text-[12.5px] text-ink-muted">
+              <div className="flex items-center gap-2 text-[12.5px] text-ink-muted">
                 指定一个文件夹作为 agent 默认访问的工作目录
+                <span className="shrink-0 rounded-full border border-line bg-surface px-1.5 py-0.5 text-[10.5px] leading-4 text-ink-faint">
+                  仅桌面端
+                </span>
               </div>
             </div>
           </div>
@@ -1037,7 +1047,9 @@ export default function UserSpacePage() {
           <button
             type="button"
             onClick={chooseSpaceFolder}
-            className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg bg-brand-gradient px-5 text-[14px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98]"
+            disabled={!isDesktop}
+            title={isDesktop ? "" : "仅桌面端可选择本地文件夹"}
+            className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg bg-brand-gradient px-5 text-[14px] font-medium text-white shadow-brand transition-all duration-150 hover:brightness-[1.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100 disabled:active:scale-100"
           >
             <FolderOpen className="h-4 w-4" />
             选择文件夹
@@ -1131,7 +1143,8 @@ export default function UserSpacePage() {
                 onContextMenu={(key, isDir, e) => handleContextMenu(key, isDir, e)}
               />
               <div className="px-3 py-2 text-[11px] leading-5 text-ink-faint">
-                点「上传」按钮从电脑选文件拷入「我的空间」；hover 每行可下载 / 重命名 / 删除。
+                <div className="text-ink-muted">仅桌面端支持本地空间展示</div>
+                点「上传」按钮从电脑选文件拷入「我的空间」；hover 每行可复制 / 在文件管理器中打开 / 重命名 / 删除。
               </div>
             </div>
           </div>

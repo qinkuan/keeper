@@ -9,7 +9,7 @@
 
 ## 一、要解决的问题
 
-ReAct 每步把 `THOUGHT` / `ACTION` / `OBSERVATION` **全量累加**进 messages。
+ReAct 每步把 `<THOUGHT>` / `<ACTION>` / 回执 **全量累加**进 messages。
 长任务下输入 token 线性膨胀，直到撞窗口。
 
 两个手段，都是为了**在中途把上下文压下来**：
@@ -27,8 +27,8 @@ ReAct 每步把 `THOUGHT` / `ACTION` / `OBSERVATION` **全量累加**进 message
 | 滚动外部化 | 已退出保活窗口 | `externalize_min_chars`（5000） |
 
 **顺序必须是「先外部化、再截断」**：硬截断砍掉的中段既没落盘也没有 `block_id`，
-模型永远拿不回来，只看到「省略了多少字符」；而内置工具（`fs.read_file` /
-`fs.search_files`）都没有 `offset`/`limit` 参数，它只能原样重调同一个工具，
+模型永远拿不回来，只看到「省略了多少字符」；而文件读写走的 `bash` 工具
+**没有 `offset`/`limit` 参数**，它只能原样重调同一个命令，
 于是打转。外部化只多一步 `read(block_id)`，信息不丢。
 
 反过来（先截断、再让滚动外部化判断）会让外部化**形同虚设**：messages 里的内容
@@ -57,7 +57,7 @@ ReAct 每步把 `THOUGHT` / `ACTION` / `OBSERVATION` **全量累加**进 message
 | 内联上限 | `observation_limit` | 3500 | **单条超长**：超过就换成引用 |
 | 滚动阈值 | `externalize_min_chars` | 5000 | **退出保活窗口后**：超过才换成引用 |
 
-### 3.1 单条超长（`Process._fit_observation`）
+### 3.1 单条超长（`agent/process.py::_fit_observation`）
 
 > **长度 > `observation_limit`（3500）就外部化**
 
@@ -89,7 +89,7 @@ ReAct 每步把 `THOUGHT` / `ACTION` / `OBSERVATION` **全量累加**进 message
 `never_externalize` 名单里、或写盘失败，才只剩它。它的文案里带「怎么缩小范围
 重试」的指引——因为砍掉的中段没有 id 可读，模型需要知道下一步该干什么。
 
-### 3.1 阈值为什么默认 5000
+### 3.3 阈值为什么默认 5000
 
 外部化会**改写中段消息，同样破坏前缀缓存**。实测 2000 字符就换引用时，
 省下的 token 远抵不上后续缓存失效的代价。
@@ -131,12 +131,25 @@ ReAct 每步把 `THOUGHT` / `ACTION` / `OBSERVATION` **全量累加**进 message
 | `pin_recent_reads` | 2 | 追回的内容保活几条 |
 | `preview_head` / `preview_tail` | 400 / 200 | 留在上下文的首尾字符数 |
 | `dir` | `~/.keeper/context-store` | 块存储目录 |
-| `compact_*` | 见上 | 压缩相关 |
-| `max_output_tokens` | 16384 | 单次 LLM 输出上限 |
+| `compact_enabled` | `True` | 压缩总开关 |
+| `model_context_limit` | 64000 | 模型窗口（token），用于算水位 |
+| `compact_ratio` | 0.7 | 用到窗口的这个比例就压 |
+| `compact_min_steps` | 20 | 步数线（**且**要过水位下限） |
+| `compact_min_ratio` | 0.7 | 步数触发的水位下限：不到它，步数再多也不压 |
+| `compact_min_interval` | 5 | 两次压缩之间至少隔几步（防抖动） |
+| `keep_recent_steps` | 6 | 最近这几步永远保留原文 |
+| `compact_max_chars` | 1500 | 生成的骨架摘要上限 |
+| `chars_per_token` | 2.5 | token 粗估系数，只用于算水位 |
+| `capability_preload` | `auto` | 技能预加载策略：`off` / `keyword` / `llm` / `auto` |
+| `cap_small_limit` | 6000 | 「技能少」的判定线：低于它就全部取来，不做判读 |
+| `tool_group_min` | 3 | 同组工具达到几个就折成一行（1 = 从不折叠） |
+| `tool_parallel` | 0 | 工具并行：0 关 / 1 只读工具 / 2 只读 + 声明 `mutating: false` 的插件工具 |
+| `tool_parallel_max` | 5 | 单轮最多并发几个 |
+| `max_output_tokens` | 16384 | 单次 LLM 输出上限（0 = 不限制） |
 
 ### 5.1 `max_output_tokens` 为什么要显式设
 
-ReAct 的 `ACTION_INPUT` 里常塞着整份文件，一次输出上万字符容易撞 provider 的
+ReAct 的 `<ACTION_INPUT>` 里常塞着整份文件，一次输出上万字符容易撞 provider 的
 **输出上限而被静默截断**——表现是参数 JSON 不完整、工具莫名失败，而模型自己
 完全不知情（它那边只是"输出结束了"）。
 
@@ -190,7 +203,7 @@ max_tokens 只有 4096**——"什么都不配"其实已经在被截了。16384 
 | | 上下文治理 | 记忆 |
 |---|---|---|
 | 方向 | 把**当前轮**的内容挪出去 | 把**历史轮**的内容取回来 |
-| 存储 | `~/.keeper/context-store` | `~/.keeper/sessions/*.jsonl` + FTS5 |
+| 存储 | `~/.keeper/context-store` | `~/.keeper/memory/days/<日期>/turns.jsonl` + FTS5 |
 | 触发 | 系统侧自动（水位 / 窗口） | 模型主动 `recall` / `read` |
 
 两者共用 `read(block_id)` 的取回方式，但**块来自不同目录**。

@@ -95,7 +95,7 @@ class ToolRegistry:
             return "（当前没有可用工具）"
         return "\n".join(self._line(t) for t in tools)
 
-    # ---- 按需展示（P1，见 doc/capability-loading-design.md 第四节）----
+    # ---- 按需展示（P1，见 doc/capability-loading.md 第四节）----
     @staticmethod
     def _line(t: ProcessorTool) -> str:
         params = ", ".join(f"{k}: {v}" for k, v in t.parameters.items()) or "（无参数）"

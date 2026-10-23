@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from . import protocol
 from .context_store import Compactor, clip_observation, ctx_cfg, externalize
 from .delegatee import Ctx, DelegateeRegistry, Requirement
 from .planner import ReActPlanner
@@ -29,7 +30,16 @@ logger = logging.getLogger(__name__)
 
 # 「最终回答」标签：与 planner.parse 的 FINAL 判定保持一致。
 # 流式时用它判断从哪儿开始才是给用户的回答（之前是 THOUGHT / ACTION）。
-_FINAL_RE = re.compile(r"(?ims)(?:^|\n)\s*(?:FINAL|最终回答|ANSWER)\s*[:：]\s*")
+#
+# 两种形态都认：XML（``<FINAL>``）与文本（``FINAL:``）。闭标签 ``</FINAL>``
+# 天然不匹配——正则要求标签名紧跟 ``<``，而闭标签是 ``</``。
+_FINAL_RE = re.compile(
+    r"(?ims)(?:<FINAL\b[^>]*>|(?:^|\n)\s*(?:FINAL|最终回答|ANSWER)\s*[:：]\s*)"
+)
+
+# ``</FINAL>``：XML 协议下它是回答正文的**结束**标记，流式推送时不能把它
+# 当成回答内容推给用户（否则用户会看到一串 </FINAL>）。
+_FINAL_CLOSE_RE = re.compile(r"(?i)</\s*FINAL\s*>")
 
 # 工具「失败」的 observation 标记。多数失败是工具**正常返回**一段错误文本而不是
 # 抛异常，所以只能靠这些前缀判断——它们是 fs.py / guard.py 约定的稳定前缀。
@@ -134,6 +144,12 @@ _MAX_HALLUCINATION_RETRIES = 2
 # 到顶后降级为「按我们的方式执行它那个调用」，而不是作废（见循环里的 format_error
 # 分支）。
 _MAX_FORMAT_ERROR_RETRIES = 2
+
+# 「动作写出来了、参数没送达」的点破上限。参数丢了却照常调工具，是最贵的一种
+# 空转：工具只能回一句「缺少 xxx 参数」，模型看不到自己写错了什么，于是原样
+# 重试——实测一条用例因此连烧 11 轮 bash__run，最后 agent 放弃并开始编。
+# 点破到顶后照常执行（宁可让工具报错，也不要让这一轮白费）。
+_MAX_BAD_ARGS_RETRIES = 2
 
 # 单轮 ReAct 的最长墙钟时间（秒）。客户端断开时 agent 仍会跑完（用户切页面/
 # 关窗口不该中断思考），但那之后用户按不到「停止生成」——所以要有服务端兜底，
@@ -350,7 +366,7 @@ class ReactProcess:
         # 免得刚提示就触顶，模型连总结的机会都没有。
         self.budget_warn_rate = 0.9
 
-        # ---- 能力按需加载（L1 概要常驻 / L2 正文按需，见 capability-loading-design.md）
+        # ---- 能力按需加载（L1 概要常驻 / L2 正文按需，见 capability-loading.md）
         self.skills: List[Any] = list(skills or [])
         # 本会话经 `/` 动态激活的插件带来的技能（keeper.prepare 每轮刷新）：
         # 与 agent 级技能分开存——这些是用户**显式点开**的，正文整段进 system，
@@ -543,7 +559,7 @@ class ReactProcess:
             if s.system_prompt and bool(getattr(s, "always", False))
         )
 
-    # ---- 能力按需加载：L2 正文（见 doc/capability-loading-design.md）----
+    # ---- 能力按需加载：L2 正文（见 doc/capability-loading.md）----
     def install_capability_loader(self) -> None:
         """把 ``load_capabilities`` 装进本轮工具表。
 
@@ -746,13 +762,28 @@ class ReactProcess:
 
     @staticmethod
     def _first_obs_pos(text: str) -> int:
-        """第一个行首 OBSERVATION 的位置；没有返回全文长度。
+        """第一个 OBSERVATION 标签的位置；没有返回全文长度。
 
         连续跑飞到上限时会用到：截断到自编 OBSERVATION 之前，剩下的
         THOUGHT + ACTION + ACTION_INPUT 是它真实想做的，参数通常是完整的。
         """
-        m = re.search(r"(?m)^\s*OBSERVATION\s*[:：]", text or "")
-        return m.start() if m else len(text or "")
+        seg = protocol.first_segment(text or "", "OBSERVATION")
+        return seg.start if seg is not None else len(text or "")
+
+    def _bad_args_note(self, dec: Any, tool: Any) -> str:
+        """「参数没送达」的点破说明：说清缺的是什么、要怎么写。"""
+        names = list(getattr(tool, "parameters", {}) or {})
+        return (
+            f"你这次写了要调 `{dec.tool}`，但**参数没送达**——"
+            f"`<ACTION_INPUT>` 没能解析出内容（或不是合法 JSON），"
+            f"所以这一步没有执行。\n"
+            f"请按这个形状重发（工具名只写名字，参数全部放 `<ACTION_INPUT>` 的 JSON 里）：\n"
+            f"<ACTION>{dec.tool}</ACTION>\n"
+            f'<ACTION_INPUT>{{"{names[0] if names else "参数名"}": "值"}}</ACTION_INPUT>\n'
+            f"需要传的参数：{'、'.join(names) or '（无）'}。"
+            f"如果上一次你写的是 `<ACTION_INPUT></ACTION_INPUT>` 或者把参数写在了"
+            f"`<ACTION>` 里面，这次都要挪进 `<ACTION_INPUT>` 的 JSON。"
+        )
 
     def _hallucination_note(self, dec: Any) -> str:
         """本轮作废的说明：把「你在扮演引擎」这件事原样点破。
@@ -769,12 +800,13 @@ class ReactProcess:
         return (
             f"[系统] 本轮作废，没有执行任何工具。\n\n"
             f"原因：{dec.hallucination}。\n\n"
-            "OBSERVATION 是**引擎注入**的标签，只有引擎能写；你写的那几行 "
+            "回执是**引擎注入**的，只有引擎能写；你写的那几行 "
             "（「文件已写入」「已发布」之类）**全部是假的**，不代表任何工具被"
             "执行过。刚才这一轮里，文件没有写、产物没有挂。\n\n"
             "判断「做没做」只看回执：没收到回执 = 没做。\n\n"
-            "请重新输出**一轮**：只写一个 THOUGHT，然后一个 ACTION（或 FINAL），"
-            "写完 ACTION_INPUT 就停下等回执，不要替引擎往下写。"
+            "请重新输出**一轮**：只写一个 `<THOUGHT>`，然后一个 `<ACTION>` + "
+            "`<ACTION_INPUT>`（或直接给 `<FINAL>`），写完就停下等回执，"
+            "不要替引擎往下写。"
         )
 
     def _format_error_note(self, dec: Any) -> str:
@@ -790,13 +822,13 @@ class ReactProcess:
             "[系统] 本轮作废，没有执行任何工具。\n\n"
             f"原因：{dec.format_error}。\n\n"
             "本接口**没有向模型注册任何原生工具**，那些标记既不会被执行、也不会被"
-            "解析——照着它们走等于什么都没发生。要调用工具，请只写这两行纯文本：\n\n"
-            "THOUGHT: 先想清楚要做什么\n"
-            "ACTION: 上面「可用工具」清单里的工具名\n"
-            'ACTION_INPUT: {"参数名": "值"}\n\n'
-            "写完这三行就**停下等回执**，不要继续往下写。若本轮就是要直接回答，则只写：\n\n"
-            "THOUGHT: 想清楚了\n"
-            "FINAL: 回答正文\n"
+            "解析——照着它们走等于什么都没发生。要调用工具，请只写这三个标签：\n\n"
+            "<THOUGHT>先想清楚要做什么</THOUGHT>\n"
+            "<ACTION>上面「可用工具」清单里的工具名</ACTION>\n"
+            '<ACTION_INPUT>{"参数名": "值"}</ACTION_INPUT>\n\n'
+            "写完这三个标签就**停下等回执**，不要继续往下写。若本轮就是要直接回答，则只写：\n\n"
+            "<THOUGHT>想清楚了</THOUGHT>\n"
+            "<FINAL>回答正文</FINAL>\n"
         )
 
     def _progress_note(self, step_no: int) -> str:
@@ -815,11 +847,11 @@ class ReactProcess:
         left = total - step_no
         head = f"\n[步 {step_no}/{total}"
         if left <= 0:
-            return head + "：这是最后一步，必须直接给 FINAL]"
+            return head + "：这是最后一步，必须直接给 <FINAL>]"
         if left <= 3:
             return (
                 head + f"，只剩 {left} 步]"
-                "\n请立刻收尾：先调用 `fs.deliver([...])` 交付产物清单，再给 FINAL；"
+                "\n请立刻收尾：先调用 `fs.deliver([...])` 交付产物清单，再给 <FINAL>；"
                 "不要开启新的验证 / 调试（写了也跑不完）。"
             )
         return head + "]"
@@ -862,7 +894,12 @@ class ReactProcess:
         )
 
     def _guard_check(
-        self, name: str, tool: Any, args: Dict[str, Any]) -> Optional[str]:
+        self,
+        name: str,
+        tool: Any,
+        args: Dict[str, Any],
+        read_only: Optional[bool] = None,
+    ) -> Optional[str]:
         """危险工具执行前的静态拦截；放行返回 ``None``，拦下则返回给模型看的说明。
 
         刻意放在**执行之前**而不是之后：拦下来时副作用为零，模型也拿到了可读的
@@ -871,6 +908,10 @@ class ReactProcess:
         只读工作区按「读命令白名单」放行（``ls`` / ``grep`` / ``git status`` 这类），
         可写工作区不拦命令（否则正常的 git / npm 流程会全废），只查工作空间外路径。
         详见 :mod:`keeper.tools.guard`——它同时诚实列出了自己的漏判。
+
+        ``read_only`` 给了就不看工作区的标记：给 ``False`` 表示「这次调用按可写
+        处理」（路径越界照拦）。用它的是 code 子 agent——它跑的是模型自己写的
+        代码，不该被只读约束挡住（见 :class:`keeper.agent.delegatee.Delegatee`）。
         """
         if not getattr(tool, "dangerous", False):
             return None
@@ -892,7 +933,7 @@ class ReactProcess:
                 tool_name=name,
                 args=args,
                 dangerous=True,
-                read_only=bool(ws.read_only),
+                read_only=bool(ws.read_only) if read_only is None else bool(read_only),
                 workspace=ws.root,
                 # 会话私有临时目录在工作区之外，但它是 agent 自己的草稿区，
                 # 明确放行——否则 bash 里带临时文件路径会被当越界拦掉，agent
@@ -1326,10 +1367,19 @@ class ReactProcess:
         """内核工具桥：供子 agent（如 code 沙箱里的 kt.call）回调主系统工具。
 
         只暴露工具、不暴露子 agent，从根上杜绝子 agent 再委托（决策 5：禁止递归）。
+
+        **守卫不能漏**：子 agent 拿到的也是同一套工具，越界 / 只读限制对它同样
+        成立。曾经这里直接 ``tool.execute``，等于给子 agent 开了一条后门——
+        code 沙箱里一句 ``kt.call("bash__run", command="cp a b")`` 就能在只读
+        工作区里写出文件，主循环的守卫完全看不到（实测被评测的
+        ``read-only-write-refused`` 用例就是这样红的）。
         """
         tool = self.registry.get(name)
         if tool is None:
             return f"[无此工具: {name}]"
+        blocked = self._guard_check(name, tool, args or {})
+        if blocked:
+            return blocked
         try:
             return await tool.execute(args or {})
         except Exception as e:  # noqa: BLE001
@@ -1339,13 +1389,23 @@ class ReactProcess:
         """子 agent 专属工具桥：用 delegatee 自己的工具子集；未配置则回退宿主表。
 
         仍只暴露工具、不暴露子 agent——从根上杜绝子 agent 再委托（决策 5：禁止递归）。
+
+        守卫同样要过（理由见 :meth:`_tool_bridge`），**但只读约束按委派员自己的
+        标记走**：``code`` 子 agent 跑的是模型自己写的代码，按「可写」处理
+        （路径越界照拦），否则它就只能绕道用 Python 直接写文件——那比放行更难看，
+        也不符合「只读约束是防第三方插件乱写」的初衷。
         """
         reg = getattr(delg, "tools", None) or self.registry
+        # 可写的委派员：守卫按可写判定（只查路径越界，不套只读白名单/禁写）
+        ro: Optional[bool] = False if getattr(delg, "writable", False) else None
 
         async def _b(name: str, args: dict) -> str:
             tool = reg.get(name)
             if tool is None:
                 return f"[无此工具: {name}]"
+            blocked = self._guard_check(name, tool, args or {}, read_only=ro)
+            if blocked:
+                return blocked
             try:
                 return await tool.execute(args or {})
             except Exception as e:  # noqa: BLE001
@@ -1519,6 +1579,7 @@ class ReactProcess:
 
         buf = ""
         final_at: Optional[int] = None
+        pushed = 0
         stopped = False
         async for chunk in stream(messages, system=system):
             buf += chunk
@@ -1526,11 +1587,17 @@ class ReactProcess:
                 m = _FINAL_RE.search(buf)
                 if m:
                     final_at = m.end()  # 标记之后才是回答正文
-                    tail = buf[final_at:]
-                    if tail:
-                        await on_delta(tail)
-            else:
-                await on_delta(chunk)
+            if final_at is not None:
+                # XML 协议：正文到 ``</FINAL>`` 为止——闭标签是引擎的分隔符，
+                # 不是回答内容，推给用户会变成一串 </FINAL>。
+                # 每次都按**完整 buf** 重算，所以闭标签跨 chunk 到达也不会漏。
+                visible = buf[final_at:]
+                cut = _FINAL_CLOSE_RE.search(visible)
+                if cut:
+                    visible = visible[: cut.start()]
+                if len(visible) > pushed:
+                    await on_delta(visible[pushed:])
+                    pushed = len(visible)
             if should_stop is not None and await should_stop():
                 stopped = True
                 break
@@ -1570,13 +1637,22 @@ class ReactProcess:
         # 上下文治理：外部化 + 水位压缩（见 doc/context-design.md）
         compactor = Compactor(self.llm)
 
-        # 重放挂起前的步骤，让模型看到之前做过什么、问过什么、用户答过什么
+        # 重放挂起前的步骤，让模型看到之前做过什么、问过什么、用户答过什么。
+        #
+        # 格式必须与提示词里的**协议本体一致**（XML 标签）：历史里的写法就是模型
+        # 的「输出范例」，不一致的话它会照着旧格式写，改造当场失效。
+        # 内容做闭合转义——正文是模型自己写的任意文本，可能含 </FINAL> 这类字样。
         for s in prior_steps or []:
             if s.kind == "ask":
                 messages.append(
                     {
                         "role": "assistant",
-                        "content": f"THOUGHT: {s.thought}\nASK: {s.observation or ''}",
+                        "content": protocol.join_blocks(
+                            [
+                                protocol.render("THOUGHT", s.thought),
+                                protocol.render("ASK", s.observation or ""),
+                            ]
+                        ),
                     }
                 )
                 continue
@@ -1589,9 +1665,15 @@ class ReactProcess:
                 messages.append(
                     {
                         "role": "assistant",
-                        "content": (
-                            f"THOUGHT: {s.thought}\nACTION: {s.tool}\n"
-                            f"ACTION_INPUT: {json.dumps(s.args or {}, ensure_ascii=False)}"
+                        "content": protocol.join_blocks(
+                            [
+                                protocol.render("THOUGHT", s.thought),
+                                protocol.render("ACTION", s.tool),
+                                protocol.render(
+                                    "ACTION_INPUT",
+                                    json.dumps(s.args or {}, ensure_ascii=False),
+                                ),
+                            ]
                         ),
                     }
                 )
@@ -1600,7 +1682,7 @@ class ReactProcess:
                 )
 
         # system_extra 交给 planner 排在「输出格式」之前：格式要求是引擎契约，
-        # 不能被 skill 的内容覆盖，否则模型不再输出 THOUGHT / ACTION。
+        # 不能被 skill 的内容覆盖，否则模型不再输出 <THOUGHT> / <ACTION>。
         # dynamic_extra（/ 激活插件的正文）紧随其后，同属高优先级注入。
         system = self.planner.system_prompt(
             # 精简清单：内置/零散工具给明细，大组折成一行只列名字（用到时补定义）
@@ -1628,6 +1710,9 @@ class ReactProcess:
         # 格式错误（原生 tool-calling 等）的点破次数。与幻觉分开计：成因不同，
         # 降级策略也不同（幻觉作废，格式错降级执行）。
         format_error_retries = 0
+        # 「动作写出来了、参数没送达」的点破次数（参数是空的 / JSON 写坏了）。
+        # 到顶后照常执行——宁可让工具自己报一句，也不要把这一轮白费。
+        bad_args_retries = 0
         # 本轮开始的墙钟时刻：给时长守卫用。客户端断开后 agent 仍会跑完，
         # 没有这个兜底的话用户关掉页面就等于放任长任务白烧 token。
         started_at = time.perf_counter()
@@ -1672,6 +1757,8 @@ class ReactProcess:
                 m = _FINAL_RE.search(resp)
                 if m:
                     partial = resp[m.end() :].strip()
+                    # XML 协议：闭标签不是回答内容
+                    partial = _FINAL_CLOSE_RE.split(partial)[0].strip()
                 return ProcessResult(
                     answer=partial,
                     steps=steps,
@@ -1756,6 +1843,37 @@ class ReactProcess:
                 dec = self.planner.native_as_act(resp, dec.thought)
                 if dec is None:  # 兜底：刚检出过，理论上不会发生
                     dec = self.planner.parse("", step_i)
+
+            # 「动作写出来了、参数没送达」——**先别急着调工具**。
+            #
+            # 为什么：拿空参数去调，工具只能回一句「缺少 command 参数」——
+            # 这句话里没有任何模型能据此纠正的信息（它不知道自己漏了什么、漏在
+            # 哪），于是它原样重试。实测一条用例因此连烧 11 轮 bash__run，
+            # 最后一轮放弃、直接开始编答案（还写得很像样）。点破一次的成本
+            # （一轮）远低于十一次空转的成本。
+            #
+            # 只在「这工具本来就有参数」且「参数一个都没解析出来」时才拦：
+            # 全可选参数的工具被空参调用是合法的（git status 这类）。
+            if dec.kind == "act" and dec.tool:
+                _t = self.registry.get(dec.tool)
+                if _t is not None and _t.parameters:
+                    _args = dec.args or {}
+                    _empty = not _args or set(_args) == {"_raw"}
+                    if _empty:
+                        bad_args_retries += 1
+                        if bad_args_retries <= _MAX_BAD_ARGS_RETRIES:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": self._bad_args_note(dec, _t),
+                                }
+                            )
+                            continue
+                        logger.warning(
+                            "连续 %s 次参数没解析出来，仍按空参数执行 %s",
+                            bad_args_retries,
+                            dec.tool,
+                        )
 
             if dec.kind == "final":
                 # 没调工具的纯思考轮：也记一步，让思考内容落在「自主规划过程」里，
@@ -2052,7 +2170,7 @@ class ReactProcess:
                                 f"（系统提示）本轮 token 预算已用 {pct}%"
                                 f"（{budget.get('used')} / {budget.get('limit')}）："
                                 "不要再调用新的工具，直接基于已有信息给出最终回答，"
-                                "以 FINAL: 开头。"
+                                "以 <FINAL> 开头。"
                             ),
                         }
                     )
@@ -2062,7 +2180,7 @@ class ReactProcess:
             messages.append(
                 {
                     "role": "user",
-                    "content": "你已收集到上述信息，请基于已有信息给出最终回答（用 FINAL: 开头）。",
+                    "content": "你已收集到上述信息，请基于已有信息给出最终回答（用 <FINAL> 开头）。",
                 }
             )
             # 超步数后的「强制总结」是一次额外调用，不对应任何 step：
@@ -2088,8 +2206,8 @@ class ReactProcess:
                 messages.append(
                     {
                         "role": "user",
-                        "content": "不要再调用任何工具，也不要写 THOUGHT / ACTION，"
-                        "只输出 FINAL: 之后的最终回答正文。",
+                        "content": "不要再调用任何工具，也不要写 <THOUGHT> / <ACTION>，"
+                        "只输出 <FINAL> 里的最终回答正文。",
                     }
                 )
                 resp2, _ = await self._llm_call(

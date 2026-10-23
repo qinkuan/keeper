@@ -1,3 +1,9 @@
+> ⚠️ **已过期**：这是旧「文本协议」（`THOUGHT:` / `ACTION:`）时期的提示词快照。
+> 现行协议是 **XML 标签**形态（`<THOUGHT></THOUGTH>` / `<ACTION></ACTION>` /
+> `<ACTION_INPUT></ACTION_INPUT>` / `<FINAL></FINAL>` …），以
+> `keeper/agent/planner.py` 的 `system_prompt()` 为准；协议定义见
+> `keeper/agent/protocol.py`。本文件仅作历史留档，不要照着它改代码。
+
 你是一个遵循 ReAct（推理-行动）模式工作的 AI 助手（你的名称：Keeper）。
 你可以调用工具来获取真实信息，再综合给出最终回答；不要编造未经工具确认的事实。
 

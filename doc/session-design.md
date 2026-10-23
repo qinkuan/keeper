@@ -36,12 +36,16 @@ chat_sessions ──1:N──> session_messages ──1:N──> react_steps
      │
      ├──1:N──> threads ──1:N──> agent_messages      ← 对端链路
      │
+     ├──1:N──> tasks ──1:N──> task_items           ← 任务模式
+     │
+     ├──1:N──> chat_sessions (parent_id)            ← 子会话树
+     │
      └── kind: chat | task | browser
                  │ task    → tasks（任务模式，一对一）
                  └ browser → 「浏览器」页独占（该页只列这一类）
 ```
 
-三张主表 + 两张跨端表：
+三张主表 + 两张跨端表 + 任务表：
 
 | 表 | 承载 |
 |---|---|
@@ -50,6 +54,7 @@ chat_sessions ──1:N──> session_messages ──1:N──> react_steps
 | `react_steps` | 一轮内部的 ReAct 步骤 |
 | `threads` | 本地会话 ↔ 某个对端的那条链 |
 | `agent_messages` | 跨端往来的消息 |
+| `tasks` / `task_items` | 任务模式：计划 → 审批 → 执行 → 验收 |
 
 ---
 
@@ -63,8 +68,14 @@ chat_sessions ──1:N──> session_messages ──1:N──> react_steps
 | `agent_id` | **所属 agent**。单进程多 agent 下按它隔离会话（没有这列会串台） |
 | `initiator_id` | 发起人 id（人或外部 agent），区分谁发起的 |
 | `context_id` | 协议层上下文锚（A2A contextId），与内部主键**解耦** |
-| `user_space_id` | 绑定的用户空间；为空则回落默认空间 |
+| `user_space_id` | **历史遗留列**：工作区已改为会话空间（`~/.keeper/workspace/session/<sid>/`），运行期不再读它 |
 | `kind` | 会话类别：`chat`（普通，对话页）/ `task`（任务绑定会话）/ `browser`（浏览器会话，浏览器页）。**三者在列表里互斥**，列表按这列筛；新增取值不需要迁移（无 CHECK 约束），但校验在接口层 |
+| `mode` | 运行模式：`normal`（ReAct 多步）/ `simple`（快捷）/ `ptc`（代码沙箱） |
+| `parent_id` | 父会话 —— 子会话树 |
+| `ball_key` | 「浏览器」页的归属键 |
+| `thinking` / `reasoning_effort` | 思考内容 / 推理强度开关 |
+| `activated_plugins` | 本轮启用的插件 |
+| `deleted_at` / `status="deleted"` | **软删除**；删除的会话进回收站（`GET /manage/sessions/trash`），可恢复 |
 | `status` / `title` / `summary` | 状态、标题、摘要 |
 
 `context_id` 与主键分离的意义：换协议时只换映射，不动 session 主键。
@@ -122,7 +133,17 @@ chat_sessions ──1:N──> session_messages ──1:N──> react_steps
 
 `in_reply_to` 串联多轮：存在指向它的记录 = 已被回复，**故不设 status**。
 
-### 4.6 索引
+### 4.6 附件
+
+用户往会话里传的文件：
+
+- 上传：`POST /agents/{agent_id}/sessions/{sid}/attachments`
+- 取回：`GET /agents/{agent_id}/files/attachment/{sid}/{aid}`
+- 落盘：会话空间的 `@tmp/uploads/<attachment_id>/`
+
+附件不进消息正文，走独立的表，因此可以单独重取、单独清理。
+
+### 4.7 索引
 
 按实际查询路径建：`chat_sessions.agent_id`、`chat_sessions.context_id`、
 `session_messages.chat_session_id`、`react_steps.session_message_id`、

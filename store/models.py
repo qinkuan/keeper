@@ -515,14 +515,14 @@ class Agent(Base):
     __tablename__ = "agent"
 
     id: Mapped[str] = mapped_column(String(26), primary_key=True, default=new_id)
-    # 来源：``platform``=从平台同步下来的副本（默认），``local``=本机创建。
+    # **历史字段**：曾经区分「从平台同步下来的副本」（platform）与「本机创建」
+    # （local）。平台对接已整体移除，keeper 现在是本机单用户应用——库里有的
+    # 就是本机的，所以这一列只保留给旧数据看，**不再有任何逻辑按它分支**。
     #
-    # 必须显式记：两类 agent 混在同一张表里，而 id 分别来自平台和本地 ULID，
-    # **没有别的字段能区分它们**。不记的后果有两个：同一个 agent 在 UI 上显示
-    # 两遍（本地列表 + 平台列表），以及更糟的——本地改了平台 agent 的绑定后，
-    # 下一次 ``sync_agent`` 的「先删后插」会把改动静默冲掉。
+    # 留着不删是因为它是已落库的 schema：删列要写迁移，收益却只有「少一列」。
+    # 存量库里 origin='platform' 的行会被迁移统一归一成 'local'。
     origin: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="platform", server_default="platform"
+        String(16), nullable=False, default="local", server_default="local"
     )
     name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

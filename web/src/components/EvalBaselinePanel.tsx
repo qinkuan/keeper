@@ -40,6 +40,11 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
   // 差异，否则改了选项页面却纹丝不动）；② 作为下次运行的基线。之前拆成两个
   // state 就踩了这个坑——选项只喂给了下次运行，当前报告不会重查。
   const [cmpWith, setCmpWith] = useState<string | undefined>(undefined);
+  // 上一次运行**失败**时的现场（run_id + 日志尾巴）。失败信息不能只存在
+  // statusQ 里：那条 query 绑在 activeRun 上，一清空就查不到了。
+  const [runFail, setRunFail] = useState<{ runId: string; log: string } | null>(
+    null,
+  );
 
   const suitesQ = useQuery({ queryKey: ["eval-suites"], queryFn: apiEvalSuites });
   const historyQ = useQuery({
@@ -83,15 +88,30 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
   // 那一刻，statusQ 因为换了 queryKey，data 还是 undefined——此时
   // `undefined === "running"` 为 false，会直接掉进下面的「运行结束」分支
   // 把刚设上的 activeRun 清空。症状：点了运行没反应，刷新才出得来。
+  //
+  // ⚠️ 失败时**必须把日志留下来**：activeRun 一清空，statusQ 就被禁用
+  // （enabled: !!activeRun），data 变 undefined——失败提示会跟着消失，
+  // 页面回落去显示**历史报告**。实测症状：点了「运行评估」，子进程秒崩，
+  // 页面却安安静静显示着上一次的单条报告，看着像「只跑了一条」。
+  // （那正是提示语「选集运行：本次只跑了 1 条」的由来——它来自旧报告，
+  // 不是这次的结果。）
   useEffect(() => {
     if (!activeRun) return;
     const st = statusQ.data?.status;
     if (!st || st === "running") return;
     const finished = activeRun;
     const ok = statusQ.data?.has_report;
+    if (ok) {
+      setRunFail(null);
+      setViewRun(finished);
+    } else {
+      setRunFail({
+        runId: finished ?? "",
+        log: statusQ.data?.log_tail || "",
+      });
+    }
     setActiveRun(null);
     qc.invalidateQueries({ queryKey: ["eval-reports"] });
-    if (ok) setViewRun(finished);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusQ.data, activeRun]);
 
@@ -102,7 +122,10 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
         case_timeout: 300,
         baseline: cmpWith,
       }),
-    onSuccess: (r) => setActiveRun(r.run_id),
+    onSuccess: (r) => {
+      setRunFail(null);
+      setActiveRun(r.run_id);
+    },
     onError: (e) => toast.error("启动评测失败：" + String(e)),
   });
 
@@ -236,18 +259,24 @@ export default function EvalBaselinePanel({ agentId }: { agentId?: string }) {
             </div>
           )}
         </div>
-      ) : statusQ.data?.status === "failed" ? (
+      ) : runFail ? (
         <Hint
           tone="danger"
           title={
             <span className="flex items-center gap-1.5">
               <TriangleAlert className="h-3.5 w-3.5" />
-              这次评测没有产出报告
+              这次评测没有产出报告（{runFail.runId}）
             </span>
           }
         >
+          <p>
+            评测子进程<strong className="text-ink-strong">没能跑完</strong>，
+            报告没有生成。
+            <strong className="text-ink-strong">下面显示的仍然是历史报告</strong>
+            ，不是这次的结果——别把它当成「只跑了一条」。
+          </p>
           <pre className="mt-1.5 max-h-[200px] overflow-auto rounded-md bg-surface p-2 font-mono text-[12px]">
-            {statusQ.data.log_tail || "（无日志）"}
+            {runFail.log || "（无日志）"}
           </pre>
         </Hint>
       ) : reportQ.isLoading ? (

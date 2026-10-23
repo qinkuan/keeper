@@ -86,35 +86,58 @@ HTML 产物额外加 CSP 兜底（`default-src 'none'`、`connect-src 'none'`）
 
 ## 五、捕获逻辑（写入侧）
 
-产物由 `fs.publish` 工具显式登记：
+产物由 `fs.deliver` 工具显式登记（**唯一正式入口**）：
 
-- agent 用 `fs.write_file` 写完文件后调用 `fs.publish` → 挂到当前消息
-- 无正式 `fs.publish` 时，`chat/service.py` 会按本轮 mtime 扫描工作区**兜底**补登记
-  （最多 5 个），避免「文件写了但没展示」
+- agent 用 bash 写完文件后调用 `fs.deliver([{kind, path|file, ...}])` → 挂到当前消息
+- **兼容旧写法** `paths`（路径字符串列表），会规整成 `kind="file"` 的块
+- **仅在本轮零产物时**，`chat/service.py` 才会按本轮 mtime 扫描工作区**兜底**补登记
+  （最多 5 个），避免「文件写了但没展示」；已经有正式产物时不再兜底，免得重复
 
-工具描述里明确写了这条规则，模型知道要自己 publish。
+工具描述里明确写了这条规则，模型知道要自己交付。
+
+### 5.1 交付块（Block）模型
+
+`fs.deliver` 交付的不是「文件路径」，而是「带类型的块」（`viewer/block.py`）：
+
+| kind | 含义 | 必须引用文件 |
+|---|---|---|
+| `file` | 普通文件 | 是 |
+| `chart` | 图表（ECharts / Vega-Lite spec） | 是 |
+| `mermaid` | 流程图（可内联 `src`） | 否 |
+| `table` | 表格 | 是 |
+| `map` | 地图 | 是 |
+| `audio` | 音频 | 是 |
+
+每个块还可以带：
+
+- `render`：`inline` / `preview` / `run` / `download` / `folder`（渲染提示）
+- `ref`：语义化引用名——agent 在 `fs.deliver` 里给块起 `ref`，之后在最终回答的文字里
+  用 `[[art:ref]]` 把这块产物插到指定位置（`chat/service._capture_artifacts`）
+
+重内容（图表 spec、数据）由 agent 写进文件，块只描述「怎么渲染这个文件」——
+几行 JSON 即可，不把巨型 spec 塞进工具参数。
 
 ---
 
 ## 六、前端展示：按类型分派
 
-展示器判定在**前端**（`web/src/components/viewers.ts`），与工作台共用同一张表：
+展示器判定在**前端**（`web/src/components/BlockView.tsx`），按块的 `kind` 选渲染器：
 
 | kind | 展示 |
 |---|---|
-| `markdown` | `MarkdownView` 渲染（可切源码） |
-| `code` / `data` / `text` | Monaco 编辑器 + 语言高亮 |
-| `html` | **浏览器新窗口**打开（sandbox 不含 `allow-same-origin`） |
-| `image` | 新窗口打开（浏览器看图） |
-| `pdf` | 新窗口打开（浏览器内建 PDF 视图） |
-| `video` | 新窗口打开（浏览器播放器） |
-| `binary` | 不渲染，只给下载按钮 |
+| `file` | 按扩展名 / MIME 决定：图片内联预览、文本用 Monaco 高亮、PDF 走 pdf.js、其它给下载 |
+| `chart` | ECharts / Vega-Lite 渲染 |
+| `mermaid` | mermaid 渲染 |
+| `table` | 表格渲染（可下载） |
+| `map` | 地图渲染 |
+| `audio` | 音频播放器 |
 
-**为什么 html / 图片 / pdf / 视频改成新窗口**：内联在 360px 的小框里没法看，
-浏览器自己的查看器能缩放、全屏、另存、还能分享链接。
+**为什么按块而不是按文件类型**：交付的是「意图」（这是一张图表 / 一段流程图），
+不是「扩展名」。同一份 `.html` 既可能是要预览的页面，也可能是要下载的产物，
+由 agent 在交付时声明 `render` 提示最准。
 
-**二进制不再硬塞进编辑器**：判为 `binary` 就只给下载 + 文件信息，避免 Monaco
-里显示一堆 `\x00` 和替换字符。判定两种信号：扩展名黑名单 + 内容探测（含 NUL、
+**二进制不硬塞进编辑器**：判为二进制就只给下载 + 文件信息，避免显示一堆
+`\x00` 和替换字符。判定两种信号：扩展名黑名单 + 内容探测（含 NUL、
 或 U+FFFD 占比 >10%）。
 
 ---

@@ -68,7 +68,6 @@ async def run_eval(
     case_ids: Optional[List[str]] = None,
     cases: Optional[List[EvalCase]] = None,
     run_id: Optional[str] = None,
-    offline: bool = True,
     case_timeout: int = DEFAULT_CASE_TIMEOUT,
     compare_with: Optional[str] = "auto",
     source_db: Optional[Path] = None,
@@ -96,7 +95,7 @@ async def run_eval(
 
     run_id = run_id or R.new_run_id()
     harness = EvalHarness(
-        run_id=run_id, offline=offline, source_db=source_db
+        run_id=run_id, source_db=source_db
     )
     # 顺序：先建环境（临时库就绪）→ 再定 agent（要查库）→ 最后装 agent。
     # 反过来就会「用还没建好的库去查 agent」。

@@ -1,12 +1,17 @@
 """ReAct 规划器：负责把「工具清单 + 问题 + 历史」喂给 LLM，并解析其决策。
 
-采用模型无关的 ReAct 文本协议（不依赖原生 tool-calling），任意 chat 模型都可用：
-- THOUGHT: 思考过程
-- ACTION: 工具名
-- ACTION_INPUT: JSON 参数
-- FINAL: 最终回答
+采用模型无关的 ReAct 协议（不依赖原生 tool-calling），任意 chat 模型都可用。
+协议标签的**唯一定义**在 :mod:`keeper.agent.protocol`——本模块只负责「决策」，
+不负责「这段文本长什么样」：
 
-解析对中文标签（最终回答）与缺失标签都做了容错。
+- ``<THOUGHT>思考过程</THOUGHT>``
+- ``<ACTION>工具名</ACTION>`` + ``<ACTION_INPUT>{"参数": "值"}</ACTION_INPUT>``
+- ``<FINAL>最终回答</FINAL>``
+
+协议本体是 **XML 标签**；文本形态（``FINAL: ...``）仍被解析，作为从旧协议
+切过来这段过渡期的兜底——混写、漏闭合都不会整轮作废。
+
+解析对中文标签（最终回答 / 提问）和缺失标签都做了容错。
 """
 from __future__ import annotations
 
@@ -16,34 +21,18 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import protocol
+
 logger = logging.getLogger(__name__)
 
-# 「下一个结构性标签」的正则片段：任何一段（THOUGHT / ACTION_INPUT / FINAL / ASK …）
-# 到这里就该结束，段尾 ``\Z`` 保证永远能匹配（等价于"取到文本末尾"）。
+# 「段尾可能混入的其它标签」，用于把宽松匹配到的正文切干净。
 #
-# 为什么 OBSERVATION 也在列
-# -------------------------
-# OBSERVATION 是**引擎注入**的，模型永远不该自己写。但实测它会自己伪造一整轮
-# ReAct（THOUGHT → ACTION → ACTION_INPUT → OBSERVATION → 再来一轮），好像自己在
-# 扮演引擎。若这里不在 OBSERVATION 处切断，伪造的 OBSERVATION 会被当成
-# ACTION_INPUT 的续行一起吞进 JSON，参数直接解析失败——而且看起来像"模型把参数
-# 写错了"，排查方向会被带偏。
-_NEXT_LABEL = (
-    r"(?=\n\s*(?:THOUGHT|ACTION_INPUT|ACTION|OBSERVATION|FINAL|最终回答"
-    r"|ANSWER|ASK|提问|OPTIONS|TASK|TASK_INPUT|TASK_CONTEXT)\s*[:：]|\Z)"
-)
-
-# 「段尾可能混入的其它标签」，用于把 FINAL / THOUGHT / ASK 的正文切干净
+# 协议本体已由 protocol 统一处理（段落天然截到下一个标签），这里只服务于
+# 两条**宽松兜底**路径：模型把标签写在行中间（不换行）、以及旧文本协议残留。
 _TAIL_LABEL = (
     r"\n\s*(?:THOUGHT|ACTION_INPUT|ACTION|OBSERVATION|FINAL|最终回答"
     r"|ANSWER|ASK|提问|OPTIONS|TASK|TASK_INPUT|TASK_CONTEXT)\s*[:：]"
 )
-
-# 幻觉检测用的行首标签（见 detect_hallucination）。都用 (?m)^ 锚定行首，
-# 因为 ACTION_INPUT 里的正文是 JSON 字符串——换行是转义的 \n 两个字符，
-# 不构成真实行首，所以正文里恰好出现这些字样不会误判。
-_OBS_LABEL = r"(?m)^\s*OBSERVATION\s*[:：]"
-_THOUGHT_LABEL = r"(?m)^\s*THOUGHT\s*[:：]"
 
 # ── 原生 tool-calling（DSML）兼容 ────────────────────────────────────────
 #
@@ -69,32 +58,10 @@ _DSML_PARAM = re.compile(
     r'parameter\s+name="([^"]+)"[^>]*>(.*?)</[^>]*parameter\s*>', re.S
 )
 
-# XML 风格的调用壳：``<action> read {"block_id":"x"} </action>``——工具名 + JSON
-# 参数都装在壳里，意图无歧义。模型偶尔把文本协议包进这类壳（实测出现过），
-# 壳里的内容完整解析得出来，没必要整轮作废：parse 里当正常 act 执行。
-# 只认这三种壳名（都是「名字 + JSON」的形状）；DSML 的 invoke/parameter 归
-# _parse_native_calls 管，两边不混。
-_XML_ACTION = re.compile(
-    r"<\s*(?:action|tool_call|function_call)\s*>(?P<body>.*?)"
-    r"<\s*/\s*(?:action|tool_call|function_call)\s*>",
-    re.S | re.I,
-)
-
-
-def _args_span(text: str) -> tuple:
-    """ACTION_INPUT 正文在 text 里的 (start, end)；没有则 (len, len)。
-
-    检测标签时要**跳过这段**：正文是模型生成的任意内容（可能是一整个 HTML），
-    里面出现什么字都不该被当成标签。
-    """
-    m = re.search(r"(?ims)(?:^|\n)\s*ACTION_INPUT\s*[:：]", text)
-    if m is None:
-        return (len(text), len(text))
-    start = m.end()
-    nxt = re.search(_NEXT_LABEL, text[start:])
-    end = start + (nxt.start() if nxt else len(text) - start)
-    return (start, end)
-
+# XML 风格的调用壳（``<action> read {"block_id":"x"} </action>``）现在由
+# :mod:`keeper.agent.protocol` 统一处理：``<ACTION>`` 本就是协议标签，壳内的
+# 「工具名 + JSON」会被拆成工具名与参数（见 ``_split_tool_and_inline_args``）。
+# ``<tool_call>`` / ``<function_call>`` 两种旧壳名在 protocol 里归一到 ACTION。
 
 def detect_hallucination(text: str) -> str:
     """检出「模型自己在扮演引擎」。正常返回空串，命中返回可读的原因。
@@ -116,15 +83,16 @@ def detect_hallucination(text: str) -> str:
     → **自编 OBSERVATION** → THOUGHT → ACTION(fs.deliver) → **自编 OBSERVATION**
     → FINAL。因为 FINAL 在 parse 里优先判定，两个 ACTION 一个都没执行，
     而用户已经收到「已在右侧挂成产物卡片，点开就能跑」。
+
+    实现说明：正文里的字面标签**不算**——协议分段（``protocol.segments``）按
+    标签切段，``ACTION_INPUT`` 段里的内容自成一体，不会被当成独立标签。
     """
     if not text:
         return ""
-    s, e = _args_span(text)
-    # 只看正文之外的部分：正文里出现的标签一律不算
-    outside = text[:s] + "\n" + text[e:]
-    if re.search(_OBS_LABEL, outside):
+    segs = protocol.segments(text)
+    if any(s.name == "OBSERVATION" for s in segs):
         return "你自己写了 OBSERVATION"
-    n_thought = len(re.findall(_THOUGHT_LABEL, outside))
+    n_thought = len([s for s in segs if s.name == "THOUGHT"])
     if n_thought > 1:
         return f"你一轮里写了 {n_thought} 个 THOUGHT（一轮只能有一个）"
     return ""
@@ -158,8 +126,8 @@ def _action_rule() -> str:
     mode = _tool_parallel_mode()
     if mode <= 0:
         return (
-            "**每次响应只写一个 ACTION**：写了第二个也**不会被执行**（系统只取第一个），"
-            "想再查一次，等看到 OBSERVATION 后的下一轮再写。"
+            "**每次响应只写一个 `<ACTION>`**：写了第二个也**不会被执行**（系统只取第一个），"
+            "想再查一次，等看到回执后的下一轮再写。"
         )
     limit = 5
     try:
@@ -169,9 +137,9 @@ def _action_rule() -> str:
     except Exception:  # noqa: BLE001
         pass
     return (
-        f"**互相独立的只读查询可以合并成一轮，写最多 {limit} 个 ACTION**，"
-        "每个 ACTION / ACTION_INPUT 各占一对行；有依赖的（要先看 A 的结果再决定 B）"
-        "必须拆成多轮，等看到 OBSERVATION 后的下一轮再写。"
+        f"**互相独立的只读查询可以合并成一轮，写最多 {limit} 个 `<ACTION>`**，"
+        "每个 `<ACTION>` / `<ACTION_INPUT>` 各占一对标签；有依赖的（要先看 A 的结果再决定 B）"
+        "必须拆成多轮，等看到回执后的下一轮再写。"
     )
 
 
@@ -203,19 +171,102 @@ class Decision:
 
 
 def _clean_tool_name(raw: str) -> str:
-    """清洗 ACTION 行里的工具名。
+    """清洗工具名。
 
     模型偶尔会把工具名写成 ```fs.list_dir``` 或把多个标签挤在同一行，这里逐一处理：
     ① 截到下一个已知标签之前；② 去掉 Markdown 反引号 / 引号包裹；③ 去首尾空白。
     """
     line = raw or ""
-    # ① 同一行若又出现其它标签（如 ACTION: fs.list_dir ACTION_INPUT: {...}），截到标签前
+    # ① 同一行若又出现其它标签（如 ACTION: fs.list_dir ACTION_INPUT: {...}），
+    #    或后面跟着 XML 标签，截到标签前
     line = re.split(
-        r"(?i)\s+(?:THOUGHT|ACTION_INPUT|ACTION|OBSERVATION|FINAL|最终回答"
-        r"|ANSWER|ASK|提问|OPTIONS)\s*[:：]",
+        r"(?i)\s+(?:" + "|".join(protocol.LABELS) + r")\s*[:：]"
+        r"|<\s*/?\s*(?:" + "|".join(protocol.LABELS) + r")\b",
         line,
     )[0]
     return line.strip().strip("`\"'，,;；。").strip()
+
+
+def _split_tool_and_inline_args(content: str) -> Tuple[str, dict]:
+    """拆「工具名 + 可能内联在后面的 JSON」。
+
+    - ``bash`` → ``("bash", {})``
+    - ``read {"block_id":"x"}`` → ``("read", {"block_id": "x"})``（旧调用壳的形状）
+
+    只有**以 ``{`` 开头**的剩余部分才当参数。否则那不是参数，是工具名被写坏
+    之后剩下的字（``bash 命令：ls``）——把它当参数会得到一个语义错误但
+    「看起来合法」的参数集，比直接报「没有这个工具」更难查。
+    """
+    c = (content or "").strip()
+    if not c:
+        return "", {}
+    m = re.match(r"^([^\s{}<>]+)\s*(.*)$", c, re.S)
+    if not m:
+        return "", {}
+    name = m.group(1)
+    rest = m.group(2).strip()
+    if rest.startswith("{"):
+        return name, ReActPlanner._parse_args(rest)
+    # 不是内联 JSON：工具名取整行（与旧实现一致：写坏的名字原样报错更好查）
+    return c.splitlines()[0].strip(), {}
+
+
+def _action_pairs(text: str) -> List[Tuple[str, dict]]:
+    """把输出里的调用解析成 ``(工具名, 参数)`` 列表（按文档顺序）。
+
+    协议本体：``<ACTION>工具名</ACTION>`` + ``<ACTION_INPUT>{JSON}</ACTION_INPUT>``。
+    兼容两种旧写法：文本协议（``ACTION: 工具名``）与合并式（工具名后直接跟 JSON）。
+
+    配对规则：每个 ACTION 配**它自己区间内**（到下一个 ACTION 之前）的第一个
+    ACTION_INPUT。这样「两个 ACTION 各带一个参数」不会串味；区间内没有就回退
+    到全局第一个——与旧实现一致（旧实现取的就是全局第一个）。
+
+    兜底：ACTION_INPUT 段**一个都没认出来**时（标签形态怪、没顶行首、正文被
+    截断……），从 ACTION 之后用 JSON 解码器直接捞第一个对象。理由：参数丢了的
+    代价太高——引擎会拿空参数去调工具，模型收到的是「缺少 command 参数」这种
+    没法据此纠正的报错，于是原样重试、连烧十几轮（实测一次烧掉 11 轮
+    ``bash__run`` 全废，最后 agent 放弃并开始编）。宁可多捞一次，也不要把
+    明明写对了的 JSON 丢掉。
+    """
+    t = text or ""
+    segs = protocol.segments(t)
+    actions = [s for s in segs if s.name == "ACTION"]
+    inputs = [s for s in segs if s.name == "ACTION_INPUT"]
+    out: List[Tuple[str, dict]] = []
+    for i, a in enumerate(actions):
+        end = actions[i + 1].start if i + 1 < len(actions) else len(t)
+        name, inline = _split_tool_and_inline_args(a.content)
+        args = inline
+        if not args:
+            for s in inputs:
+                if a.start < s.start < end:
+                    args = ReActPlanner._parse_args(s.content)
+                    break
+            else:
+                if inputs:
+                    args = ReActPlanner._parse_args(inputs[0].content)
+        if not args:
+            args = _json_after(t, a.end)
+        out.append((name, args))
+    return out
+
+
+def _json_after(text: str, pos: int) -> dict:
+    """从 ``pos`` 之后捞出第一个 JSON 对象；捞不到返回 ``{}``。
+
+    用 ``json.JSONDecoder().raw_decode`` 而不是正则：它认得字符串里的 ``{``/
+    ``}``/转义引号，正则会在 ``{"a": "}{"}`` 这种内容上截错。
+    """
+    if not text:
+        return {}
+    tail = text[pos:].lstrip()
+    if not tail.startswith("{"):
+        return {}
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(tail)
+    except Exception:  # noqa: BLE001 捞不到就算了，不该让解析崩
+        return {}
+    return obj if isinstance(obj, dict) else {}
 
 
 def _delivery_rules() -> List[str]:
@@ -241,7 +292,7 @@ def _delivery_rules() -> List[str]:
         "生成的文件不会自动上卡片：写完必须用 `fs.deliver` 显式交付（写法见上方），且**只交最终成品**。",
         "超长输出变「首尾预览 + `ctx:<id>`」：看到 `ctx:` 说明已执行过，用 `read` 取全文，"
         "别重发（重发白等一轮还多一份重复文件）。",
-        "`THOUGHT` 里的计划不会自动执行——只有本轮真正发出的 ACTION 才算数。",
+        "`<THOUGHT>` 里的计划不会自动执行——只有本轮真正发出的 `<ACTION>` 才算数。",
         "同一动作连败两次就换思路：换路径 / 换工具 / 拆更小步；"
         "`returncode: 1` 反复时先 `bash`（`ls` / `test -f`）确认依赖真在，再继续。",
         "写完代码 / 改动先跑通验证再交付（pytest / node / 直接运行），"
@@ -287,10 +338,10 @@ def _output_budget_rules() -> List[str]:
         f"   折算：中文约 1 字 ≈ 1 token（安全线约 {n} 字）；英文 / 代码约 4 字符 ≈ 1 token。"
         f"你这边**看不到自己被截断**，只会觉得「输出结束了」——但参数 JSON 会半截、工具必然失败。\n"
         f"   所以要主动按预算分配：\n"
-        f"   - 单个 `ACTION_INPUT` 控制在 **{per} 字符以内**；一次写不完就"
+        f"   - 单个 `<ACTION_INPUT>` 控制在 **{per} 字符以内**；一次写不完就"
         f"**分多次写**（文件用 `bash` 分段 `cat >>`，再 `cat` 合并，最后 `fs.deliver` 交付），"
         f"别一次写完整份文件 / 脚本。\n"
-        f"   - `THOUGHT` 只写决定和理由，别复述代码、文档正文或工具返回的原文。\n"
+        f"   - `<THOUGHT>` 只写决定和理由，别复述代码、文档正文或工具返回的原文。\n"
         f"   - 要引用的大段内容用 `read` / 工具参数**分次**取，别整段抄进参数。"
     ]
 
@@ -318,7 +369,7 @@ class ReActPlanner:
         → ⑤ skill 的额外要求 → ⑥ 输出格式
 
         「输出格式」必须排在最后：它是引擎契约，不能被 persona 或 skill 的内容
-        覆盖掉，否则模型不再输出 THOUGHT / ACTION，ReAct 循环直接断。
+        覆盖掉，否则模型不再输出 `<THOUGHT>` / `<ACTION>`，ReAct 循环直接断。
         """
         ident = f"（你的名称：{agent_name}）" if agent_name else ""
         base = (
@@ -331,7 +382,7 @@ class ReActPlanner:
         # 的 H1 成为同级、其内部 H2/H3 层级完整保留，且不动任何用户文件。
         if persona:
             base += "# 你的角色设定\n" + persona.strip() + "\n\n"
-        base += "# 可用工具（通过 ACTION 使用）\n" + tools_desc + "\n\n"
+        base += "# 可用工具（通过 <ACTION> 调用）\n" + tools_desc + "\n\n"
         if delegatees_desc:
             base += "# 可用子 agent\n" + delegatees_desc + "\n\n"
         if skill_desc:
@@ -339,14 +390,15 @@ class ReActPlanner:
         # 准则编号只在这里生成一次：各节只提供正文（_action_rule / _delivery_rules /
         # _output_budget_rules），避免号分散硬编码在三个字符串里、插一条就全部撞号。
         rules = [
-            "先思考（THOUGHT），再决定要不要调工具（ACTION）。",
-            "需要信息就调工具；工具回执（OBSERVATION）是系统注入的，**你绝对不要自己写**——"
-            "一轮只写你自己的几行就停，等回执。自己写 OBSERVATION 再写下一轮，等于捏造工具结果，整段推理作废。",
-            "信息足够才给 FINAL，且必须基于工具真实返回。",
+            "先思考（`<THOUGHT>`），再决定要不要调工具（`<ACTION>`）。",
+            "需要信息就调工具；工具回执是**系统注入**的，你**绝对不要自己写** "
+            "`<OBSERVATION>`——一轮只写你自己的几行就停，等回执。"
+            "自己编回执再写下一轮，等于捏造工具结果，整段推理作废。",
+            "信息足够才给 `<FINAL>`，且必须基于工具真实返回。",
             _action_rule(),
             "只引用工具实际返回过的内容；没返回的禁止凭空列。",
-            "需要用户决定时一律 ASK + OPTIONS，别把候选写进 FINAL 正文。",
-            "**不需要工具就别调**：问候、常识直接 FINAL；recall / read 别为走流程乱调。",
+            "需要用户决定时一律 `<ASK>` + `<OPTIONS>`，别把候选写进 `<FINAL>` 正文。",
+            "**不需要工具就别调**：问候、常识直接 `<FINAL>`；recall / read 别为走流程乱调。",
         ]
         # 交付 / 验证几条放最后，输出预算紧跟其末（与「分段写文件」那条是同一件事的延续）
         rules += _delivery_rules()
@@ -362,29 +414,38 @@ class ReActPlanner:
             base += dynamic_extra.strip() + "\n\n"
         base += (
             "# 输出格式（严格遵守）\n"
-            "每个标签单独占一行，标签名顶行首。不要把标签夹在句子里（解析不到，会当成正文发给用户）。\n"
-            "THOUGHT: 思考过程\n"
-            "ACTION: 工具名\n"
-            "ACTION_INPUT: {\"参数名\": \"值\"}\n"
-            "TASK: 子 agent 名（如 core / writer）\n"
-            "TASK_INPUT: 自然语言任务要求（到下一个标签为止，可多行）\n"
-            "FINAL: 最终回答（可多行；之后不再写任何标签）\n"
-            "ASK: 需要用户回答的问题\n"
-            "OPTIONS: [\"候选1\", \"候选2\"]\n\n"
-            "- **ACTION 与 TASK 二选一，一次只发一个**。有现成工具走 ACTION；"
-            "需写代码 / 生成视频等多步能力且无现成工具走 TASK（后跟子 agent 名 + TASK_INPUT 自然语言要求）。\n"
+            "用 **XML 标签**表达每一步；每个标签**成对出现**（有开就有闭），标签顶行首。\n"
+            "<THOUGHT>你要做什么、为什么</THOUGHT>\n"
+            "<ACTION>工具名</ACTION>\n"
+            "<ACTION_INPUT>{\"参数名\": \"值\"}</ACTION_INPUT>\n"
+            "<TASK>子 agent 名（如 core / writer）</TASK>\n"
+            "<TASK_INPUT>自然语言任务要求（可多行）</TASK_INPUT>\n"
+            "<FINAL>最终回答正文（可多行；之后不再写任何标签）</FINAL>\n"
+            "<ASK>需要用户回答的问题</ASK>\n"
+            "<OPTIONS>[\"候选1\", \"候选2\"]</OPTIONS>\n\n"
+            "- 一轮里 `<THOUGHT>` **只写一个**；然后要么给一组 `<ACTION>`/`<ACTION_INPUT>`，"
+            "要么给 `<FINAL>`，要么给 `<ASK>`/`<OPTIONS>`。\n"
+            "- **`<ACTION>` 与 `<ACTION_INPUT>` 必须成对**：`<ACTION>` 里**只写工具名**，"
+            "参数一律放 `<ACTION_INPUT>`（JSON）。\n"
+            "- **`<ACTION>` 与 `<TASK>` 二选一，一次只发一个**。有现成工具走 `<ACTION>`；"
+            "需写代码 / 生成视频等多步能力且无现成工具走 `<TASK>`（后跟子 agent 名 + "
+            "`<TASK_INPUT>` 自然语言要求）。\n"
             "- 工具名必须一字不差用「可用工具」清单里的；清单外"
             "（如 `fs.write_file` / `fs.list_dir` / `fs.find`）**已废弃**，请改用 `bash`（cat / ls / find / grep）；"
             "`fs.publish` 不存在，交付用 `fs.deliver`。\n"
-            "- 想让图片 / 图表等多模态产物**插在 FINAL 文字中间**（而不是堆在末尾）："
+            "- 想让图片 / 图表等多模态产物**插在 `<FINAL>` 文字中间**（而不是堆在末尾）："
             "① 先真正把它做出来；② 交给 `fs.deliver` 时给块加 `\"ref\": \"名字\"`；"
-            "③ 在 FINAL 对应位置写 `[[art:名字]]`（ref 字面量两边必须完全一致）。"
+            "③ 在 `<FINAL>` 对应位置写 `[[art:名字]]`（ref 字面量两边必须完全一致）。"
             "**这条只对「你已经生成并交付」的产物有效**——没调 `fs.deliver` 就写 `[[art:...]]` 只会显示成失效占位，等于没图。\n"
             "  - 流程图 / 架构图 / 时序图：写 `x.mmd` 再 `fs.deliver([{\"kind\":\"mermaid\",\"file\":\"x.mmd\",\"ref\":\"seq\"}])`（时序图用 `sequenceDiagram` 语法）。\n"
-            "  - 真实生成图 / 视频等无现成单步工具的能力：走 `TASK` 派给对应子 agent，由其交付，再用它的 ref 引用。\n"
+            "  - 真实生成图 / 视频等无现成单步工具的能力：走 `<TASK>` 派给对应子 agent，由其交付，再用它的 ref 引用。\n"
             "  - 没被 `[[art:...]]` 引用的产物仍按原样显示在底部。\n"
-            "- **绝对不要输出原生工具调用标记**（<function_calls>、<tool_call>、XML/DSML 块等）——"
-            "本接口没注册任何工具，那些标记不会执行也不会解析，只会让本轮直接结束。\n"
+            "- 标签要闭合（`</FINAL>` 这样的收尾也要写）。万一漏了闭合，引擎会尽量兜底，"
+            "但正文可能被截短——所以别漏。正文里若必须出现 `</FINAL>` 这类字样，"
+            "把斜杠写成反斜杠：`<\\/FINAL>`。\n"
+            "- **绝对不要输出原生工具调用标记**（`<function_calls>`、`<｜｜DSML｜｜ invoke>`、"
+            "`<tool>` 这类）——本接口没注册任何工具，那些标记不会执行也不会解析，"
+            "只会让本轮直接结束。要调工具就用上面那几个标签。\n"
         )
         # 历史记忆是「随每轮变化」的内容，必须放在 system 最末尾：
         # DeepSeek 前缀缓存要求前缀从头逐 token 一致，变化内容放中间会切断
@@ -410,25 +471,13 @@ class ReActPlanner:
 
         切分规则：每个 ``ACTION:`` 到**下一个** ``ACTION:``（或下一个结构标签）之间
         找 ``ACTION_INPUT:``，与 :meth:`parse` 的单动作切分保持一致。
-
-        没有 ``ACTION:`` 时回退到 XML 调用壳（``<action> 工具名 {JSON} </action>``）：
-        那是模型偶尔会吐的另一种形状，内容一样完整，丢掉等于白跑一轮。
         """
         out: List[Tuple[str, Dict[str, Any]]] = []
-        matches = list(
-            re.finditer(r"(?im)(?:^|\n)\s*ACTION\s*[:：]\s*([^\n]+)", text)
-        )
-        if not matches:
-            return list(self._xml_action_calls(text))
-        for i, m in enumerate(matches):
-            tool = _clean_tool_name(m.group(1))
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            seg = text[m.end() : end]
-            im = re.search(
-                r"(?is)ACTION_INPUT\s*[:：]\s*(.*?)" + _NEXT_LABEL,
-                seg,
-            )
-            out.append((tool, self._parse_args(im.group(1).strip() if im else "")))
+        for name, args in _action_pairs(text):
+            tool = _clean_tool_name(name)
+            if not tool:
+                continue
+            out.append((tool, args))
         return out
 
     def parse(self, text: str, step: int) -> Decision:
@@ -444,57 +493,35 @@ class ReActPlanner:
             return Decision(kind="hallucination", thought=self._thought(text), hallucination=hallu)
 
         # 0) 再看 ASK：需要用户补充信息，本轮到此暂停（优先于 FINAL）
-        m = re.search(r"(?ims)(?:^|\n)\s*(?:ASK|提问)\s*[:：]\s*(.+)", text)
-        if m:
-            ask = re.split(
-                r"\n\s*(?:OPTIONS|THOUGHT|ACTION_INPUT|ACTION|OBSERVATION"
-                r"|FINAL|最终回答|ANSWER)\s*[:：]",
-                m.group(1),
-            )[0].strip()
+        ask_seg = protocol.first_segment(text, "ASK")
+        if ask_seg is not None:
             return Decision(
                 kind="ask",
-                ask=ask,
+                ask=ask_seg.content.strip(),
                 options=self._options(text),
                 thought=self._thought(text),
             )
 
-        # 1) 优先 FINAL / 最终回答 / ANSWER（按格式应另起一行）
-        answer_text = None
-        m = re.search(
-            r"(?ims)(?:^|\n)\s*(?:FINAL|最终回答|ANSWER)\s*[:：]\s*(.+)", text
+        # 1) 优先 FINAL（XML 优先，其次文本形态）
+        #
+        # 为什么 XML 优先：文本形态的 FINAL 允许写在行中间（旧协议容错），模型
+        # 在正文里随口写一句 "FINAL: xxx" 也会被匹配上——若正文里那句排在后面，
+        # 就会抢走真正的答案。XML 形态没有这个歧义（标签必须成对）。
+        finals = protocol.sections_of(text, "FINAL", form="xml") or protocol.sections_of(
+            text, "FINAL"
         )
-        if m:
-            answer_text = m.group(1)
-        else:
-            # 容错：模型有时不换行，写成「…给出 FINAL。FINAL: 正文」。
-            # 这时严格的行首匹配会失败，进而把整段 THOUGHT 当成回答显示给用户；
-            # 退一步取最后一次出现的 FINAL 标记，保证回答里只有正文。
-            found = re.findall(
-                r"(?is)(?:FINAL|最终回答|ANSWER)\s*[:：]\s*(.+)", text
-            )
-            if found:
-                answer_text = found[-1]
-
-        if answer_text is not None:
-            answer = answer_text.strip()
-            # 去掉末尾可能混入的其它标签
-            answer = re.split(_TAIL_LABEL, answer)[0].strip()
+        if finals:
+            answer = finals[-1].strip()
             return Decision(kind="final", answer=answer, thought=self._thought(text))
 
         # 2.4) TASK：把子任务委托给子 agent（与 ACTION 平级）。携带自然语言要求，
         # 子 agent 自带内部循环（如 code：写代码→跑→看输出→迭代），结果当 OBSERVATION
         # 回喂主循环。要求原样捕获（到下一个标签为止），不做 JSON 转义。
-        tasm = re.search(r"(?ims)(?:^|\n)\s*TASK\s*[:：]\s*([^\n]+)", text)
-        if tasm:
-            cap = _clean_tool_name(tasm.group(1))
-            tim = re.search(
-                r"(?ims)(?:^|\n)\s*TASK_INPUT\s*[:：]\s*(.*?)" + _NEXT_LABEL, text
-            )
-            req = tim.group(1).strip() if tim else ""
-            tcm = re.search(
-                r"(?ims)(?:^|\n)\s*TASK_CONTEXT\s*[:：]\s*(.*?)" + _NEXT_LABEL, text
-            )
-            ctx = tcm.group(1).strip() if tcm else None
+        task_seg = protocol.first_segment(text, "TASK")
+        if task_seg is not None:
+            cap = _clean_tool_name(task_seg.content.splitlines()[0] if task_seg.content else "")
+            req = protocol.section(text, "TASK_INPUT")
+            ctx = protocol.section(text, "TASK_CONTEXT") or None
             if cap and req:
                 return Decision(
                     kind="delegate",
@@ -506,63 +533,29 @@ class ReActPlanner:
                 )
 
         # 2) 否则解析 ACTION / ACTION_INPUT
-        am = re.search(
-            # 工具名允许各种分隔符，不能再用 \w+：\w 不匹配 '.' 和 '-'，会把工具名截短
-            #  → 内置点号名 fs.list_dir 截成 fs、git.status 截成 git、
-            #    MCP 名 codebase-memory__graph__list_projects 截成 codebase，
-            #    最终报「没有名为 xxx 的工具」。
-            #  这里直接取 ACTION 的整行内容（因此天然支持中文 / MCP 双下划线 / 点号 / 连字符），
-            #  再用 _clean_tool_name 做清洗。
-            r"(?ims)(?:^|\n)\s*ACTION\s*[:：]\s*([^\n]+)", text
-        )
-        if am:
-            tool = _clean_tool_name(am.group(1))
-            # 注意：这里必须非贪婪到「下一个标签」为止。模型经常一次吐出两个
-            # ACTION（想连查两次），若用 \{.*\} 配 DOTALL，会把第二个 ACTION
-            # 一起吞进来，导致 json 解析失败 -> 参数变成 {"_raw": ...} -> query 为空。
-            im = re.search(
-                r"(?ims)(?:^|\n)\s*ACTION_INPUT\s*[:：]\s*(.*?)" + _NEXT_LABEL,
-                text,
-            )
-            raw = im.group(1).strip() if im else ""
-            args = self._parse_args(raw)
+        #
+        # 协议本体是 ``<ACTION>工具名</ACTION>`` + ``<ACTION_INPUT>{JSON}</ACTION_INPUT>``；
+        # 文本协议（``ACTION: 工具名``）与合并式（``<ACTION>工具名 {JSON}</ACTION>``）
+        # 也照样认——混写、漏闭合都不会整轮作废。
+        #
+        # 工具名允许各种分隔符（内置点号名 fs.list_dir、MCP 双下划线名），不能
+        # 用 \w+ 截取，否则会报「没有名为 fs 的工具」。
+        pairs = _action_pairs(text)
+        if pairs:
+            tool, args = pairs[0]
+            tool = _clean_tool_name(tool)
             # 统计这一段里出现了几个 ACTION —— prompt 要求「每次只写一个」，但模型
             # 经常连写多个（第二个会被丢弃）。这个计数是 P1-1 并行化的收益依据：
             # 没有它就只能靠感觉决定要不要做。
-            try:
-                action_count = len(
-                    re.findall(r"(?im)(?:^|\n)\s*ACTION\s*[:：]", text)
-                )
-            except Exception:  # noqa: BLE001 统计失败不该影响解析
-                action_count = 1
             return Decision(
                 kind="act",
                 tool=tool,
                 args=args,
                 thought=self._thought(text),
-                action_count=max(1, action_count),
+                action_count=max(1, len(pairs)),
             )
 
-        # 2.6) XML 调用壳兼容：``<action> read {"block_id":"x"} </action>``。
-        #
-        # 模型偶尔把文本协议包进这类壳里。壳里的工具名 + JSON 参数是无歧义的、
-        # 完整解析得出来——直接当 act 执行，**不**走下面 DSML 那条「整轮作废」：
-        # 作废是为了点破「这套格式不合法」，而这里格式虽歪、内容全对，作废只会
-        # 白烧一轮，还把用户要的查询拖慢（实测：这种输出原来会掉到 3) 被当成
-        # 最终回答，用户直接看到一串 XML）。
-        # 不写进 prompt 宣传这种写法——容错即可，别鼓励。
-        xml_calls = self._xml_action_calls(text)
-        if xml_calls:
-            tool, args = xml_calls[0]
-            return Decision(
-                kind="act",
-                tool=tool,
-                args=args,
-                thought=self._thought(text),
-                action_count=max(1, len(xml_calls)),
-            )
-
-        # 2.5) 原生 tool-calling（DSML 等）：文本协议认不出。
+        # 2.5) 原生 tool-calling（DSML 等）：本接口的协议认不出。
         #
         # 为什么不「解析出来直接执行」而要整轮作废：那是**默认这套格式合法**了。
         # 模型一旦发现吐 DSML 能推动流程，下一轮就继续吐；而且这段文本会作为
@@ -578,7 +571,7 @@ class ReActPlanner:
                 thought=self._thought(text),
                 format_error=(
                     "你输出的是原生工具调用标记"
-                    "（invoke name=… 这种 XML/DSML 块），不是本接口要求的文本协议"
+                    "（invoke name=… 这种 XML/DSML 块），不是本接口要求的协议"
                 ),
             )
 
@@ -593,7 +586,7 @@ class ReActPlanner:
 
     @staticmethod
     def extract_final(text: str) -> Optional[str]:
-        """提取 ``FINAL:`` 之后的正文；没有就返回 ``None``。
+        """提取 ``<FINAL>``（或 ``FINAL:``）之后的正文；没有就返回 ``None``。
 
         与 :meth:`parse` 的 final 分支同一套容错（含「不换行也认得出」）。单独
         暴露是因为**强制总结**那条路径必须在 parse 之外提取：模型在「已达上限、
@@ -601,14 +594,12 @@ class ReActPlanner:
         工具」的惯性里），这时 ``dec.answer`` 是 None，而 ``answer = resp`` 会把
         整段思考——含 ACTION / ACTION_INPUT——当成答案发给用户。
         """
-        found = re.findall(
-            r"(?is)(?:FINAL|最终回答|ANSWER)\s*[:：]\s*(.+)", text or ""
+        finals = protocol.sections_of(text, "FINAL", form="xml") or protocol.sections_of(
+            text, "FINAL"
         )
-        if not found:
+        if not finals:
             return None
-        ans = found[-1].strip()
-        # 去掉末尾可能混入的其它标签
-        ans = re.split(_TAIL_LABEL, ans)[0].strip()
+        ans = finals[-1].strip()
         return ans or None
 
     @staticmethod
@@ -616,10 +607,9 @@ class ReActPlanner:
         """解析 OPTIONS：优先按 JSON 数组；解析不出时从原文抠出第一个 [...] 列表
         （容忍段尾跟着的示例模板 / 说明文字，避免把杂质按逗号切成垃圾）；再不行
         才按逗号/顿号切分。始终返回 None 或非空列表。"""
-        m = re.search(r"(?ims)(?:^|\n)\s*OPTIONS\s*[:：]\s*(.+)", text)
-        if not m:
+        raw = protocol.section(text, "OPTIONS").strip()
+        if not raw:
             return None
-        raw = m.group(1).strip()
 
         # 1) 整段就是合法 JSON 数组（最常见、最干净）
         try:
@@ -643,29 +633,6 @@ class ReActPlanner:
         # 3) 非 JSON（如「方式A，方式B」「a、b」）：按逗号/顿号切分兜底
         parts = [p.strip().strip("\"'") for p in re.split(r"[,，、]", raw) if p.strip()]
         return parts or None
-
-    @staticmethod
-    def _xml_action_calls(text: str) -> List[Tuple[str, dict]]:
-        """解析 XML 调用壳（``<action> 工具名 {JSON} </action>``）→ (工具名, 参数) 列表。
-
-        壳内第一段是工具名、其余是 JSON 参数；参数缺失或不是合法 JSON 时走
-        ``_parse_args`` 的兜底（裸文本 → ``{"_raw": ...}``），绝不因为猜不透格式
-        把整个调用丢掉。没有壳返回空列表。
-        """
-        out: List[Tuple[str, dict]] = []
-        for m in _XML_ACTION.finditer(text or ""):
-            body = (m.group("body") or "").strip()
-            if not body:
-                continue
-            nm = re.match(r"[^\s{}<>]+", body)
-            if nm is None:
-                continue
-            tool = _clean_tool_name(nm.group(0))
-            if not tool:
-                continue
-            rest = body[nm.end() :].strip()
-            out.append((tool, ReActPlanner._parse_args(rest) if rest else {}))
-        return out
 
     @staticmethod
     def _parse_native_calls(text: str) -> Optional[Tuple[str, dict, int]]:
@@ -720,20 +687,28 @@ class ReActPlanner:
 
         模型不按格式走时的典型输出（实测：一句「你好」就会触发）::
 
-            THOUGHT: 用户只是打了个招呼，没有具体任务。直接回应即可。
+            <THOUGHT>用户只是打了个招呼，没有具体任务。直接回应即可。</THOUGHT>
 
             你好！我是这个 agent，可以帮你…
 
         之前这里把**整段**当答案返回，于是用户直接看到「THOUGHT: …」开头的正文；
         而 ``_thought`` 用 DOTALL 贪婪匹配到末尾，会把正文也当成思考，于是那段文字
         在「Agent自主规划过程」里再出现一次。两边都错，根因是没给 THOUGHT 与正文
-        划界——这里以**空行**为界把它们分开（THOUGHT 段是思考，空行之后是正文）。
+        划界——XML 形态按标签划界，文本形态以**空行**为界（THOUGHT 段是思考，
+        空行之后是正文）。
 
         只有 THOUGHT、后面什么都没有时，返回它去掉标签前缀的内容：总比把
         「THOUGHT:」这个标签暴露给用户强。
         """
         t = text or ""
-        # THOUGHT 段：行首标签 + 内容，一直到下一个空行（或文本结束）
+        # XML 形态：THOUGHT 段之后、下一段之前的那段文字就是正文
+        seg = protocol.first_segment(t, "THOUGHT", form="xml")
+        if seg is not None:
+            thought = seg.content.strip()
+            nxt = protocol.next_segment_start(t, seg.end)
+            body = t[seg.end : nxt].strip()
+            return (body or thought), thought
+        # 文本形态：行首标签 + 内容，一直到下一个空行（或文本结束）
         m = re.search(
             r"(?ms)^[ \t]*(?:THOUGHT|思考)[ \t]*[:：][ \t]*\n?(.+?)(?:\n[ \t]*\n|\Z)",
             t,
@@ -746,11 +721,20 @@ class ReActPlanner:
 
     @staticmethod
     def _thought(text: str) -> str:
-        m = re.search(r"(?ims)THOUGHT\s*[:：]\s*(.+)", text, re.S)
-        if not m:
-            return ""
-        # 模型伪造 OBSERVATION 时 THOUGHT 会跟着延伸到下一轮，同样要在标签处切断
-        t = re.split(_TAIL_LABEL, m.group(1))[0]
+        """取思考内容（协议段优先，宽松匹配兜底）。
+
+        协议段天然截到下一个标签——模型伪造 OBSERVATION 时 THOUGHT 会跟着延伸到
+        下一轮，这一段正好在那里被切断。
+        """
+        seg = protocol.first_segment(text, "THOUGHT")
+        if seg is not None:
+            t = seg.content
+        else:
+            # 兜底：标签写在行中间（模型不换行）
+            m = re.search(r"(?ims)THOUGHT\s*[:：]\s*(.+)", text, re.S)
+            if not m:
+                return ""
+            t = re.split(_TAIL_LABEL, m.group(1))[0]
         # 模型改用原生 tool-calling 时，THOUGHT 之后的 DSML 块是**调用**不是思考，
         # 不剥掉就会整块显示在「Agent自主规划过程」里。
         t = re.sub(_DSML_CALLS_BLOCK, "", t, flags=re.S)

@@ -6,7 +6,7 @@
 （``DelegateResult``）当 observation 回喂主循环，主循环据此继续或给 FINAL。
 
 Delegatee 注册在独立的 ``DelegateeRegistry``，**不进工具清单**——模型不会把它
-当成普通工具去 ``ACTION:`` 调用，只能走 ``TASK:`` 这个专门动作。
+当成普通工具去 ``<ACTION>`` 调用，只能走 ``<TASK>`` 这个专门动作。
 """
 from __future__ import annotations
 
@@ -44,6 +44,18 @@ class Delegatee:
 
     name: str = ""
     description: str = ""
+    #: 这个子 agent 是否**不受工作区 read_only 约束**（可写）。
+    #:
+    #: 为什么要有这个开关：只读约束的威胁模型是「**别人写的代码**会乱来」——
+    #: 第三方插件（MCP / bin）拿到的是用户文件，得防它乱写乱删。而 ``code``
+    #: 子 agent 跑的是**大模型自己刚写的代码**：它要的就是读写工作区里的文件
+    #: （数据处理、批量转换、算个数读文件），把它按只读管住，等于让它做不了
+    #: 它被叫来的理由——实测它会绕道用 Python 直接写，绕道比放行更难看。
+    #:
+    #: 所以 ``code`` 走「可写」：**路径越界仍然拦**（不许写到工作区外面去），
+    #: 只是不再套「只读命令白名单 / 禁写」那套。工作区的 ``read_only`` 语义
+    #: 约束的是**主 agent 直接动手写**这件事，不是模型自己的代码。
+    writable: bool = False
 
     async def run(self, req: Requirement, ctx: Ctx) -> DelegateResult:
         raise NotImplementedError

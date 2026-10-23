@@ -123,8 +123,8 @@ function ActBtn({
 /**
  * 模型管理：本地维护一组可复用的模型预设。
  *
- * 模型归属客户端（config.yaml 注释明确「用哪个模型平台不维护」），因此这里
- * 不连平台，纯本地 CRUD。配好后到「智能体」页的 Agent 配置里绑定即可。
+ * 模型归 keeper 本机维护，纯本地 CRUD，不连任何外部服务。
+ * 配好后到「智能体」页的 Agent 配置里绑定即可。
  */
 export default function ModelManage() {
   const qc = useQueryClient();
@@ -291,7 +291,7 @@ export default function ModelManage() {
     <>
       <PageHeader
         title="模型管理"
-        desc="模型归属客户端本地（平台不维护用哪个模型）。配置好后，到「智能体」页的 Agent 配置里绑定，即可让不同 agent 用不同模型。"
+        desc="模型归本机维护。配置好后，到「智能体」页的 Agent 配置里绑定，即可让不同 agent 用不同模型。"
         actions={
           <button
             type="button"

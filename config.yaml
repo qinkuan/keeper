@@ -1,21 +1,11 @@
 server:
   # 必须绑回环。0.0.0.0 会让同网段设备直接访问到内核，而内核里有能让 agent
-  # 执行本机命令的接口。确实需要局域网访问时，先想清楚 token 泄露的后果。
+  # 执行本机命令的接口。keeper 是本机单用户应用，没有入站认证——所以这条是
+  # 唯一的网络边界，务必保持 127.0.0.1。
   host: 127.0.0.1
   port: 8080
-  auth:
-    enabled: false
-    default_initiator_id: 10001
-    # 命令行形态（./start_keeper.sh）访问令牌。留空 = 不启用认证，启动时会有警告。
-    # 生成一个：python -c "import secrets;print(secrets.token_urlsafe(32))"
-    # 桌面形态（desktop/start_desktop.sh）不需要填：sidecar 每次启动现生成随机
-    # token 传给内核，用户不用管、也不会误提交进仓库。
-    token: "e-ZqRKxQOKb7WuKz5dkC97typHSXArMXS7d5H9XLNy4"
 agent:
   name: assistant
-platform:
-  url: http://localhost:9095
-  token: _csVBbp8d53wmqTfahy3kujRWBnxUbQ8-NuGeF2Zzek
 workspace:
   kind: local
   root: ~/.keeper/workspace/user

@@ -28,16 +28,6 @@ let win = null;
 /** 内核启动的 Promise（单例）：并发调用共享同一次启动，而不是各起一个 */
 let booting = null;
 /**
- * 本次启动的入站 token（sidecar.js 每次现生成，见 keeper/api/auth.py）。
- * preload 在 sandbox 环境里读不到环境变量，所以走 sendSync 来这里取。
- * 必须在 createWindow **之前**赋值 —— preload 是建窗时同步执行的。
- */
-let sidecarToken = '';
-ipcMain.on('keeper:token', (e) => {
-  e.returnValue = sidecarToken;
-});
-
-/**
  * 读系统剪贴板里「被复制的文件 / 文件夹」的绝对路径列表。
  *
  * 用途：用户在系统文件管理器里 Ctrl+C 复制文件，再在「我的空间」里 Ctrl+V 粘贴。
@@ -153,9 +143,6 @@ async function boot() {
     })
       .then((sidecar) => {
         console.log(`[desktop] 内核就绪：${sidecar.url}`);
-        // preload 通过 sendSync 来要 token（sandbox 下读不到环境变量），
-        // 所以必须在这一步赋值 —— 建窗紧接着就发生，preload 同步执行。
-        sidecarToken = sidecar.token || '';
         return sidecar;
       })
       .catch((err) => {

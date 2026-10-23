@@ -33,6 +33,14 @@ sys.path[:] = [p for p in sys.path if p not in (_HERE, str(Path(_HERE).parent))]
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# 会话空间（运行期唯一的工作目录）的根重定向：**必须在 import keeper 之前**设。
+# agent/config.py 的 WORKSPACE_ROOT 是导入时求值的模块级常量，晚一步设就来不及了。
+# 评测每条用例生成一个会话空间目录，默认会堆进 ~/.keeper/workspace/session/——
+# 那是用户的家目录，评测跑几轮就变成一堆垃圾目录。这里指到评测自己的根下。
+os.environ.setdefault(
+    "KEEPER_WORKSPACE_ROOT", str(Path.home() / ".keeper" / "evals" / "workspace")
+)
+
 from keeper.evals import report as R  # noqa: E402
 from keeper.evals.runner import DEFAULT_CASE_TIMEOUT, run_eval  # noqa: E402
 
@@ -146,11 +154,6 @@ def main() -> None:
     ap.add_argument(
         "--no-compare", action="store_true", help="不与任何基线对比"
     )
-    ap.add_argument(
-        "--online",
-        action="store_true",
-        help="装载时重新下载插件资源（默认离线，避免评测受网络影响）",
-    )
     ap.add_argument("--source-db", help="被复制的源库路径，默认 keeper/data/keeper.db")
     ap.add_argument("--show", help="只打印某份历史报告（run_id 或 latest）后退出")
     ap.add_argument("--compare-only", help="把该历史报告与 latest 对比后退出")
@@ -176,7 +179,6 @@ def main() -> None:
             suites=args.suite,
             case_ids=args.case,
             run_id=args.run_id,
-            offline=not args.online,
             case_timeout=args.case_timeout,
             compare_with=compare_with,
             source_db=Path(args.source_db) if args.source_db else None,

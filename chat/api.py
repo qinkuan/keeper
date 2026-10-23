@@ -77,11 +77,11 @@ def _agent(agent_id: str):
 async def _agent_descriptions(agent_ids: list) -> Dict[str, str]:
     """批量取 agent 简介。
 
-    description 只在本地库（平台配置的缓存）里，运行时实例上没有——概览卡片要
+    description 只在本地库里，运行时实例上没有——概览卡片要
     展示它，所以按 id 一次性从库里取，避免每个 agent 各查一遍。
 
-    返回 ``(descriptions, origins)``：来源要在概览卡片上标出来——平台来源的改了
-    得回平台改，本地来源的当场就能改。
+    返回 ``(descriptions, origins)``：``origin`` 是历史字段（曾经区分「平台
+    同步来的 / 本机创建的」），现在只作为来源标记透传，UI 不再据此分支。
     """
     from sqlalchemy import select
 
@@ -100,40 +100,98 @@ async def _agent_descriptions(agent_ids: list) -> Dict[str, str]:
         ).all()
     return (
         {r.id: (r.description or "") for r in rows},
-        {r.id: (r.origin or "platform") for r in rows},
+        {r.id: (r.origin or "local") for r in rows},
     )
 
 
 @router.get("")
-async def list_agents(request: Request) -> Dict[str, Any]:
+async def list_agents(request: Request, include_core: bool = False) -> Dict[str, Any]:
     """已装载的 agent 概览（landing 页枚举用）。
 
     顺带返回每个 agent 自己的 **A2A 入站地址** ``a2a_url``：前端「添加对端」时
     直接取用即可。地址按**服务端自身** base_url 拼出，而不是让前端拼——dev 下
     前端跑在 vite(5273) 而后端在 8080，前端拿到的源并非后端真实地址，自己拼必错。
+
+    ``include_core=1``：把**核心 agent** 也列进 ``agents`` 列表。
+
+    为什么它默认不在列表里
+    ----------------------
+    这个列表来自 :func:`list_keepers`（数据库 agent 的运行时实例），而核心 agent
+    **从本地目录构建**（``~/.keeper/core-agent/``），住在另一个槽位里，所以
+    这里查不到它。
+
+    而它恰恰是最该被看到的那一个：会话不指定 agent 时就归它（主脑），可观测
+    面板的用量 / 解析统计也按它的 id 落库。不列它，用户在「可观测」里就
+    **选不到主脑**，看到的是一片空白——实测过的症状。
+
+    为什么默认不列
+    --------------
+    同一份列表还被「添加对端（peer）」的选择器用，每一项都会被存成对端并按
+    URL 路由。核心 agent 的 A2A 入站与数据库 agent 不是一回事（它不在
+    ``_KEEPERS`` 里），混进去容易选到路由不通的项——所以**只有明确要的地方
+    才带上它**（目前只有可观测面板）。
     """
     base = str(request.base_url).rstrip("/")
     keepers = list_keepers()
     descs, origins = await _agent_descriptions([a.agent_id for a in keepers])
     core = resolve_core_agent()
+    items = [
+        {
+            "id": a.agent_id,
+            "name": a.name,
+            "origin": origins.get(a.agent_id) or "local",
+            "description": descs.get(a.agent_id) or None,
+            "ready": a.check_readiness().ok,
+            "mcp_connected": a.mcp is not None,
+            # agent_id 在「纯配置直接运行」时为 None，此时没有可路由的端点
+            "a2a_url": f"{base}/agents/{a.agent_id}/a2a" if a.agent_id else None,
+        }
+        for a in keepers
+    ]
+    if include_core and core is not None and core.agent_id:
+        # 核心 agent 放**第一位**：它是会话的默认落点，绝大多数记录归它，
+        # 排在前面时「未选择」默认看的就是主脑。
+        #
+        # 去重：核心 agent 不可用时 resolve_core_agent 会**回落到某个已装载的
+        # 数据库 agent**，那它已经在列表里了——再插一份会让下拉框出现同名两项。
+        if not any(i["id"] == core.agent_id for i in items):
+            items.insert(
+                0,
+                {
+                    "id": core.agent_id,
+                    "name": core.name,
+                    # 第三种来源：既不是平台镜像、也不是本机创建的，是本地目录构建的
+                    "origin": "core",
+                    "description": _core_description(),
+                    "ready": True,
+                    "mcp_connected": core.mcp is not None,
+                    # 不给 a2a_url：核心 agent 不在 _KEEPERS 里，A2A 入站不按这条
+                    # 路径路由。给了地址会让人存下一个路由不通的对端。
+                    "a2a_url": None,
+                },
+            )
     return {
         # 核心 agent：新建会话的默认落点。前端「新建对话」直接用它，
         # 不必再让用户先选一个 agent——会话因此成为一等公民。
         "core_agent_id": core.agent_id if core is not None else None,
-        "agents": [
-            {
-                "id": a.agent_id,
-                "name": a.name,
-                "origin": origins.get(a.agent_id) or "platform",
-                "description": descs.get(a.agent_id) or None,
-                "ready": a.check_readiness().ok,
-                "mcp_connected": a.mcp is not None,
-                # agent_id 在「纯配置直接运行」时为 None，此时没有可路由的端点
-                "a2a_url": f"{base}/agents/{a.agent_id}/a2a" if a.agent_id else None,
-            }
-            for a in keepers
-        ]
+        "agents": items,
     }
+
+
+def _core_description() -> Optional[str]:
+    """核心 agent 的简介（来自本地定义文件）。
+
+    运行时实例上没有简介（简介存在数据库里，而核心 agent 不在库），所以去
+    定义文件里取；读不到就返回 None——列表里少个简介不影响使用。
+    """
+    try:
+        from ..agent import core as core_def
+        from ..config import load_config
+
+        d = core_def.load_core_def(load_config())
+        return (d.description or None) if d is not None else None
+    except Exception:  # noqa: BLE001 读不到就别给简介
+        return None
 
 
 @router.get("/{agent_id}/chat")

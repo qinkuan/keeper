@@ -20,10 +20,6 @@ import type {
 
   AgentItem,
 
-  PlatformAgent,
-
-  MarketAgent,
-
   PeersResp,
 
   PeerInput,
@@ -92,7 +88,6 @@ import type {
 
   SettingsInput,
 
-  AuthSettings,
 
   ReasoningEffort,
 
@@ -144,134 +139,6 @@ import type {
 const BASE = (import.meta as any).env?.DEV ? "/api" : "";
 
 
-/**
-
- * 入站 token：内核要求每个请求带 X-Keeper-Token，否则 401。
-
- *
-
- * 为什么需要它：内核里有能让 agent 执行本机命令的接口，而同源策略只拦"读响应"、
-
- * **不拦"发请求"** —— 用户打开的任意恶意网页都能 fetch 到这个端口，GET 连预检都
-
- * 不触发。token 是唯一挡住它们的东西（见 keeper/api/auth.py）。
-
- *
-
- * 三个来源，按优先级：
-
- *
-
- * 1. **preload 桥**（桌面形态）：`window.keeperHost.token`。sidecar.js 每次启动随机
-
- *    生成，经 preload 转发。页面读得到它是刻意的——这一页就是它的用户。
-
- * 2. **URL 查询参数**（命令行形态）：普通浏览器里没有 preload，所以内核启动日志会
-
- *    打印一条带 `?keepertoken=` 的完整 URL，从它进来就能自动接上。取到后立刻存进
-
- *    sessionStorage 并把 URL 洗掉——token 不该留在地址栏和浏览器历史里。
-
- * 3. **VITE_KEEPER_TOKEN**：开发形态（vite dev server）用，构建期注入。
-
- *
-
- * 三个都没有时返回空串，此时内核应当也是未启用认证的形态（启动日志会警告）。
-
- */
-
-const TOKEN_SS_KEY = "__keeperToken";
-
-
-function authToken(): string {
-
-  // 1) 桌面形态：preload 桥
-
-  const bridge = (globalThis as any).keeperHost?.token;
-
-  if (bridge) return String(bridge);
-
-
-  // 2) 命令行形态：从启动日志里那条带 token 的 URL 进来
-
-  try {
-
-    const t = new URL(location.href).searchParams.get("keepertoken");
-
-    if (t) {
-
-      sessionStorage.setItem(TOKEN_SS_KEY, t);
-
-      // 洗掉地址栏里的 token：留着会被复制走、也会留在浏览器历史里。
-
-      // 用 replaceState 而不是改 location，避免多一条历史记录。
-
-      const u = new URL(location.href);
-
-      u.searchParams.delete("keepertoken");
-
-      history.replaceState(null, "", u.pathname + u.search + u.hash);
-
-      return t;
-
-    }
-
-  } catch {
-
-    /* 某些环境 history 不可用，退回只用 sessionStorage */
-
-  }
-
-
-  // 3) 刷新后 URL 里已经没 token 了，从 sessionStorage 取
-
-  try {
-
-    const saved = sessionStorage.getItem(TOKEN_SS_KEY);
-
-    if (saved) return saved;
-
-  } catch {
-
-    /* 隐私模式下 sessionStorage 可能抛异常，忽略 */
-
-  }
-
-
-  return String((import.meta as any).env?.VITE_KEEPER_TOKEN || "");
-
-}
-
-
-/** 统一拼认证头。所有打向内核的请求都要经过它，别绕过。 */
-
-export function authHeaders(extra?: Record<string, string>): Record<string, string> {
-
-  const t = authToken();
-
-  return t ? { ...extra, "X-Keeper-Token": t } : { ...extra };
-
-}
-
-/** 采纳内核新生成的入站 token（设置页开启认证、且此前没有任何 token 时）。
-    存进 sessionStorage，之后 authToken() 就会带上它——否则这个新 token 只有内核
-    知道，前端接着就 401。桌面形态本就走 preload，一般不触发这里。 */
-
-export function setAuthToken(t: string) {
-
-  try {
-
-    if (t) sessionStorage.setItem(TOKEN_SS_KEY, t);
-
-  } catch {
-
-    /* 隐私模式等写不进去也无妨：桌面形态不依赖这条路径 */
-
-  }
-
-}
-
-
 function qs(params?: Record<string, string | undefined>) {
 
   if (!params) return "";
@@ -307,11 +174,7 @@ async function request<T>(
 
     method,
 
-    headers: authHeaders(
-
-      body !== undefined ? { "Content-Type": "application/json" } : undefined
-
-    ),
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
 
     body: body !== undefined ? JSON.stringify(body) : undefined,
 
@@ -1001,6 +864,25 @@ export function apiListAgents() {
 
 }
 
+/** 同 apiListAgents，但把**核心 agent** 也列进 agents 列表。
+
+    核心 agent 从本地目录构建（~/.keeper/core-agent/），**不在运行时实例表里**，
+    所以默认列不出来——而可观测面板要按 agent_id 查用量 / 解析统计，主脑的记录
+    全在它名下，不带上它就选不到主脑（实测症状：可观测面板的 agent 下拉里没有
+    核心 agent）。
+
+    单独一个函数而不是给 apiListAgents 加参数：它常被直接当 queryFn 传给
+    useQuery，加了可选参数会被 React Query 的 context 顶掉（类型不兼容），
+    得把所有调用点都改成 () => apiListAgents() 才划算。 */
+export function apiListAgentsWithCore() {
+
+  return apiGet<{ agents: AgentItem[]; core_agent_id?: string | null }>(
+    "/agents",
+    { include_core: "1" },
+  );
+
+}
+
 
 // ---- 对话（按 agentId 路由到本进程内实例）----
 
@@ -1276,7 +1158,7 @@ export function apiStream(
 
       method: "POST",
 
-      headers: authHeaders({ "Content-Type": "application/json" }),
+      headers: { "Content-Type": "application/json" },
 
       body: JSON.stringify(body),
 
@@ -1341,7 +1223,7 @@ export function apiResumeChatStream(
 
       )}`,
 
-      { signal, headers: authHeaders({ Accept: "text/event-stream" }) }
+      { signal, headers: { Accept: "text/event-stream" } }
 
     );
 
@@ -1854,19 +1736,13 @@ export function apiEffectiveTools(agentId: string) {
 
 // ---- 本地运行时管理（/manage，只保留热重载）----
 
-/** 装载：从平台拉该 agent 的配置 → 落本地库 → 装配成实例（装载后才能对话）。 */
-
-export function loadAgent(id: string) {
-
+/** 启动：把库里的配置装配成运行时实例（之后才能对话）。 */
+export function startAgent(id: string) {
   return apiPost<{ ok: boolean; id: string; name: string }>(
-
-    `/manage/agents/${id}/load`
-
+    `/manage/agents/${id}/start`
   );
-
 }
-
-/** 卸载：释放实例（配置缓存保留，可再装载）。 */
+/** 停止：释放运行时实例（配置与插件绑定保留，可再启动）。 */
 
 export function unloadAgent(id: string) {
 
@@ -1976,11 +1852,11 @@ export function apiDeleteLocalAgent(id: string) {
 
 /**
 
- * 本地启用 / 停用 —— 决定它跑不跑、进不进概览。平台 agent 和本地 agent 都适用。
+ * 本地启用 / 停用 —— 决定它跑不跑、进不进概览。
 
  *
 
- * 写的是 override 表而不是 status，所以**不会被下一次平台同步悄悄撤销**。
+ * 写的是 override 表而不是 status，所以**不会因为别处的状态变更悄悄失效**。
 
  * 缺省是启用的。
 
@@ -2003,95 +1879,9 @@ export function apiSetAgentEnabled(id: string, enabled: boolean) {
 }
 
 
-/** 我已有的全部 agent：本地创建的 + **已装载的**平台 agent。 */
-
+/** 本机所有 agent（库里有的就是本机的）。 */
 export function apiListAllAgents() {
-
-  return apiGet<LocalAgentListResp>("/manage/agents?origin=all");
-
-}
-
-
-/**
-
- * 平台 agent 全量（含已卸载的），市场页用它判断显示「装载」还是「重新装载」。
-
- *
-
- * 注意和 apiListAllAgents 的区别：那个是**库存**（已卸载的不算），这个是
-
- * 「平台那边我添加过的」全量，用来看装载状态。
-
- */
-
-export function apiListPlatformAgents() {
-
-  return apiGet<LocalAgentListResp>("/manage/agents?origin=platform");
-
-}
-
-
-// ---- 平台（配置之源）----
-
-// mcp / skill / tool / agent 的定义统一在 platform，keeper 只读不写。
-
-// 平台地址可用 VITE_PLATFORM_URL 覆盖（默认 :9095）。
-
-const PLATFORM_URL =
-
-  (import.meta as any).env?.VITE_PLATFORM_URL ?? "http://localhost:9095";
-
-
-async function platformGet<T>(path: string): Promise<T> {
-
-  const r = await fetch(`${PLATFORM_URL}${path}`);
-
-  if (!r.ok) throw new Error(`平台请求失败 ${r.status} ${r.statusText}`);
-
-  return (await r.json()) as T;
-
-}
-
-
-async function platformPost<T>(path: string): Promise<T> {
-
-  const r = await fetch(`${PLATFORM_URL}${path}`, { method: "POST" });
-
-  if (!r.ok) throw new Error(`平台请求失败 ${r.status} ${r.statusText}`);
-
-  return (await r.json()) as T;
-
-}
-
-
-/** 平台上的 agent 定义（智能体页只读展示；增删改请到平台）。 */
-
-export function platformListAgents() {
-
-  return platformGet<PlatformAgent[]>("/api/agents");
-
-}
-
-
-/** 市场：平台全部 agent + 当前用户是否已添加（`added`）。 */
-
-export function platformListMarket() {
-
-  return platformGet<MarketAgent[]>("/api/market/agents");
-
-}
-
-
-/** 把某个 agent 加进「我已添加」——装载的前提（幂等）。 */
-
-export function platformAddAgent(id: string) {
-
-  return platformPost<{ ok: boolean; agent_id: string }>(
-
-    `/api/market/agents/${id}/add`
-
-  );
-
+  return apiGet<LocalAgentListResp>("/manage/agents");
 }
 
 
@@ -2179,7 +1969,6 @@ export function apiUploadMySpace(file: File, dir?: string) {
   return fetch(`${BASE}/user-spaces/mine/upload`, {
     method: "POST",
     body: form,
-    headers: authHeaders(),
   }).then(async (r) => {
     if (!r.ok) {
       let detail = `上传失败（${r.status}）`;
@@ -2198,8 +1987,7 @@ export function apiUploadMySpace(file: File, dir?: string) {
 /** 「我的空间」：下载空间内某文件（拷出），用带鉴权的 fetch 拿 blob 触发浏览器下载。 */
 export async function apiDownloadMySpace(path: string) {
   const r = await fetch(
-    `${BASE}/user-spaces/mine/download?path=${encodeURIComponent(path)}`,
-    { headers: authHeaders() }
+    `${BASE}/user-spaces/mine/download?path=${encodeURIComponent(path)}`
   );
   if (!r.ok) throw new Error(`下载失败（${r.status}）`);
   const blob = await r.blob();
@@ -2211,11 +1999,9 @@ export async function apiDownloadMySpace(path: string) {
   URL.revokeObjectURL(url);
 }
 
-/** 「我的空间」：文件原始字节 URL，直接塞进 img / video / iframe（带 keepertoken 查询参数鉴权，无需 header）。 */
+/** 「我的空间」：文件原始字节 URL，直接塞进 img / video / iframe。 */
 export function apiMySpaceFileRawUrl(path: string, dl = 0): string {
-  return withToken(
-    `${BASE}/user-spaces/mine/file/raw?path=${encodeURIComponent(path)}${dl ? "&dl=1" : ""}`
-  );
+  return `${BASE}/user-spaces/mine/file/raw?path=${encodeURIComponent(path)}${dl ? "&dl=1" : ""}`;
 }
 
 /** 「我的空间」：重命名文件或目录。 */
@@ -2325,35 +2111,6 @@ export function apiUpdateSessionWorkspace(
 
 // ---- 产物（artifact）：agent 本轮产出的文件 ----
 
-/**
-
- * 把 token 拼进 URL 查询参数，给那些**没法带自定义头**的场合用：
-
- * `<a href>` 新标签页打开、`<a download>` 下载、`<img src>`。
-
- *
-
- * 权衡：token 出现在 URL 里，理论上会被记进浏览器历史 / 日志 / 同源 referrer。
-
- * 这里可以接受，因为 ① 同一个页面同源（都是 127.0.0.1 的内核），不存在把
-
- * referrer 交给第三方的问题；② token 每次启动随机生成，泄露也只影响那一次会话。
-
- * 能用 fetch 的地方（见 ArtifactCard 的 loadText）仍然走请求头，不走这里。
-
- */
-
-function withToken(url: string): string {
-
-  const t = authToken();
-
-  if (!t) return url;
-
-  return url + (url.includes("?") ? "&" : "?") + "keepertoken=" + encodeURIComponent(t);
-
-}
-
-
 /** 产物文件 URL：直接塞进 img / iframe / a 标签（dev 下带 /api 前缀走代理）。 */
 
 export function artifactUrl(
@@ -2368,11 +2125,7 @@ export function artifactUrl(
 
 ) {
 
-  return withToken(
-
-    `${BASE}/agents/${agentId}/files/${messageId}/${artifactId}${dl ? "?dl=1" : ""}`
-
-  );
+  return `${BASE}/agents/${agentId}/files/${messageId}/${artifactId}${dl ? "?dl=1" : ""}`;
 
 }
 
@@ -2416,11 +2169,7 @@ export function attachmentUrl(
 
 ) {
 
-  return withToken(
-
-    `${BASE}/agents/${agentId}/files/attachment/${sessionId}/${attachmentId}${dl ? "?dl=1" : ""}`
-
-  );
+  return `${BASE}/agents/${agentId}/files/attachment/${sessionId}/${attachmentId}${dl ? "?dl=1" : ""}`;
 
 }
 
@@ -2454,9 +2203,6 @@ export async function apiUploadAttachment(
       method: "POST",
 
       body: form,
-
-      // token 不能塞 FormData（那会变成文件的一部分），只能走请求头
-      headers: authHeaders(),
 
     }
 

@@ -20,7 +20,7 @@ _SYSTEM = """你是编程子 agent。主 agent 把一个需要写代码才能完
 4. 若代码报错，你会收到运行输出（含报错），请修改后重试。
 5. 不要做危险操作（rm -rf、sudo、删系统目录等）。确需新库时优先用已安装库；
    若必须安装，在代码顶部用注释说明，沙箱会自动 pip install（仅影响本沙箱）。
-只输出简短思考 + 一个代码块；不要输出 FINAL 这类主循环标签。"""
+只输出简短思考 + 一个代码块；不要输出 <FINAL> 这类主循环标签。"""
 
 
 class CodeDelegatee(Delegatee):
@@ -29,6 +29,10 @@ class CodeDelegatee(Delegatee):
         "用 Python 写代码解决子任务（数据处理 / 格式转换 / 批量文件操作 / 借助库计算等）。"
         "适合主循环没有现成工具、需要灵活编程的活。"
     )
+    #: 它跑的是**大模型自己刚写的代码**，不是第三方插件的代码——威胁模型不同，
+    #: 不套工作区的只读约束（见 :class:`keeper.agent.delegatee.Delegatee` 的说明）。
+    #: 路径越界仍然拦：只放开「能不能写工作区」，不放开「能不能写到外面去」。
+    writable = True
 
     def __init__(self, llm, tools=None, max_iter: int = 5) -> None:
         self.llm = llm

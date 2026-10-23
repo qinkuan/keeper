@@ -7,12 +7,14 @@
    还在 WAL 里的数据（表现为「agent 配置忽然少了几条」）。
    复制而不是新建空库，是因为 ``load_agent_config`` 要从库里读 agent 画像 /
    插件绑定 / 模型预设，配置本身是被测对象的一部分。
-2. **独立工作空间**：每条用例一个独立目录，并临时登记成一条 user_space 绑给
-   会话。于是即使 agent 写了文件，也只写在运行目录里。
+2. **独立工作空间**：运行期唯一的工作目录是**会话空间**
+   （``<WORKSPACE_ROOT>/session/<session_id>``，见 chat/service.py 的
+   ``resolve_workspace``）。评测据此把 setup 文件写进会话空间，并把「我的空间」
+   重定向到评测自己的临时目录——被测 agent 碰不到用户真实的文件。
+   工作区根可用 ``KEEPER_WORKSPACE_ROOT`` 改（见 keeper/evals/run.py）。
 3. **只读优先**：默认 ``read_only=True``，需要写文件的用例显式
    ``allow_writes: true``。
-4. **离线装载**：默认**跳过插件资源下载**（``--offline``）。评测不该因为网络
-   抖动而失败，也不该每次跑都重下一遍插件。
+4. **离线装载**：评测**全程不联网**——插件只来自本机插件库，装载期不会下载任何东西。
 
 进程隔离是前提：本模块假定自己跑在**独立进程**里（``keeper.evals.run``）。
 服务进程里那个全局 SQLAlchemy 引擎已经绑在真实库上，评测绝不能借用它。
@@ -25,17 +27,13 @@ import shutil
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..store import (
-    UserSpace,
     db_url,
     dispose_engine,
-    get_session_factory,
     init_db,
-    new_id,
 )
 from .spec import EvalCase
 
@@ -108,17 +106,19 @@ class EvalHarness:
         self,
         *,
         run_id: str,
-        offline: bool = True,
         source_db: Optional[Path] = None,
     ) -> None:
         self.agent_id: str = ""   # load_agent() 之后才有值
         self.run_id = run_id
-        self.offline = offline
         self.source_db = Path(source_db) if source_db else None
         self.run_dir = RUNS_ROOT / run_id
         self.db_path = self.run_dir / "eval.db"
         self.agent: Any = None
-        self._original_fetch: Any = None
+        # 本条用例的工作空间是否只读（用例属性）。运行期默认是「可写」，
+        # 评测要按用例覆盖，见 _install_workspace_patches。
+        self._case_read_only: bool = False
+        self._original_resolve_workspace: Any = None
+        self._original_user_space_path: Any = None
 
     # ---- 生命周期 ----
 
@@ -138,22 +138,45 @@ class EvalHarness:
         # 这正是评测必须跑在独立进程的原因。
         await init_db(db_url(self.db_path))
 
-        if self.offline:
-            self._disable_fetch()
-        logger.info("评测库就绪：%s（离线装载=%s）", self.db_path, self.offline)
+        self._install_workspace_patches()
+        logger.info("评测库就绪：%s", self.db_path)
 
     async def load_agent(self, agent_id: str) -> None:
-        """装配并注册被测 agent。"""
+        """装配并注册被测 agent。
+
+        核心 agent 走**它自己的**装配路径
+        ------------------------------
+        核心 agent 从 ``~/.keeper/core-agent/`` 构建，**不在 ``agents`` 表里**，
+        所以 ``build_agent``（查库拿画像）找不到它。可观测面板的 agent 选择器
+        现在会把它列出来（主脑的用量/解析统计都在它名下），用户很可能就选它
+        去跑评测——不能让他撞一鼻子灰。
+
+        它的模型绑定与插件跟普通 agent 同一套（``agent_llm_binding`` +
+        ``~/.keeper/agents/<id>/plugins`` 符号链接），评测临时库是真实库的副本，
+        绑定关系带得过去，所以评测它完全可行。
+        """
         from ..agent.keeper import build_agent, register_keeper
+        from ..config import core_agent_id
 
         self.agent_id = agent_id
-        self.agent = await build_agent(agent_id=agent_id)
+        if agent_id == core_agent_id():
+            from ..agent.keeper import build_core_agent
+
+            agent = await build_core_agent()
+            if agent is None:
+                raise ValueError(
+                    f"核心 agent（{agent_id}）没有定义文件，无法评测："
+                    f"请先在 ~/.keeper/core-agent/ 下创建 agent.yaml"
+                )
+            self.agent = agent
+        else:
+            self.agent = await build_agent(agent_id=agent_id)
         register_keeper(agent_id, self.agent)
         logger.info("被测 agent 已装载：%s", agent_id)
 
     async def teardown(self) -> None:
         """释放 agent（MCP 子进程）与数据库连接池。异常一律吞掉。"""
-        self._restore_fetch()
+        self._restore_workspace_patches()
         try:
             from ..agent.keeper import shutdown_all, unregister_keeper
 
@@ -216,17 +239,25 @@ class EvalHarness:
             input=case.input,
         )
 
-        ws_dir = self._prepare_workspace(case)
-        out.workspace = str(ws_dir)
-        before = _snapshot(ws_dir)
+        # 本条用例的只读语义要在跑之前就位：守卫（tools/guard.py）是**运行期**
+        # 看工作空间上下文里的 read_only 决定放行还是拦的。
+        self._case_read_only = case.read_only
 
+        ws_dir: Optional[Path] = None
+        before: Dict[str, float] = {}
         try:
-            space_id = await self._ensure_user_space(case, ws_dir)
             from ..chat.service import ChatService
 
             svc = ChatService(agent_id=self.agent_id)
+            # 先把会话定下来：**会话 id 决定运行期唯一的工作目录**（会话空间）。
+            # 顺序不能反——会话 id 没定下来就不知道往哪写 setup 文件。
+            session_id = await svc.ensure_session_id()
+            ws_dir = self._prepare_workspace(case, session_id)
+            out.workspace = str(ws_dir)
+            before = _snapshot(ws_dir)
+
             t0 = time.perf_counter()
-            resp = await svc.ask(case.input, user_space_id=space_id)
+            resp = await svc.ask(case.input)
             wall_ms = int((time.perf_counter() - t0) * 1000)
 
             steps = resp.get("steps") or []
@@ -240,6 +271,16 @@ class EvalHarness:
                 if s.get("tool") and s.get("kind") != "ask_human"
             ]
             usage = resp.get("usage") or {}
+            # 派过哪些子 agent：args 里带 requirement 的步骤就是委派步。
+            # 记它是为了让只读用例能区分「主 agent 自己写的」与「委派员写的」——
+            # code 子 agent 按产品决策是可写的（它跑的是模型自己写的代码）。
+            delegatees = sorted(
+                {
+                    str(s.get("tool"))
+                    for s in steps
+                    if isinstance(s.get("args"), dict) and "requirement" in s["args"]
+                }
+            )
             out.metrics = {
                 "steps": out.step_count,
                 "tool_calls": len(out.tool_calls),
@@ -256,6 +297,8 @@ class EvalHarness:
                 "used_tools": bool(resp.get("used_tools")),
                 "artifacts": len(resp.get("artifacts") or []),
                 "llm_available": bool(resp.get("llm")),
+                "read_only": case.read_only,
+                "delegatees_used": delegatees,
             }
             # 补充：能力加载次数与工具失败数（只存在于观测表，查库取）
             await self._fill_observability(out, resp.get("user_message_id"))
@@ -265,15 +308,16 @@ class EvalHarness:
 
         # 隔离校验：只读用例的工作空间**不应该**被改动。把「只读」从一句配置
         # 变成可验证的事实——否则 agent 真写了文件，评测照样报绿，等于没隔离。
-        try:
-            after = _snapshot(ws_dir)
-            changed = sorted(
-                p for p in (set(before) | set(after)) if before.get(p) != after.get(p)
-            )
-            out.metrics["workspace_mutated"] = bool(changed)
-            out.metrics["changed_files"] = changed[:10]
-        except Exception as e:  # noqa: BLE001
-            logger.debug("采集工作空间变更失败（忽略）: %s", e)
+        if ws_dir is not None:
+            try:
+                after = _snapshot(ws_dir)
+                changed = sorted(
+                    p for p in (set(before) | set(after)) if before.get(p) != after.get(p)
+                )
+                out.metrics["workspace_mutated"] = bool(changed)
+                out.metrics["changed_files"] = changed[:10]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("采集工作空间变更失败（忽略）: %s", e)
 
         out.answer_preview = out.answer[:500]
         return out
@@ -306,30 +350,22 @@ class EvalHarness:
             s.close()
         logger.info("已复制数据库到评测运行目录：%s", dst)
 
-    def _disable_fetch(self) -> None:
-        """把「装载前下载插件资源」替换成空操作（离线模式）。"""
-        from ..agent import config as agent_config
+    def _prepare_workspace(self, case: EvalCase, session_id: str) -> Path:
+        """把 setup 里的初始文件写进**会话空间**，返回该目录。
 
-        if self._original_fetch is not None:
-            return
+        为什么是会话空间
+        ----------------
+        运行期唯一的工作目录是会话空间（``<WORKSPACE_ROOT>/session/<session_id>``，
+        见 chat/service.py 的 ``resolve_workspace``）——「用户空间」已经是历史遗留
+        概念，运行期不再读 ``chat_sessions.user_space_id``。
 
-        async def _noop(_row) -> None:  # noqa: ANN001
-            logger.debug("离线模式：跳过插件资源下载")
+        所以 setup 文件必须写进会话空间。早年的评测把文件写到
+        ``run_dir/cases/<case_id>`` 再登记成一条 user_space，运行时 agent 看到的
+        目录**永远是空的**——十条用例因此集体扑空，而报告里全是「文件不存在」。
+        """
+        from ..agent.config import default_agent_space_root
 
-        self._original_fetch = agent_config._fetch_agent_resources
-        agent_config._fetch_agent_resources = _noop  # type: ignore[assignment]
-
-    def _restore_fetch(self) -> None:
-        if self._original_fetch is None:
-            return
-        from ..agent import config as agent_config
-
-        agent_config._fetch_agent_resources = self._original_fetch  # type: ignore[assignment]
-        self._original_fetch = None
-
-    def _prepare_workspace(self, case: EvalCase) -> Path:
-        """建本用例的工作空间并写入 setup 里的初始文件。"""
-        ws = self.run_dir / "cases" / case.id
+        ws = default_agent_space_root(session_id)
         ws.mkdir(parents=True, exist_ok=True)
         for rel, content in case.files.items():
             p = (ws / rel).resolve()
@@ -341,28 +377,80 @@ class EvalHarness:
             p.write_text(content, encoding="utf-8")
         return ws
 
-    async def _ensure_user_space(self, case: EvalCase, ws: Path) -> str:
-        """把本用例的工作空间登记成一条 user_space，返回它的 id。
+    # ---- 工作空间语义补丁（只在评测进程内生效） ----
 
-        每条用例一条独立记录而不是复用同一条：复用会让用例之间通过
-        「上一条留下的文件」互相影响，跑出来的差异就不能归因给被测的改动了。
+    def _install_workspace_patches(self) -> None:
+        """把评测需要的两项工作空间语义接进运行时。
+
+        1. **只读语义**
+           运行期的 ``resolve_workspace`` 把 ``read_only`` 写死成 ``False``
+           （会话空间默认可写，这是产品语义）。而评测里 ``read_only`` 是**用例
+           属性**（默认 ``allow_writes: false`` → 只读）。不接进来的话，
+           「只读工作区不得写入」那条用例就是**假绿**：工作区其实可写，
+           agent 写成了也算过。
+
+           这里在评测进程里包一层，按当前用例覆盖 ``read_only``——不改生产代码，
+           只让评测能真正测到守卫（tools/guard.py 的只读白名单）。
+
+        2. **「我的空间」重定向**
+           ``resolve_workspace`` 会把「我的空间」当成 bash 的额外合法根。评测
+           必须指向自己的临时目录，否则被测 agent 能碰到用户真实的文件——
+           评测隔离就漏了，而这正是「隔离类」用例要守的那条线。
+
+        3. **会话空间的根**
+           ``WORKSPACE_ROOT`` 是 ``agent.config`` 的模块级常量。评测进程里直接
+           把它指到评测自己的目录（``KEEPER_WORKSPACE_ROOT``，由 evals/run.py
+           在 import keeper **之前**设好）。这里再显式应用一次：常量在导入时
+           求值，评测是在导入**之后**才拿到 agent 的——不显式应用就会退回用户
+           家目录，把一堆会话空间目录留在 ``~/.keeper/workspace/session/`` 下。
         """
-        factory = get_session_factory()
-        now = datetime.now(timezone.utc)
-        name = f"eval-{self.run_id}-{case.id}"
-        async with factory() as db:
-            row = UserSpace(
-                id=new_id(),
-                name=name,
-                path=str(ws),
-                read_only=case.read_only,
-                description=f"评测用例 {case.id} 的临时工作空间",
-                created_at=now,
-                updated_at=now,
-            )
-            db.add(row)
-            await db.commit()
-            return row.id
+        from .. import setting as keeper_setting
+        from ..agent import config as agent_config
+        from ..chat import service as chat_service
+
+        ws_root = os.environ.get("KEEPER_WORKSPACE_ROOT")
+        if ws_root:
+            agent_config.WORKSPACE_ROOT = Path(ws_root)
+            logger.info("评测会话空间根已重定向到：%s", agent_config.WORKSPACE_ROOT)
+
+        orig_resolve = chat_service.resolve_workspace
+        self._original_resolve_workspace = orig_resolve
+
+        async def _resolve(agent, session_id):
+            ws = await orig_resolve(agent, session_id)
+            # WorkspaceCtx 是普通 dataclass，可改
+            ws.read_only = self._case_read_only
+            return ws
+
+        chat_service.resolve_workspace = _resolve  # type: ignore[assignment]
+
+        orig_user_space = getattr(keeper_setting, "get_user_space_path", None)
+        if orig_user_space is not None:
+            self._original_user_space_path = orig_user_space
+            eval_user_space = self.run_dir / "user-space"
+            eval_user_space.mkdir(parents=True, exist_ok=True)
+            keeper_setting.get_user_space_path = lambda: str(eval_user_space)  # type: ignore[assignment]
+            logger.info("评测「我的空间」已重定向到：%s", eval_user_space)
+
+    def _restore_workspace_patches(self) -> None:
+        """还原工作空间补丁。异常一律吞掉。"""
+        if self._original_resolve_workspace is not None:
+            try:
+                from ..chat import service as chat_service
+
+                chat_service.resolve_workspace = self._original_resolve_workspace  # type: ignore[assignment]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("还原 resolve_workspace 失败（忽略）: %s", e)
+            self._original_resolve_workspace = None
+
+        if self._original_user_space_path is not None:
+            try:
+                from .. import setting as keeper_setting
+
+                keeper_setting.get_user_space_path = self._original_user_space_path  # type: ignore[assignment]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("还原 get_user_space_path 失败（忽略）: %s", e)
+            self._original_user_space_path = None
 
     async def _fill_observability(
         self, out: CaseOutcome, user_message_id: Optional[str]

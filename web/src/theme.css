@@ -33,6 +33,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ===== box-sizing 的坑（关掉 preflight 的连带后果）=====
+ *
+ * 本项目关了 Tailwind preflight（见 tailwind.config.js），UA 默认的
+ * `box-sizing: content-box` 就是全站基准。多数时候看不出差别，但凡是用
+ * `h-full` 当**滚动容器**高度的，就必须显式写 `box-border`：
+ *
+ *   content-box：height:100%（=父级 900px）+ py-6 的 48px 内边距 = 948px，
+ *                比父级高出 48px。而 <main> 是 overflow-hidden，那 48px
+ *                被裁掉**且滚不到**——页面滚到底，最后一块仍然贴着窗口底边，
+ *                底部一点留白都没有（内边距全被裁在视口外）。
+ *   border-box：height:100% 含内边距，正好等于父级，底部留白露得出来。
+ *
+ * flex 布局里的 `flex-1` + min-h-0 不受此影响：flex 的 stretch 是按
+ * **边框盒**对齐的，content-box 下内边距照样算在 100% 之内。
+ */
+
 :root {
   /* ===== 品牌色 =====
      主色 #4285F4：这支蓝**不再往灰里躲**。上一版压到 45% 饱和是过度矫正，

@@ -3,7 +3,7 @@
 agent 用 ``fs.deliver([...])`` 交付的不是「文件路径」，而是「带类型的块」：
 文件只是块的一种（``kind="file"``），图表 / 表格 / 地图 / 流程图是另外的 kind。
 后端只认 kind + 文件引用（或内联内容），前端按 kind 选渲染器
-（见 web/src/components/blocks.ts，本包不依赖前端）。
+（见 web/src/components/BlockView.tsx，本包不依赖前端）。
 
 设计要点（呼应 F 方案「声明与内容分离」）：
 - 重内容（图表 spec、数据）由 agent 用 bash 写进文件，块只描述「怎么渲染这个文件」，

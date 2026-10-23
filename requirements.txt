@@ -1,4 +1,4 @@
-# keeper 依赖（架构见 doc/collaboration-design.md）
+# keeper 依赖（架构见 doc/architecture.md）
 
 # ---- Web 层（main.py / chat/api.py）----
 # starlette 必须 <0.42：starlette 1.x 移除了 Router 的 on_startup 参数，

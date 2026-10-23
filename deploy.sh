@@ -73,7 +73,7 @@ mkdir -p "$OUT"
 ( cd "$D" && zip -qr "$OUT/$PKG.zip" . )
 # 打**绝对**路径：只打 dist/xxx.zip 的话，在哪个目录执行它就指哪
 echo "[deploy] 完成：${OUT}/${PKG}.zip（$(du -h "$OUT/$PKG.zip" | cut -f1)）"
-[ "$WITH_CONFIG" = "1" ] && echo "[deploy] 注意：包内 config.yaml 含 platform.token 与 llm.api_key"
+[ "$WITH_CONFIG" = "1" ] && echo "[deploy] 注意：包内 config.yaml 含 llm.api_key（模型密钥），部署后请改掉"
 
 cat <<'TXT'
 
@@ -81,7 +81,7 @@ cat <<'TXT'
   1. 上传 keeper-server-*.zip 到服务器，在宝塔里解压到 /opt/keeper
   2. 上传 keeper-web-*.zip，解压到 /opt/keeper/keeper/web/dist/
      （最终要有 /opt/keeper/keeper/web/dist/index.html）
-  3. 如需改配置：编辑 /opt/keeper/keeper/config.yaml（端口、平台 token、模型 key）
+  3. 如需改配置：编辑 /opt/keeper/keeper/config.yaml（端口、模型 key）
   4. 宝塔「进程守护管理器」添加守护进程：
        启动命令：/opt/keeper/keeper/start_keeper.sh
        不要加 --daemon（管理器自己保活，再叠 nohup 容易起两个实例抢端口）

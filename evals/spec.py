@@ -91,6 +91,14 @@ class EvalCase:
     files: Dict[str, str] = field(default_factory=dict)
     # 该用例允许写工作空间。默认 False——评测跑挂了也不该动到真实文件。
     allow_writes: bool = False
+    # 该用例**允许委派员（code 子 agent）写工作空间**。
+    #
+    # 为什么要有这个开关：只读约束的威胁模型是「第三方插件会乱写用户文件」。
+    # code 子 agent 跑的是**大模型自己刚写的代码**，产品上已明确按「可写」处理
+    # （见 keeper/agent/delegatee.py 的 Delegatee.writable）。所以这类用例里
+    # 「只读区出现了文件」若伴随一次 code 委派，就**不算隔离失效**——
+    # 否则这条用例会随着模型偶尔派不派子 agent 而随机变红。
+    allow_delegatee_writes: bool = False
     asserts: Asserts = field(default_factory=Asserts)
     # 覆盖默认被测 agent（默认用命令行给的 agent）
     agent: Optional[str] = None
@@ -203,6 +211,7 @@ def load_cases(path: str | Path) -> List[EvalCase]:
                 tags=[str(t) for t in (item.get("tags") or [])],
                 files=_build_files(setup.get("files") or {}),
                 allow_writes=bool(item.get("allow_writes", False)),
+                allow_delegatee_writes=bool(item.get("allow_delegatee_writes", False)),
                 asserts=a,
                 agent=item.get("agent"),
                 skip=bool(item.get("skip", False)),

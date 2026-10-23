@@ -36,6 +36,8 @@ agent_messages → 用 in_reply_to 串联，不设 status
 | `in_reply_to` | 回复的是哪条 | 回复方 |
 
 `thread_id` 两边**同值**，所以不需要映射表。
+（出站实际发出的 `contextId` 已改为 **per-task**：`thread` 级的 `context_id` 仅为兼容保留，
+出站不再使用它。）
 
 定位方式 `(chat_session_id, peer)`，唯一约束。**LLM 不需要记 thread_id**。
 
@@ -51,28 +53,34 @@ a2a   = 对端经 A2A 调我   （a2a_tasks + build_agent_card）
 
 ### 3.1 `peer/` — 我调对端
 
-`PeerService` 封装一次「我问它答」：
+`PeerService` 封装一次「我问它答」。注意它的构造需要 **agent_id**
+（不传会误走 MCP 回退分支），`ensure_thread()` 返回
+`(thread_id, context_id)` **元组**：
 
 ```python
-peer = PeerService(chat_session_id, "product")
-tid = await peer.ensure_thread()
+peer = PeerService(agent_id, chat_session_id, "product")
+tid, _ctx = await peer.ensure_thread()
 out_id = await peer.append(tid, "库存变更影响哪些订单？", "out",
                            in_reply_to=await peer.last_reply_to(tid))
 # ... 调对端的 send ...
 await peer.append(tid, answer, "in", message_id=对端返回 id, in_reply_to=out_id)
 ```
 
+真正的出站入口是 `PeerService.ask(...)`——它把「建链 → 发送 → 轮询 → 收答案」
+串成一次调用，上面那段是它的内部步骤。
+
 ### 3.2 `a2a/` — 协议层
 
 | 模块 | 职责 |
 |---|---|
 | `client.py` | `A2AClient`（本端去调对端） |
-| `server/` | A2A 服务端（对端经 A2A 调本端）：`build_a2a_app` / `build_a2a_router` / `build_agent_card` |
+| `server/` | A2A 服务端（对端经 A2A 调本端）：`build_a2a_router` / `build_agent_card` |
+| `settings.py` | 出站熔断状态（超时 / 连续失败计数 / 冷却） |
 
-对外协议面：
+对外协议面（**按 agent 路由**）：
 
-- `POST /a2a`：JSON-RPC（`SendMessage` / `GetTask` / `CancelTask`）
-- `GET /.well-known/agent.json`：暴露本 agent 的 AgentCard
+- `POST /agents/{agent_id}/a2a`：JSON-RPC（`SendMessage` / `GetTask` / `CancelTask`）
+- `GET /agents/{agent_id}/.well-known/agent.json`：暴露该 agent 的 AgentCard
 
 ---
 
@@ -108,7 +116,7 @@ await peer.append(tid, answer, "in", message_id=对端返回 id, in_reply_to=out
 
 本端**不写死**对端工具清单：
 
-1. 从 `config.peers` 取对端 `a2a_url`
+1. 从对端配置取 `a2a_url`（运行期来源：`AgentConfig.peers` / `agent_peers` 表）
 2. 拉它的 AgentCard
 3. 按 `skills[]` 当场生成 `{peer}__{skill_id}` 工具
 4. description 直接取自对端自己声明的 `skills[].description`
@@ -176,7 +184,7 @@ react_steps.wait_ref  = 对端 thread_id / 消息 id
 | 跨端往来 | `agent_messages` | `peer/service.py` |
 | 入站 A2A 任务 | `a2a_tasks` | `a2a/server/` |
 | 出站 A2A 任务 | `a2a_outbound_tasks` | `a2a/client.py` |
-| 对端配置 | `config.peers` / `agent_peers` | `config.py` |
+| 对端配置 | `AgentConfig.peers` / `agent_peers` | `agent/config.py`、`store/models.py` |
 
 ---
 
@@ -185,3 +193,28 @@ react_steps.wait_ref  = 对端 thread_id / 消息 id
 - **层 3 的必备工具尚未形成书面清单**：当前实现在代码里，契约文档化待补。
 - **熔断状态不持久化**：进程重启后熔断计数清零。
 - **对端 AgentCard 变更不会主动推送**：靠下次调用时重新拉取发现。
+---
+
+## 十一、跨团队角色编排（未实现）
+
+原设计了一套「部门内角色」模型（出自早期 `doc/collaboration-design.md`，该文档未保留，
+可从 git 历史恢复）：
+
+| 角色 | 定位 | 职责 |
+|---|---|---|
+| **keeper** | 外交部 | 部门对外唯一窗口，收发跨部门消息，本地保存全部往来记录 |
+| **planner** | 总参谋部 | 分解需求、组织内部资源、汇总方案、编排任务与发布顺序 |
+| **worker** | 工程兵 | 只按任务改代码 + 自测 |
+| **checker** | 质检 | 契约一致性、集成验证、代码评审 |
+
+关键规则：**谁提出需求，谁的 planner 主导汇总**；worker 不需要知道跨部门的存在。
+
+**现状：未实现。** 代码里没有 planner / worker / checker 的角色概念。
+
+而且原设计写明「四类角色全部通过 **MCP** 交互」——这与当前采用的 **A2A**
+协议路线冲突（见本文）。所以即便将来要实现，也需要按 A2A 重新设计通道，
+不能直接照搬。
+
+**可行的落点**：这四种角色本质上就是「各自有独立模型与插件的 agent」——
+keeper 已经有这个机制（见 [`llm.md`](llm.md) 的绑定与 [`plugin-design.md`](plugin-design.md)
+的绑定）。所以实现路径是：用现有的 agent 机制拼出角色，而不是引入新的角色系统。

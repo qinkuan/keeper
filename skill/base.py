@@ -18,7 +18,7 @@ class Skill:
     # 命中词：系统侧预加载用它们跟用户问题做匹配（可选；不写则从 description 抽）
     keywords: List[str] = field(default_factory=list)
     # 「什么时候用」——L1 概要，常驻上下文；为空意味着作者没写，退化为常驻全文
-    # （见 capability-loading-design.md 第九节：能自动降级，就不许能力消失）。
+    # （见 capability-loading.md 第九节：能自动降级，就不许能力消失）。
     description: str = ""
     # True = 行为型技能（做事的规矩），正文常驻；False = 任务型，按需加载。
     # 装配层会把「没写 description」的也归一成 True，下游只看这一个字段。

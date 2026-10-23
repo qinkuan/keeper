@@ -49,18 +49,45 @@ READONLY_CASES = [
     ("cat ~/.ssh/id_rsa", False, "~ 越界"),
     ("cd /tmp && rm -rf x", False, "复合命令"),
     # 用 heredoc 写整个 HTML 文件：正文里的 </body> 曾经被误判成越界路径 /body。
-    # 现在守卫会剥掉正文、放行落到工作空间内的绝对路径重定向。
+    # 守卫会剥掉正文，所以正文不再误伤——但**只读区里写文件一律禁**，
+    # 哪怕目标就在工作区内部（heredoc 也算重定向）。
     (
         "cat > /Users/admin/.keeper/workspace/session/s1/snake.html <<'EOF'\n"
         "<html><body><h1>hi</h1></body></html>\nEOF",
-        True,
-        "heredoc 写 HTML 到会话区（根内绝对路径）",
+        False,
+        "heredoc 写 HTML 到会话区（只读区不许写）",
     ),
     # `...tail` 是 shell 字符串截取的省略写法。作为 `ls` 的参数它是普通文件名，
     # 合法；作为命令它不在白名单里，该拦。这里两组一起覆盖，确保它**不会**
     # 因为 `..` 前缀被误判成路径穿越（那才是真正的误杀）。
     ("ls -la ...tail", True, "...tail 作为文件名参数"),
     ("...tail -c 200 f", False, "...tail 作为命令（白名单拦）"),
+    # 纯只读判断：挡掉它 agent 只会退回「反复 grep 试」（实测一条用例因此
+    # 从 5 步烧到 22 步）
+    ("test -f access.log", True, "test 判断文件存在"),
+    ("[ -f notes.md ] && echo yes", True, "[ 与 test 同一个内建"),
+    # 文本处理：命令名放行，参数逐条查
+    ("sed -n '1,20p' access.log", True, "sed 取前 20 行（只读）"),
+    ("sed 's/a/b/' a.txt", True, "sed 替换后输出到 stdout（只读）"),
+    ("awk '{print $1}' a.txt", True, "awk 打印第一列"),
+    ("awk '$1 > 5 {print $2}' a.txt", True, "awk 里的 > 是比较不是重定向"),
+    ("awk '/foo|bar/' a.txt", True, "awk 正则里的 | 不是管道"),
+    ("sed -i 's/a/b/' a.txt", False, "sed -i 原地改文件"),
+    ("sed --in-place 's/a/b/' a.txt", False, "sed --in-place 原地改文件"),
+    ("sed -i.bak 's/a/b/' a.txt", False, "sed -i.bak 原地改文件"),
+    ("sed 's/a/b/w out.txt' a.txt", False, "sed 的 w 命令落盘"),
+    ("sed 's/a/b/e' a.txt", False, "GNU sed 的 e 命令能执行 shell"),
+    ("awk 'BEGIN{system(\"rm -rf /tmp/x\")}'", False, "awk system() 执行命令"),
+    ("awk 'BEGIN{getline x < \"/etc/passwd\"}'", False, "awk getline 读文件"),
+    ("awk '{print $1 > \"out.txt\"}' a.txt", False, "awk print > 落盘"),
+    # 引号感知：引号里的 | ; > 都不是 shell 语法。以前按 | 硬切会把正则 / 脚本
+    # 切成碎片，碎片再被当命令名查白名单 → 整条误杀
+    ("grep -E 'foo|bar' a.txt", True, "grep 正则含 |"),
+    ("awk '{print $1}' a.txt", True, "awk 脚本含分号与花括号"),
+    ("echo 'a > b'", True, "引号里的 > 不是重定向"),
+    ("echo 'rm -rf /'", True, "引号里的危险串只是字符串"),
+    ("cat '/etc/passwd'", False, "引号里的系统文件仍然拦"),
+    ("echo x > /tmp/evil", False, "引号外的绝对路径重定向仍拦"),
 ]
 
 # (命令, 可写区是否应拦截, 说明)
@@ -119,6 +146,14 @@ PLUGIN_READONLY_CASES = [
     (f"cat {SETTINGS}", False, "settings.yaml 明确不放开"),
     ("grep foo /etc/hosts", False, "系统文件仍拦"),
     ("cat ~/.ssh/id_rsa", False, "ssh 私钥仍拦"),
+    # 只读区里**写入一律禁**，哪怕目标就在工作区内部。
+    # 以前「重定向目标是工作区内部就放行」，于是
+    # `cat <abs>/data.csv > <abs>/data_copy.csv` 在只读工作区里真的写成了文件
+    # （评测的 read-only-write-refused 用例红过一次）
+    (f"cat {WS}/data.csv > {WS}/data_copy.csv", False, "只读区不许往工作区里写"),
+    (f"cat {WS}/a.txt >> {WS}/b.txt", False, "只读区不许追加写"),
+    ("cat foo.txt 2>/dev/null", True, "丢弃 stderr 不落盘，放行"),
+    ("cat foo.txt > /dev/null", True, "丢弃 stdout 不落盘，放行"),
 ]
 
 # （命令, 是否应拦截, 说明）—— 可写区视角（只查路径越界）

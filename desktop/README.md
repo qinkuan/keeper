@@ -1,4 +1,4 @@
-# keeper 桌面壳（阶段 0）
+# keeper 桌面壳
 
 Electron 只做**窗口和进程托管**，业务逻辑一个都不碰。
 
@@ -29,6 +29,24 @@ npm start                       # 3) 启动
 启动流程：主进程占一个空闲端口 → 拉起 Python 内核 → 轮询 `/health` 直到就绪 →
 开窗加载 `http://127.0.0.1:<动态端口>`。
 
+## 「我的空间」走桌面原生
+
+「我的空间」的文件操作**不走 Python HTTP 端点**，走 Electron 的原生能力：
+
+| 能力 | 落点 |
+|---|---|
+| 列目录 / 读 / 写 / 重命名 / 删除 / 复制 | `spaceFs.js`（Node `fs`） |
+| 系统文件对话框（选目录 / 选文件） | `dialog`（`main.js`） |
+| 访达 / 资源管理器定位文件 | `shell.showItemInFolder` |
+| 系统剪贴板 | `clipboard` |
+| 前端调用通道 | `preload.js` 暴露的 `window.keeperSpace` |
+
+理由：这些操作**只有桌面端做得到**（系统对话框、访达、剪贴板），
+放在 Python 侧既做不出来、也违背「桌面专属」的形态定位。
+
+路径安全由 `spaceFs.js` 的 `resolveSpacePath` 兜住：所有路径都必须在
+「我的空间」根之下，越界直接拒绝。
+
 ## 为什么是 sidecar 而不是搬进 Node
 
 keeper 的不可替代资产都在 Python 侧：jieba 中文分词（FTS5 检索依赖它）、ReAct
@@ -52,15 +70,19 @@ keeper 的不可替代资产都在 Python 侧：jieba 中文分词（FTS5 检索
   5 秒后仍不退再 SIGKILL。漏掉这步的话，关窗后 Python 变孤儿进程，下次启动撞
   数据库。
 - **不给页面 node 权限**：`nodeIntegration: false`。第三方插件的 Web 内容不该能
-  读写 `~/.keeper`。
+  读写 `~/.keeper`；原生能力只经 preload 白名单暴露。
 
-## 还没做（阶段 0 之外）
+## 还没做
 
-- **打包成 .app / .exe**（electron-builder）——现在依赖系统里的 Python 和
-  `keeper/.venv`，还不是可分发的单文件应用。要做的话下一步是 PyInstaller 把内核
-  打进 `resources/`，再加 `electron-builder` 配置。
-- 应用图标（现在用 Electron 默认图标）
-- 托盘、开机自启、自动更新
+| 项 | 说明 |
+|---|---|
+| **打包成 .app / .exe** | 现在依赖系统里的 Python 和 `keeper/.venv`，还不是可分发的单文件应用。下一步是 PyInstaller 把内核打进 `resources/`，再加 `electron-builder` 配置 |
+| **应用图标** | 现在用 Electron 默认图标 |
+| **托盘** | 常驻菜单（最小化到托盘、开机项入口、退出） |
+| **开机自启** | 登录后自动拉起 |
+| **自动更新** | 版本检查与替换 |
+| **窗口状态记忆** | 尺寸/位置不跨启动保留 |
+| **多窗口** | 目前只开一个窗口；多实例由 `requestSingleInstanceLock` 挡住 |
 
 ## 排错
 
@@ -71,3 +93,4 @@ keeper 的不可替代资产都在 Python 侧：jieba 中文分词（FTS5 检索
 | 端口相关异常 | 主进程日志里的 `内核就绪：http://127.0.0.1:<端口>` |
 | 关窗后进程还在 / 下次启动撞数据库 | `./stop_desktop.sh`（会带走孤儿内核）；再用 `ps -A -o pid=,ppid=,command=` 看有没有 PPID 为 1 的 `keeper.main` |
 | 启动时报"已在运行" | 上次的 `desktop.pid` 或残留窗口进程，先 `./stop_desktop.sh` |
+| 「我的空间」操作报错 | 看 `spaceFs.js` 的路径校验——越界的路径会被直接拒绝 |

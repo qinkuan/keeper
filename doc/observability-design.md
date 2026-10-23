@@ -57,6 +57,8 @@
 | `pricing.py` | 定价：`_price_for` / `_context_limit_for` / `_cost_of`（支持时段 / 工作日折扣） |
 | `budget.py` | 额度与聚合：`budget_limits` / `check_budget` / `aggregate` |
 | `dump.py` | 完整 prompt 落盘（调试用，需在设置里开 `prompt_dump`） |
+| `api.py` | 查询接口（`/metrics/*`） |
+| `_guard.py` | 埋点守卫：避免重复 / 无效调用进统计 |
 | `_context.py` | 归属上下文：`_ctx` / `_resolve_round_anchor` |
 
 依赖方向单向：`recording`/`timeline`/`dump` → `_context`；`stats` → `pricing`/`_context`；
@@ -131,7 +133,8 @@ _cost_of(...)                        → 算出一次调用的花费
 
 ## 八、调试辅助：prompt 落盘
 
-`dump.py` 提供完整 prompt 落盘（开关 `config.observability.prompt_dump`，默认关）：
+`dump.py` 提供完整 prompt 落盘（运行期开关在 `~/.keeper/settings.yaml` 的
+`observability.prompt_dump`，默认关）：
 
 ```
 ~/.keeper/prompt-dump/<sessionId>/<messageId>/

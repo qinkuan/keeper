@@ -123,8 +123,8 @@ function EmptyHint({ text = "无" }: { text?: string }) {
  * Agent 配置面板。
  *
  * 分区：概览 / 内置工具 / 插件 / A2A 对端 / 生效工具。
- * 能力开关写本地 override（覆盖平台 binding），切换后服务端**重建实例**生效。
- * 内置工具归 keeper 本地（平台不管理），默认启用；插件由平台管理，统一承载
+ * 能力开关写本地 override，切换后服务端**重建实例**生效。
+ * 内置工具归 keeper 本地，默认启用；插件从本机插件库里挑
  * MCP server、可执行工具（bin）与技能（skill），可按需开关。
  */
 export default function AgentInfoDrawer({
@@ -199,9 +199,11 @@ export default function AgentInfoDrawer({
     queryFn: () => apiAgentPlugins(agentId),
     enabled: open,
   });
-  // 是否为本地 agent：平台 agent 的插件由平台下发管理，不可在本地增删。
-  // 核心 agent 同样可绑定（它从本地文件构建、不在 agents 表里），其 id 由
+  // 这个 agent 是否能在本地增删插件绑定。
+  // 核心 agent 同样可以（它从本地文件构建、不在 agents 表里），其 id 由
   // /agents 的 core_agent_id 字段给出。
+  // （早期有「平台下发 agent」那一类，它的插件由平台管、本地不可增删；
+  //  平台整体移除后不存在这种 agent 了。）
   const isLocal =
     (agentsQ.data?.agents ?? []).some((a) => a.id === agentId) ||
     (agentsQ.data?.core_agent_id ?? null) === agentId;
@@ -234,7 +236,7 @@ export default function AgentInfoDrawer({
   });
   const togglePlugin = (p: LibraryPlugin) => {
     if (!isLocal) {
-      toast.error("平台 agent 的插件由平台下发管理，请在本地 agent 上绑定本地插件");
+      toast.error("这个 agent 不在本地库里，无法绑定插件");
       return;
     }
     const next = new Set(boundNames);
@@ -542,7 +544,7 @@ export default function AgentInfoDrawer({
             <div key={t.key}>
               {t.key === "builtin" && (
                 <Hint title="内置工具归 keeper 本地">
-                  代码在 keeper 客户端里，平台不管理也不需要下载；默认启用，可按需关闭（写类工具在只读工作区下会自动跳过）。
+                  代码在 keeper 本地，不需要下载也不需要安装；默认启用，可按需关闭（写类工具在只读工作区下会自动跳过）。
                 </Hint>
               )}
               {t.key === "builtin" && (
@@ -556,15 +558,12 @@ export default function AgentInfoDrawer({
               {t.key === "plugin" && (
                 <Hint title="本地插件库">
                   从本机插件库里挑插件挂到这个 agent 上：勾上即建符号链接、重建实例生效，取消即解绑。
-                  {!isLocal &&
-                    "当前是平台 agent，其插件由平台下发管理、本地不可增删；想挂本地插件请改用本地 agent（在「智能体」里装载一个本地 agent 后再绑定）。"}
                 </Hint>
               )}
 
-              {/* 本地插件库：所有 agent 都展示，便于看到本机有哪些可挂的插件；
-                  只有本地 agent 才允许实际切换绑定（平台 agent 的插件由平台管理，
-                  整体替换会误删平台下发的插件目录）。每个插件只显示一条，右侧开关
-                  直接管「绑定 / 解绑」——不另起「启用 / 停用」行，避免重复。 */}
+              {/* 本地插件库：所有 agent 都展示，便于看到本机有哪些可挂的插件。
+                  每个插件只显示一条，右侧开关直接管「绑定 / 解绑」——
+                  不另起「启用 / 停用」行，避免重复。 */}
               {t.key === "plugin" && (
                 <div className="mt-3">
                   {libQ.isLoading ? (
@@ -638,7 +637,8 @@ export default function AgentInfoDrawer({
                 </div>
               )}
 
-              {/* 平台 agent 不能本地增删插件，只能用「启用 / 停用」微调能力——保留能力列表 */}
+              {/* 不在本地库里的 agent（理论上只有「还没装载的」）：不能增删插件绑定，
+                  但仍展示能力列表，只读。 */}
               {t.key === "plugin" && !isLocal && (
                 <div className="mt-5">
                   <div className="mb-1.5 text-[13px] font-semibold text-ink-strong">

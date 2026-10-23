@@ -1,5 +1,5 @@
 /**
- * 设置对话框：本机可调配置（写回 settings.yaml，与平台元配置分开）。
+ * 设置对话框：本机可调配置（写回 settings.yaml，与 config.yaml 元配置分开）。
  *
  * **为什么是弹窗而不是整页**：设置是低频操作，而"整页设置"在侧栏里要占一个
  * 永久位置、还要一个返回动作。现在它收在侧栏底部的齿轮里——四项设置各开一个
@@ -27,7 +27,6 @@ import {
   apiReloadSettings,
   apiResetBreaker,
   apiUpdateSettings,
-  setAuthToken,
 } from "../api/client";
 import {
   loadMention,
@@ -37,7 +36,6 @@ import {
 } from "../lib/mention";
 import type {
   A2ASettings,
-  AuthSettings,
   ContextSettings,
   CoreAgentSettings,
   PromptDumpSettings,
@@ -50,7 +48,6 @@ export type SettingsSection =
   | "context"
   | "a2a"
   | "debug"
-  | "auth"
   | "delegatee"
   | "mention";
 
@@ -68,7 +65,6 @@ export const SETTINGS_SECTIONS: {
   { key: "context", label: "上下文", desc: "长任务下上下文怎么治理" },
   { key: "a2a", label: "协作", desc: "调对端时的超时与熔断" },
   { key: "debug", label: "调试", desc: "排查用的 prompt 落盘" },
-  { key: "auth", label: "安全", desc: "入站认证（访问令牌）开关" },
   {
     key: "delegatee",
     label: "子 agent",
@@ -86,7 +82,6 @@ interface SettingsForm {
   a2a: A2ASettings;
   prompt_dump: PromptDumpSettings;
   context: ContextSettings;
-  auth: AuthSettings;
 }
 
 type SectionKey = keyof SettingsForm;
@@ -138,8 +133,6 @@ const DEFAULT_DUMP: PromptDumpSettings = {
   min_prompt_tokens: 0,
   retain_days: 7,
 };
-
-const DEFAULT_AUTH: AuthSettings = { enabled: false };
 
 /** 输入 @ 快捷项：纯前端 localStorage 配置，不依赖后端 settings */
 function MentionSettings() {
@@ -262,8 +255,6 @@ export function SettingsDialog({
     a2a: DEFAULT_A2A,
     prompt_dump: DEFAULT_DUMP,
     context: DEFAULT_CONTEXT,
-    auth: DEFAULT_AUTH,
-
   });
 
   useEffect(() => {
@@ -272,8 +263,6 @@ export function SettingsDialog({
         a2a: settingsQ.data.a2a ?? DEFAULT_A2A,
         prompt_dump: settingsQ.data.prompt_dump ?? DEFAULT_DUMP,
         context: settingsQ.data.context ?? DEFAULT_CONTEXT,
-        auth: settingsQ.data.auth ?? DEFAULT_AUTH,
-
       });
     }
   }, [settingsQ.data]);
@@ -289,21 +278,15 @@ export function SettingsDialog({
         a2a: { ...DEFAULT_A2A, ...cfg.a2a },
         prompt_dump: { ...DEFAULT_DUMP, ...cfg.prompt_dump },
         context: { ...DEFAULT_CONTEXT, ...cfg.context },
-        auth: { ...DEFAULT_AUTH, ...cfg.auth },
         // 核心 agent 不做默认值合并：它的"空"是有意义的值（= 走回落规则）
 
       } as SettingsInput),
     onSuccess: (d) => {
       toast.success("已保存（立即生效，无需重启）");
-      // 开启认证时若内核新生了 token，这次响应会带回它——adopt 进 sessionStorage，
-      // 否则只有内核知道这个新 token，后续请求会 401。复用旧 token 时不会回传。
-      if (d.auth?.token) setAuthToken(d.auth.token);
       setCfg({
         a2a: d.a2a,
         prompt_dump: d.prompt_dump,
         context: d.context,
-        auth: d.auth ?? cfg.auth,
-
       });
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -318,8 +301,6 @@ export function SettingsDialog({
         a2a: d.a2a,
         prompt_dump: d.prompt_dump,
         context: d.context,
-        auth: d.auth ?? cfg.auth,
-
       });
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -874,26 +855,6 @@ export function SettingsDialog({
                   />
                 </Stack>
               </Section>
-            </Stack>
-          )}
-
-          {section === "auth" && (
-            <Stack>
-              <p className="text-[12px] leading-6 text-ink-muted">
-                入站认证要求每个请求带上访问令牌（<code>X-Keeper-Token</code>），
-                用于挡住同网段设备、以及你打开的网页直接驱动本机内核。桌面版会自动生成
-                并注入令牌，通常无需改动这里。
-              </p>
-              <ToggleField
-                label="启放入站认证"
-                extra="关闭后内核不再校验令牌——本机图方便可用，但任何能访问该端口的进程/网页都能调用全部接口（含能让 agent 执行命令的对话接口）。改动立即生效，并会记住到下次启动。"
-                checked={!!cfg.auth.enabled}
-                onChange={(v) => patch("auth", "enabled", v)}
-              />
-              <Hint tone="warn" title="关闭有安全代价">
-                关掉认证后，能访问 {location.host} 的人或网页都能驱动这个内核，包括让
-                agent 在本机执行命令的对话接口。仅建议在可信的本机环境里关闭。
-              </Hint>
             </Stack>
           )}
 
