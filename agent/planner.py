@@ -69,6 +69,17 @@ _DSML_PARAM = re.compile(
     r'parameter\s+name="([^"]+)"[^>]*>(.*?)</[^>]*parameter\s*>', re.S
 )
 
+# XML 风格的调用壳：``<action> read {"block_id":"x"} </action>``——工具名 + JSON
+# 参数都装在壳里，意图无歧义。模型偶尔把文本协议包进这类壳（实测出现过），
+# 壳里的内容完整解析得出来，没必要整轮作废：parse 里当正常 act 执行。
+# 只认这三种壳名（都是「名字 + JSON」的形状）；DSML 的 invoke/parameter 归
+# _parse_native_calls 管，两边不混。
+_XML_ACTION = re.compile(
+    r"<\s*(?:action|tool_call|function_call)\s*>(?P<body>.*?)"
+    r"<\s*/\s*(?:action|tool_call|function_call)\s*>",
+    re.S | re.I,
+)
+
 
 def _args_span(text: str) -> tuple:
     """ACTION_INPUT 正文在 text 里的 (start, end)；没有则 (len, len)。
@@ -135,7 +146,7 @@ def _tool_parallel_mode() -> int:
 
 
 def _action_rule() -> str:
-    """按并行开关生成准则 4（一次写几个 ACTION）。
+    """生成「一次写几个 ACTION」那条准则的**正文**（编号由调用方统一加）。
 
     为什么必须动态生成
     ------------------
@@ -147,8 +158,8 @@ def _action_rule() -> str:
     mode = _tool_parallel_mode()
     if mode <= 0:
         return (
-            "4. **每次响应只写一个 ACTION**：写了第二个也**不会被执行**（系统只取第一个），"
-            "想再查一次，等看到 OBSERVATION 后的下一轮再写。\n"
+            "**每次响应只写一个 ACTION**：写了第二个也**不会被执行**（系统只取第一个），"
+            "想再查一次，等看到 OBSERVATION 后的下一轮再写。"
         )
     limit = 5
     try:
@@ -158,9 +169,9 @@ def _action_rule() -> str:
     except Exception:  # noqa: BLE001
         pass
     return (
-        f"4. **互相独立的只读查询可以合并成一轮，写最多 {limit} 个 ACTION**，"
+        f"**互相独立的只读查询可以合并成一轮，写最多 {limit} 个 ACTION**，"
         "每个 ACTION / ACTION_INPUT 各占一对行；有依赖的（要先看 A 的结果再决定 B）"
-        "必须拆成多轮，等看到 OBSERVATION 后的下一轮再写。\n"
+        "必须拆成多轮，等看到 OBSERVATION 后的下一轮再写。"
     )
 
 
@@ -207,8 +218,8 @@ def _clean_tool_name(raw: str) -> str:
     return line.strip().strip("`\"'，,;；。").strip()
 
 
-def _delivery_section() -> str:
-    """拼出「交付物挂载 + 上下文被折叠时怎么办」。
+def _delivery_rules() -> List[str]:
+    """「交付物挂载 + 上下文被折叠时怎么办」几条准则的**正文**（编号由调用方统一加）。
 
     这两条都是**实测踩出来的**，而且都属于「模型无从推断、只能靠试错」的类别：
 
@@ -223,20 +234,20 @@ def _delivery_section() -> str:
        ``ctx:<id>`` 这条路，于是选了重发。这会直接变成死循环：重发 → 更多输出 →
        更多折叠 → 更想重发。实测因此把一个简单任务烧到 30 步上限。
     """
-    return (
-        "8. 成规模数据优先用 `fs.deliver` 交成可视化块（对比 / 趋势 / 占比 → `chart`；"
+    return [
+        "成规模数据优先用 `fs.deliver` 交成可视化块（对比 / 趋势 / 占比 → `chart`；"
         "多行多列 → `table`；流程 / 架构 → `mermaid`；地理 → `map`）。"
-        "数据点 ≥ 5 类、含时间序列、或用户明确要求时再上图；零散两三个数字文字说清即可。\n"
-        "9. 生成的文件不会自动上卡片：写完必须用 `fs.deliver` 显式交付（写法见上方），且**只交最终成品**。\n"
-        "10. 超长输出变「首尾预览 + `ctx:<id>`」：看到 `ctx:` 说明已执行过，用 `read` 取全文，"
-        "别重发（重发白等一轮还多一份重复文件）。\n"
-        "11. `THOUGHT` 里的计划不会自动执行——只有本轮真正发出的 ACTION 才算数。\n"
-        "12. 同一动作连败两次就换思路：换路径 / 换工具 / 拆更小步；"
-        "`returncode: 1` 反复时先 `bash`（`ls` / `test -f`）确认依赖真在，再继续。\n"
-        "13. 写完代码 / 改动先跑通验证再交付（pytest / node / 直接运行），"
+        "数据点 ≥ 5 类、含时间序列、或用户明确要求时再上图；零散两三个数字文字说清即可。",
+        "生成的文件不会自动上卡片：写完必须用 `fs.deliver` 显式交付（写法见上方），且**只交最终成品**。",
+        "超长输出变「首尾预览 + `ctx:<id>`」：看到 `ctx:` 说明已执行过，用 `read` 取全文，"
+        "别重发（重发白等一轮还多一份重复文件）。",
+        "`THOUGHT` 里的计划不会自动执行——只有本轮真正发出的 ACTION 才算数。",
+        "同一动作连败两次就换思路：换路径 / 换工具 / 拆更小步；"
+        "`returncode: 1` 反复时先 `bash`（`ls` / `test -f`）确认依赖真在，再继续。",
+        "写完代码 / 改动先跑通验证再交付（pytest / node / 直接运行），"
         "别凭「应该没问题」就声称完成；验证最多 2 轮，仍不通过就交付并写明「已知限制」。"
-        "不要自加用户没要求的验收标准。\n\n"
-    )
+        "不要自加用户没要求的验收标准。",
+    ]
 
 
 def _max_output_tokens() -> int:
@@ -249,8 +260,8 @@ def _max_output_tokens() -> int:
         return 0
 
 
-def _output_budget_section() -> str:
-    """拼出「单次输出有上限，超了要自己分段」这一条。
+def _output_budget_rules() -> List[str]:
+    """「单次输出有上限，超了要自己分段」这条准则的**正文**（编号由调用方统一加）。
 
     为什么必须**告诉模型**数字，而不只是给引擎配个上限
     --------------------------------------------------
@@ -262,17 +273,17 @@ def _output_budget_section() -> str:
     所以这里的重点不是"限制模型"，而是**让它按预算分配输出**：短的写参数，
     长的分段写。要点写具体（给字符数、给分段套路），不然等于没提醒。
 
-    没配置上限（0）时整段返回空串——那时按 provider 默认走，提示词不提数字，
+    没配置上限（0）时返回空列表——那时按 provider 默认走，提示词不提数字，
     免得给出一个与实际不符的上限。
     """
     n = _max_output_tokens()
     if n <= 0:
-        return ""
+        return []
     # token→字符用 2.0 粗估（中文更接近 1.5，代码接近 3），取中间值且**宁可
     # 偏小**：这条是让模型少写，不是让它写满，写少了顶多多一轮，写多了被截。
     per = max(200, int(n * 2 * 0.5))
-    return (
-        f"14. **单次回复的输出上限是 {n} token**\n"
+    return [
+        f"**单次回复的输出上限是 {n} token**\n"
         f"   折算：中文约 1 字 ≈ 1 token（安全线约 {n} 字）；英文 / 代码约 4 字符 ≈ 1 token。"
         f"你这边**看不到自己被截断**，只会觉得「输出结束了」——但参数 JSON 会半截、工具必然失败。\n"
         f"   所以要主动按预算分配：\n"
@@ -280,8 +291,8 @@ def _output_budget_section() -> str:
         f"**分多次写**（文件用 `bash` 分段 `cat >>`，再 `cat` 合并，最后 `fs.deliver` 交付），"
         f"别一次写完整份文件 / 脚本。\n"
         f"   - `THOUGHT` 只写决定和理由，别复述代码、文档正文或工具返回的原文。\n"
-        f"   - 要引用的大段内容用 `read` / 工具参数**分次**取，别整段抄进参数。\n\n"
-    )
+        f"   - 要引用的大段内容用 `read` / 工具参数**分次**取，别整段抄进参数。"
+    ]
 
 
 class ReActPlanner:
@@ -297,6 +308,7 @@ class ReActPlanner:
         system_extra: str = "",
         memory_hint: str = "",
         delegatees_desc: str = "",
+        dynamic_extra: str = "",
     ) -> str:
         """拼出 system 提示词。
 
@@ -314,32 +326,42 @@ class ReActPlanner:
             "你可以调用工具来获取真实信息，再综合给出最终回答；"
             "不要编造未经工具确认的事实。\n\n"
         )
+        # 章节标题统一用 H1：注入的 persona（soul.md）与 always 技能正文都以 H1
+        # 起头，模板若用 H2 就会出现「H2 里套 H1」的层级倒挂；升为 H1 后注入内容
+        # 的 H1 成为同级、其内部 H2/H3 层级完整保留，且不动任何用户文件。
         if persona:
-            base += "## 你的角色设定\n" + persona.strip() + "\n\n"
-        base += "## 可用工具(通过ACTION使用)\n" + tools_desc + "\n\n"
+            base += "# 你的角色设定\n" + persona.strip() + "\n\n"
+        base += "# 可用工具（通过 ACTION 使用）\n" + tools_desc + "\n\n"
         if delegatees_desc:
-            base += "## 可用子 agent\n" + delegatees_desc + "\n\n"
+            base += "# 可用子 agent\n" + delegatees_desc + "\n\n"
         if skill_desc:
-            base += "## 可用的技能（Skill）\n" + skill_desc + "\n\n"
-        base += (
-            "## 工作准则\n"
-            "1. 先思考（THOUGHT），再决定要不要调工具（ACTION）。\n"
-            "2. 需要信息就调工具；工具回执（OBSERVATION）是系统注入的，**你绝对不要自己写**——"
-            "一轮只写你自己的几行就停，等回执。自己写 OBSERVATION 再写下一轮，等于捏造工具结果，整段推理作废。\n"
-            "3. 信息足够才给 FINAL，且必须基于工具真实返回。\n"
-            + _action_rule()
-            + "5. 只引用工具实际返回过的内容；没返回的禁止凭空列。\n"
-            "6. 需要用户决定时一律 ASK + OPTIONS，别把候选写进 FINAL 正文。\n"
-            "7. **不需要工具就别调**：问候、常识直接 FINAL；recall / read 别为走流程乱调。\n\n"
-        )
-        base += _delivery_section()
-        # 放在工作准则最后（编号 13，紧跟交付/验证那几条）：它是「输出预算」，
-        # 与紧邻的分段写文件套路是同一件事的延续，读起来连得上。
-        base += _output_budget_section()
+            base += "# 可用的技能（Skill）\n" + skill_desc + "\n\n"
+        # 准则编号只在这里生成一次：各节只提供正文（_action_rule / _delivery_rules /
+        # _output_budget_rules），避免号分散硬编码在三个字符串里、插一条就全部撞号。
+        rules = [
+            "先思考（THOUGHT），再决定要不要调工具（ACTION）。",
+            "需要信息就调工具；工具回执（OBSERVATION）是系统注入的，**你绝对不要自己写**——"
+            "一轮只写你自己的几行就停，等回执。自己写 OBSERVATION 再写下一轮，等于捏造工具结果，整段推理作废。",
+            "信息足够才给 FINAL，且必须基于工具真实返回。",
+            _action_rule(),
+            "只引用工具实际返回过的内容；没返回的禁止凭空列。",
+            "需要用户决定时一律 ASK + OPTIONS，别把候选写进 FINAL 正文。",
+            "**不需要工具就别调**：问候、常识直接 FINAL；recall / read 别为走流程乱调。",
+        ]
+        # 交付 / 验证几条放最后，输出预算紧跟其末（与「分段写文件」那条是同一件事的延续）
+        rules += _delivery_rules()
+        rules += _output_budget_rules()
+        base += "# 工作准则\n" + "\n".join(
+            f"{i}. {r}" for i, r in enumerate(rules, 1)
+        ) + "\n\n"
         if system_extra:
-            base += "## 当前技能的额外要求\n" + system_extra.strip() + "\n\n"
+            base += "# 当前技能的额外要求\n" + system_extra.strip() + "\n\n"
+        # `/` 动态激活插件的正文：用户显式点开的 = 高优先级，紧跟常驻技能之后、
+        # 输出格式之前（格式是引擎契约，必须压在最末）
+        if dynamic_extra:
+            base += dynamic_extra.strip() + "\n\n"
         base += (
-            "## 输出格式（严格遵守）\n"
+            "# 输出格式（严格遵守）\n"
             "每个标签单独占一行，标签名顶行首。不要把标签夹在句子里（解析不到，会当成正文发给用户）。\n"
             "THOUGHT: 思考过程\n"
             "ACTION: 工具名\n"
@@ -370,8 +392,9 @@ class ReActPlanner:
         # 上面的身份/工具/技能/准则/输出格式全部成为可跨轮命中的稳定前缀。
         if memory_hint:
             base += (
-                "\n## 历史记忆摘要（系统自动注入，可能相关；"
-                "如需某块的完整内容，用 read 工具并传入其 block_id）\n"
+                "\n# 历史记忆摘要\n"
+                "（系统按当前问题自动注入，可能相关；某块需要完整内容时，"
+                "用 read 工具并传入其 block_id）\n"
                 "包含「最近 N 轮摘要」与「更早的相关记忆（按当前问题召回）」：\n"
                 + memory_hint.strip()
                 + "\n"
@@ -387,11 +410,16 @@ class ReActPlanner:
 
         切分规则：每个 ``ACTION:`` 到**下一个** ``ACTION:``（或下一个结构标签）之间
         找 ``ACTION_INPUT:``，与 :meth:`parse` 的单动作切分保持一致。
+
+        没有 ``ACTION:`` 时回退到 XML 调用壳（``<action> 工具名 {JSON} </action>``）：
+        那是模型偶尔会吐的另一种形状，内容一样完整，丢掉等于白跑一轮。
         """
         out: List[Tuple[str, Dict[str, Any]]] = []
         matches = list(
             re.finditer(r"(?im)(?:^|\n)\s*ACTION\s*[:：]\s*([^\n]+)", text)
         )
+        if not matches:
+            return list(self._xml_action_calls(text))
         for i, m in enumerate(matches):
             tool = _clean_tool_name(m.group(1))
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
@@ -515,6 +543,25 @@ class ReActPlanner:
                 action_count=max(1, action_count),
             )
 
+        # 2.6) XML 调用壳兼容：``<action> read {"block_id":"x"} </action>``。
+        #
+        # 模型偶尔把文本协议包进这类壳里。壳里的工具名 + JSON 参数是无歧义的、
+        # 完整解析得出来——直接当 act 执行，**不**走下面 DSML 那条「整轮作废」：
+        # 作废是为了点破「这套格式不合法」，而这里格式虽歪、内容全对，作废只会
+        # 白烧一轮，还把用户要的查询拖慢（实测：这种输出原来会掉到 3) 被当成
+        # 最终回答，用户直接看到一串 XML）。
+        # 不写进 prompt 宣传这种写法——容错即可，别鼓励。
+        xml_calls = self._xml_action_calls(text)
+        if xml_calls:
+            tool, args = xml_calls[0]
+            return Decision(
+                kind="act",
+                tool=tool,
+                args=args,
+                thought=self._thought(text),
+                action_count=max(1, len(xml_calls)),
+            )
+
         # 2.5) 原生 tool-calling（DSML 等）：文本协议认不出。
         #
         # 为什么不「解析出来直接执行」而要整轮作废：那是**默认这套格式合法**了。
@@ -596,6 +643,29 @@ class ReActPlanner:
         # 3) 非 JSON（如「方式A，方式B」「a、b」）：按逗号/顿号切分兜底
         parts = [p.strip().strip("\"'") for p in re.split(r"[,，、]", raw) if p.strip()]
         return parts or None
+
+    @staticmethod
+    def _xml_action_calls(text: str) -> List[Tuple[str, dict]]:
+        """解析 XML 调用壳（``<action> 工具名 {JSON} </action>``）→ (工具名, 参数) 列表。
+
+        壳内第一段是工具名、其余是 JSON 参数；参数缺失或不是合法 JSON 时走
+        ``_parse_args`` 的兜底（裸文本 → ``{"_raw": ...}``），绝不因为猜不透格式
+        把整个调用丢掉。没有壳返回空列表。
+        """
+        out: List[Tuple[str, dict]] = []
+        for m in _XML_ACTION.finditer(text or ""):
+            body = (m.group("body") or "").strip()
+            if not body:
+                continue
+            nm = re.match(r"[^\s{}<>]+", body)
+            if nm is None:
+                continue
+            tool = _clean_tool_name(nm.group(0))
+            if not tool:
+                continue
+            rest = body[nm.end() :].strip()
+            out.append((tool, ReActPlanner._parse_args(rest) if rest else {}))
+        return out
 
     @staticmethod
     def _parse_native_calls(text: str) -> Optional[Tuple[str, dict, int]]:

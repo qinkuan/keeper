@@ -12,7 +12,7 @@ tools: [bash__run]
 
 ## 闭环流程
 
-1. 把代码写入当前目录（用 bash 的 `cat >` 或 `fs.write_file`）。
+1. 把代码写入当前目录（用 bash 的 `cat >`；`fs.write_file` 等 fs.* 工具已废弃，一律走 bash）。
 2. 用 `bash__run` 执行命令运行它，例如：
    - `python main.py`
    - `pytest -q`
@@ -27,5 +27,5 @@ tools: [bash__run]
 
 - 命令在当前目录下执行；`read_only` 模式下不能跑破坏性命令（如 `rm -rf /`）。
 - 单次命令有超时（默认 60s），重型任务拆成多条命令分步执行。
-- 长输出会被截断；必要时把日志重定向到文件，再用 `fs.read_file` 读取完整内容。
+- 长输出会被截断；必要时把日志重定向到文件，再用 bash（`cat` / `tail`）读取完整内容。
 - 不要凭空声称"已验证通过"——必须以 `bash__run` 的真实返回为准。

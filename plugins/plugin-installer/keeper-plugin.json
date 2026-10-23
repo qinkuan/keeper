@@ -1,0 +1,104 @@
+{
+  "name": "plugin-installer",
+  "version": "1.0.0",
+  "description": "从 GitHub 或直链归档安装 / 卸载 keeper 插件到本机插件库；安装前必须 preview 并经用户明确确认",
+  "envDependencies": [
+    {
+      "kind": "python",
+      "minVersion": "3.8"
+    }
+  ],
+  "skill": "skills/SKILL.md",
+  "bin": [
+    {
+      "name": "installer",
+      "summary": "插件安装器：从 GitHub / 直链下载并校验后装入插件库，或卸载、列出已装插件",
+      "command": "${PLUGIN_ROOT}/bin/installer",
+      "timeout": 300,
+      "tools": [
+        {
+          "name": "preview",
+          "description": "预览一个待安装插件：下载到临时区并返回名字/版本/能力类型/文件数/体积/目标路径，不写入插件库。install 之前必须先 preview，并把结果摆给用户、得到明确确认。支持 GitHub 仓库、直链归档、npm 包（npm:包名）三类来源。",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "来源：npm:<包名>[@版本]（npm 技能包，自动包壳）、owner/repo[@ref][//子目录]、GitHub 完整 URL（含 /tree/<ref>/<path> 形式）、git@ 地址、或 .tar.gz/.zip 直链（必填）"
+              },
+              "ref": {
+                "type": "string",
+                "description": "分支 / tag / commit；也可写在 source 里用 @ 分隔，两者都给了以本参数为准"
+              },
+              "subdir": {
+                "type": "string",
+                "description": "包内的子目录（多插件仓库用）；也可写在 source 里用 // 分隔"
+              },
+              "registry": {
+                "type": "string",
+                "description": "npm 专用：registry 地址，如 https://registry.npmmirror.com（国内装 npm 包常用）"
+              }
+            },
+            "required": ["source"]
+          },
+          "read_only": true
+        },
+        {
+          "name": "install",
+          "description": "把插件装入本机插件库（~/.keeper/plugins，具体路径以工具返回为准）。安装 = 把第三方代码放进本机、之后会被内核当 bin/MCP 执行，只装用户明确确认过的信任来源；已存在同名插件时必须 force=true 才替换（且必须先告知用户当前版本）。支持 npm: 包名（散装技能包会自动生成 keeper-plugin.json 壳）。装完需用户在「智能体 → 插件」勾选绑定才生效。",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "来源，写法同 preview（必填）"
+              },
+              "ref": {
+                "type": "string",
+                "description": "分支 / tag / commit"
+              },
+              "subdir": {
+                "type": "string",
+                "description": "仓库内的子目录（多插件仓库用）"
+              },
+              "registry": {
+                "type": "string",
+                "description": "npm 专用：registry 地址，如 https://registry.npmmirror.com"
+              },
+              "force": {
+                "type": "boolean",
+                "description": "已存在同名插件时是否替换。默认 false；仅在用户明确同意替换时才传 true"
+              }
+            },
+            "required": ["source"]
+          },
+          "mutating": true
+        },
+        {
+          "name": "remove",
+          "description": "从插件库卸载一个插件：删除库目录，并清掉各 agent 名下指向它的符号链接。只动插件库，不碰工作区文件；执行前必须先跟用户确认，并告知会影响哪些 agent。",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "要卸载的插件名（list 里显示的名字）（必填）"
+              }
+            },
+            "required": ["name"]
+          },
+          "mutating": true
+        },
+        {
+          "name": "list",
+          "description": "列出本机插件库现有插件（名字/格式/能力类型/版本），用于安装后核验，或帮用户看看已经装了什么。",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          },
+          "read_only": true
+        }
+      ]
+    }
+  ]
+}

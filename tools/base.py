@@ -99,7 +99,12 @@ class ToolRegistry:
     @staticmethod
     def _line(t: ProcessorTool) -> str:
         params = ", ".join(f"{k}: {v}" for k, v in t.parameters.items()) or "（无参数）"
-        return f"- {t.name}: {t.description}\n  参数: {params}"
+        # 描述里的裸换行续行必须缩进两格：否则以 `-` 开头的续行（技能的 turn:/ctx:、
+        # fs.deliver 的 - 文件/- 图表）会被 markdown 解析成**同级新列表项**，把一条
+        # 工具描述撕成看起来像好几个工具的碎片。缩进后它们回归所属列表项，
+        # 本意的子项正好渲染成子列表。
+        desc = (t.description or "").replace("\n", "\n  ")
+        return f"- {t.name}: {desc}\n  参数: {params}"
 
     def _group_tools(self) -> "tuple[List[ProcessorTool], Dict[str, List[ProcessorTool]]]":
         """把工具分成「零散（内置）」与「按组」两堆。

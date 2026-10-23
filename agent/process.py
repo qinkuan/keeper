@@ -15,6 +15,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from .context_store import Compactor, clip_observation, ctx_cfg, externalize
@@ -44,6 +45,27 @@ def _is_error_obs(obs: str) -> bool:
         return False
     head = obs.lstrip()[:200]
     return any(m in head for m in _ERR_OBS_MARKERS)
+
+
+# 插件库根（守卫放行用，见 _guard_check）。进程内解析一次：
+# plugins_root() 每次调用都读盘 + 解析 YAML，而 _guard_check 每个危险工具调用
+# 都会走一遍；plugins.root 改了本来也要重启才完全生效（链接路径按它算），
+# 所以进程级记忆是安全的。取不到返回 None——守卫少一个根，不影响其它边界。
+_PLUGIN_LIB_ROOT: Optional[Path] = None
+
+
+def _plugin_library_root() -> Optional[Path]:
+    global _PLUGIN_LIB_ROOT
+    if _PLUGIN_LIB_ROOT is not None:
+        return _PLUGIN_LIB_ROOT
+    try:
+        from ..plugin import plugins_root
+
+        _PLUGIN_LIB_ROOT = Path(plugins_root())
+    except Exception as e:  # noqa: BLE001 配置读不到就当没有这个根
+        logger.debug("插件库根解析失败（守卫不放行该目录）：%s", e)
+        return None
+    return _PLUGIN_LIB_ROOT
 
 
 def _fit_observation(tool: str, raw: str, limit: int) -> tuple[str, int]:
@@ -330,6 +352,11 @@ class ReactProcess:
 
         # ---- 能力按需加载（L1 概要常驻 / L2 正文按需，见 capability-loading-design.md）
         self.skills: List[Any] = list(skills or [])
+        # 本会话经 `/` 动态激活的插件带来的技能（keeper.prepare 每轮刷新）：
+        # 与 agent 级技能分开存——这些是用户**显式点开**的，正文整段进 system，
+        # 不走按需加载（见 set_dynamic_skills / _dynamic_section）。
+        self.dynamic_skills: List[Any] = []
+        self.dynamic_extra: str = ""
         self._cap_loaded: Dict[str, str] = {}  # key -> 已注入正文（判重用）
         self._cap_order: List[str] = []  # 注入顺序，FIFO 换出用
         self._cap_msgs: Dict[str, Dict[str, Any]] = {}  # key -> 对应的那条消息
@@ -416,6 +443,62 @@ class ReactProcess:
         )
 
     @staticmethod
+    def _dynamic_section(skills) -> str:
+        """`/` 动态激活插件的技能正文段（排在「当前技能的额外要求」之后）。
+
+        用户显式点开的插件 = 本对话的**高优先级指令**：正文整段进 system，不再走
+        「L1 概要 + 模型自己 load_capabilities」那套按需流程——显式选择不该被猜疑，
+        更不能只给一行折叠摘要（那正是「/ 激活了却像没加载」的来由）。
+        """
+        blocks = []
+        for s in skills:
+            body = (getattr(s, "system_prompt", "") or "").strip()
+            if not body:
+                continue
+            desc = (getattr(s, "description", "") or "").strip()
+            head = f"### {getattr(s, 'name', '')}"
+            if desc:
+                head += f"（{desc}）"
+            blocks.append(f"{head}\n\n{body}")
+        if not blocks:
+            return ""
+        return (
+            "## 本对话临时启用的插件（你通过 / 激活）\n\n"
+            "以下是你在本对话中**显式启用**的插件，完整说明已直接注入下文，"
+            "优先级高于常规按需加载：不必再调 load_capabilities，直接照其流程做；"
+            "它们带来的工具已在「可用工具」清单里，可直接调用。\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n"
+        )
+
+    def set_dynamic_skills(self, skills) -> None:
+        """挂上 / 刷新本会话动态激活的插件技能（keeper.prepare 每轮调用）。
+
+        - 与 agent 级技能**分开存**：这些只对本对话生效，不能污染跨会话共享的
+          agent 技能表；
+        - 重名跳过：激活一个已 link 给 agent 的插件时（直接调 API 的边角情况），
+          以 agent 级那份为准，不重复注入；
+        - 名单没变就什么都不做：prepare 每轮都调，省掉重复渲染。
+        """
+        own = {getattr(s, "name", "") for s in self.skills}
+        dyn = [s for s in (skills or []) if getattr(s, "name", "") not in own]
+        if [getattr(s, "name", "") for s in dyn] == [
+            getattr(s, "name", "") for s in self.dynamic_skills
+        ]:
+            return
+        self.dynamic_skills = dyn
+        # L1 清单合并进总表（动态的标「已常驻」——正文已在上下文里，免得模型
+        # 又去 load 一遍）；正文段单独渲染，由 planner 拼进高优先级位置。
+        merged = list(self.skills) + list(dyn)
+        for s in dyn:
+            try:
+                s.always = True
+            except Exception:  # noqa: BLE001 非标准 skill 对象不致命
+                pass
+        self.skill_desc = self._skill_desc(merged)
+        self.dynamic_extra = self._dynamic_section(dyn)
+
+    @staticmethod
     def _skill_desc(skills) -> str:
         """「可用技能」段：常驻的只有 L1 概要——**什么时候用**。
 
@@ -434,11 +517,13 @@ class ReactProcess:
             )
         if not lines:
             return ""
+        # 收尾只保留本条清单特有的信息（怎么读正文、谁已常驻）——load_capabilities
+        # 的完整用法在「可用工具」段它的描述里已经讲过，不在这里重复第二遍。
         lines.append("")
         lines.append(
-            "上面只给了「什么时候用」。确定要用某个技能时，先调用 "
+            "确定要用某个技能时，先调用 "
             f"{_CAP_LOADER}（keys 里给它名字）把完整做法读进来再动手；"
-            "不确定可以先读，读错了没有代价。标「已常驻」的已在上下文里，不用再读。"
+            "标「已常驻」的已在上下文里，不用再读。"
         )
         return "\n".join(lines)
  
@@ -777,8 +862,7 @@ class ReactProcess:
         )
 
     def _guard_check(
-        self, name: str, tool: Any, args: Dict[str, Any]
-    ) -> Optional[str]:
+        self, name: str, tool: Any, args: Dict[str, Any]) -> Optional[str]:
         """危险工具执行前的静态拦截；放行返回 ``None``，拦下则返回给模型看的说明。
 
         刻意放在**执行之前**而不是之后：拦下来时副作用为零，模型也拿到了可读的
@@ -802,6 +886,7 @@ class ReactProcess:
                 f"无法确认它不会越界。带dangerous 的工具（可执行命令）"
                 f"只能在会话内的工作空间中使用。]"
             )
+        lib_root = _plugin_library_root()
         try:
             reason = _guard.check_call(
                 tool_name=name,
@@ -814,8 +899,13 @@ class ReactProcess:
                 # 只好把测试脚本堆回用户工作区。
                 # 会话私有空间 + 默认用户空间（「我的空间」）：两者都作为合法根放行，
                 # 这样 agent 既能在本轮会话空间跑，也能访问用户用 @我的空间 指定的目录。
+                # 插件库（~/.keeper/plugins，或 config 里配的 plugins.root）：整树开放。
+                # 装卸插件、读技能随包附件（dashi 的 assets/ scripts/ …）本来就要读写
+                # 它——这正是「装在哪」地图的落点；不放开的话，装是装好了，模型却读不了
+                # 包里的配套文件。只读工作区下仍受读命令白名单约束（能看不能改）。
                 extra_roots=[ws.agent_space]
-                + ([ws.user_space] if ws.user_space else []),
+                + ([ws.user_space] if ws.user_space else [])
+                + ([lib_root] if lib_root else []),
             )
         except Exception as e:  # noqa: BLE001
             # 守卫本身出错不能变成「放行」——但也不该让整轮对话挂掉。
@@ -1510,7 +1600,8 @@ class ReactProcess:
                 )
 
         # system_extra 交给 planner 排在「输出格式」之前：格式要求是引擎契约，
-        # 不能被 skill 的内容覆盖，否则模型不再输出 THOUGHT / ACTION
+        # 不能被 skill 的内容覆盖，否则模型不再输出 THOUGHT / ACTION。
+        # dynamic_extra（/ 激活插件的正文）紧随其后，同属高优先级注入。
         system = self.planner.system_prompt(
             # 精简清单：内置/零散工具给明细，大组折成一行只列名字（用到时补定义）
             tools_desc=self.registry.describe_brief(_tool_group_min()),
@@ -1519,6 +1610,7 @@ class ReactProcess:
             agent_name=self.agent_name,
             persona=self.persona,
             system_extra=self.system_extra,
+            dynamic_extra=self.dynamic_extra,
             memory_hint=memory_hint or "",
         )
         # 系统侧预加载拼进 **system**，不是 messages：history 每轮都在长，放 messages

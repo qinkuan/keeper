@@ -126,6 +126,102 @@ finally:
 check("最多" in on and "只写一个 ACTION" not in on, "并行开启时允许多动作", on)
 
 
+# ── ④ XML 调用壳兼容 ────────────────────────────────────────────────────────
+# 模型偶尔把工具调用包成 ``<action> 工具名 {JSON} </action>``（实测出现过）。
+# 这类输出必须当正常 ACTION 执行，而不是当最终回答漏给用户、也不是整轮作废。
+# 注意：这里用拼接构造标签字面量，避免测试脚本自身的文本被当成被测输入的一部分。
+_LT, _GT = chr(60), chr(62)
+_TAG = _LT + "action" + _GT
+_END = _LT + "/action" + _GT
+_TAG_TC = _LT + "tool_call" + _GT
+_END_TC = _LT + "/tool_call" + _GT
+
+XML1 = f"{_TAG} read " + '{"block_id":"ctx:8130f1bf6d"} ' + _END
+dx = p.parse(XML1, 1)
+check(dx.kind == "act", "XML 调用壳解析为 act", dx.kind)
+check(dx.tool == "read", "XML 调用壳工具名正确", dx.tool)
+check(
+    dx.args == {"block_id": "ctx:8130f1bf6d"},
+    "XML 调用壳参数正确",
+    dx.args,
+)
+
+# 多行变体：壳里换行也要认
+XML2 = (
+    f"{_TAG}\n  fs.write_file\n  "
+    + '{"path": "a.txt", "content": "hi"}'
+    + f"\n{_END}"
+)
+dx2 = p.parse(XML2, 1)
+check(dx2.kind == "act", "多行 XML 壳解析为 act", dx2.kind)
+check(dx2.tool == "fs.write_file", "多行 XML 壳工具名正确", dx2.tool)
+check(
+    dx2.args == {"path": "a.txt", "content": "hi"},
+    "多行 XML 壳参数正确",
+    dx2.args,
+)
+
+# 无参数：工具名后面没 JSON，参数应为空 dict（不是 {"_raw": ...}）
+XML3 = f"{_TAG} fs.list_dir {_END}"
+dx3 = p.parse(XML3, 1)
+check(dx3.kind == "act" and dx3.tool == "fs.list_dir", "无参 XML 壳可执行", dx3.tool)
+check(dx3.args == {}, "无参 XML 壳参数为空", dx3.args)
+
+# tool_call 壳名同样认
+XML4 = f"{_TAG_TC} read " + '{"block_id":"ctx:x"} ' + _END_TC
+dx4 = p.parse(XML4, 1)
+check(
+    dx4.kind == "act" and dx4.tool == "read" and dx4.args == {"block_id": "ctx:x"},
+    "tool_call 壳同样解析为 act",
+    (dx4.tool, dx4.args),
+)
+
+# 文本协议优先：同时出现时仍以 ACTION: 为准（XML 兼容是兜底，不是抢优先级）
+XML5 = (
+    "THOUGHT: 查一下\nACTION: bash\nACTION_INPUT: "
+    + '{"command": "ls"}'
+    + f"\n{_TAG} read "
+    + '{"block_id":"ctx:y"} '
+    + _END
+)
+dx5 = p.parse(XML5, 1)
+check(dx5.tool == "bash", "文本协议优先于 XML 壳", dx5.tool)
+check(dx5.args == {"command": "ls"}, "文本协议参数不被 XML 壳污染", dx5.args)
+
+# 非 JSON 参数走兜底（{"_raw": ...}），不丢整个调用
+XML6 = f"{_TAG} bash " + "ls -la " + _END
+dx6 = p.parse(XML6, 1)
+check(dx6.kind == "act" and dx6.tool == "bash", "非 JSON 参数的 XML 壳仍可执行", dx6.tool)
+check("_raw" in dx6.args, "非 JSON 参数走 _raw 兜底", dx6.args)
+
+# parse_actions 在没有 ACTION: 时回退到 XML 壳
+xa = p.parse_actions(XML1)
+check(
+    xa == [("read", {"block_id": "ctx:8130f1bf6d"})],
+    "parse_actions 回退解析 XML 壳",
+    xa,
+)
+
+# 壳里套着多个调用：action_count 记数，第一个先执行
+XML7 = (
+    f"{_TAG} read " + '{"block_id":"ctx:1"} ' + _END
+    + f"\n{_TAG} read " + '{"block_id":"ctx:2"} ' + _END
+)
+dx7 = p.parse(XML7, 1)
+check(dx7.action_count == 2, "多个 XML 壳被计数", dx7.action_count)
+
+# DSML 原生调用仍然整轮作废（作废的是「格式非法」，不是内容不全）
+DSML = (
+    _LT + "invoke name=" + chr(34) + "read" + chr(34) + _GT
+    + _LT + "parameter name=" + chr(34) + "block_id" + chr(34) + _GT
+    + "ctx:z"
+    + _LT + "/parameter" + _GT
+    + _LT + "/invoke" + _GT
+)
+dd = p.parse(DSML, 1)
+check(dd.kind == "format_error", "DSML 仍整轮作废（点破格式）", dd.kind)
+
+
 print()
 if FAILED:
     print(f"失败 {len(FAILED)} 项：{FAILED}")

@@ -35,10 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from .formats import PLUGIN_MANIFEST, any_marker_present, detect_format
 
-# 插件清单文件名：包根目录的这一份是**真源**（库里的快照不算）
-PLUGIN_MANIFEST = "keeper-plugin.json"
+logger = logging.getLogger(__name__)
 
 # 打包时多套了一层目录时要跳过的噪声目录（与历史行为一致）
 _PACKAGE_NOISE_DIRS = ("__MACOSX",)
@@ -146,9 +145,11 @@ def read_manifest(plugin_dir: Path) -> Dict[str, Any]:
 
 
 def resolve_plugin_root(dest: Path) -> Path:
-    """兼容"打包时多套了一层目录"：清单不在包根就往下探唯一的那层。
+    """兼容"打包时多套了一层目录"：标志不在包根就往下探唯一的那层。
 
     探到多层（或者零层）就原样返回，让调用方按"没有清单"处理。
+    探测用的是**任意已知格式的标志**（见 ``plugin/formats.py``）——多套一层的
+    Claude 包与 keeper 包走同一条解析。
     """
     try:
         cands = [
@@ -157,7 +158,7 @@ def resolve_plugin_root(dest: Path) -> Path:
             if p.is_dir()
             and not p.name.startswith(".")
             and p.name not in _PACKAGE_NOISE_DIRS
-            and (p / PLUGIN_MANIFEST).is_file()
+            and any_marker_present(p)
         ]
     except OSError:  # noqa: BLE001
         return Path(dest)
@@ -179,6 +180,9 @@ class LibraryPlugin:
     两者不一定相同（目录叫 ``codebase-memory-mcp``、清单写 ``codebase-memory``
     是常见的），而链接名必须用 ``dirname``——链接建在
     ``<agent>/plugins/<dirname>``，对得上用户在文件夹里看到的东西。
+
+    ``format`` 是包格式（``keeper`` / ``claude``，见 ``plugin/formats.py``）：
+    扫描与装载按特征标志分派，UI 也可据此显示来源。
     """
 
     name: str
@@ -186,6 +190,8 @@ class LibraryPlugin:
     dirname: str = ""
     version: str = ""
     description: str = ""
+    # 包格式：keeper（原生）/ claude（.claude-plugin/plugin.json）……
+    format: str = ""
     # 能力类型：bin（可执行）/ mcp（MCP server）/ skill（纯知识包）
     kinds: List[str] = field(default_factory=list)
     env_dependencies: List[EnvDependency] = field(default_factory=list)
@@ -200,6 +206,7 @@ class LibraryPlugin:
             "path": str(self.path),
             "version": self.version,
             "description": self.description,
+            "format": self.format,
             "kinds": self.kinds,
             "envDependencies": [d.to_dict() for d in self.env_dependencies],
             "sizeBytes": self.size_bytes,
@@ -231,23 +238,13 @@ def _dir_size(p: Path, *, limit: int = 4000) -> int:
     return total
 
 
-def _manifest_kinds(manifest: Dict[str, Any]) -> List[str]:
-    out: List[str] = []
-    if manifest.get("bin"):
-        out.append("bin")
-    if manifest.get("mcpServers"):
-        out.append("mcp")
-    # 有清单但既没 bin 也没 mcpServers → 当作纯知识包
-    if not out and (manifest.get("skill") or manifest.get("name")):
-        out.append("skill")
-    return out
-
-
 def scan_library(root: Optional[Path] = None) -> List[LibraryPlugin]:
     """扫插件库，返回全部插件（按名字排序）。
 
-    一个子目录含 ``keeper-plugin.json`` 就算一个插件；清单坏了也**列出来**
-    （带 error），因为"库里有这个目录但装不上"是最需要被看见的状态。
+    **按特征标志分派**（见 ``plugin/formats.py``）：子目录根带 ``keeper-plugin.json``
+    走 keeper 格式，带 ``.claude-plugin/plugin.json`` 走 Claude 格式，两者都没有就
+    不是插件、跳过。清单坏了也**列出来**（带 error），因为"库里有这个目录但装不上"
+    是最需要被看见的状态。
     """
     base = Path(root) if root is not None else plugins_root()
     if not base.is_dir():
@@ -260,14 +257,19 @@ def scan_library(root: Optional[Path] = None) -> List[LibraryPlugin]:
     for d in entries:
         if d.name.startswith(".") or d.name in _PACKAGE_NOISE_DIRS:
             continue
-        if not (d / PLUGIN_MANIFEST).is_file():
+        # 与历史语义一致：库里条目的**根**就要带已知格式的标志
+        # （多套一层目录的兼容由装载侧的 resolve_plugin_root 负责）
+        if not any_marker_present(d):
             continue
-        # 清单不在包根就往下探一层（兼容多套了一层的包）
+        # 标志不在包根就往下探一层（兼容多套了一层的包）
         pkg = resolve_plugin_root(d)
+        fmt = detect_format(pkg)
+        if fmt is None:
+            continue
         err = ""
         manifest: Dict[str, Any] = {}
         try:
-            manifest = read_manifest(pkg)
+            manifest = fmt.read_manifest(pkg)
         except ValueError as e:
             err = str(e)
         out.append(
@@ -275,9 +277,10 @@ def scan_library(root: Optional[Path] = None) -> List[LibraryPlugin]:
                 name=_as_str(manifest.get("name")) or d.name,
                 path=pkg,
                 dirname=d.name,
+                format=fmt.name,
                 version=_as_str(manifest.get("version")),
                 description=_as_str(manifest.get("description")),
-                kinds=_manifest_kinds(manifest),
+                kinds=fmt.kinds(manifest),
                 env_dependencies=parse_env_dependencies(manifest),
                 size_bytes=_dir_size(pkg),
                 error=err,

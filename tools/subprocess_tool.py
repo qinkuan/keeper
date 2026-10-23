@@ -8,7 +8,8 @@
 约定（写给插件作者）：
 
 - 调用：keeper 起进程，stdin 写入**一行** JSON
-  ``{"tool": "<工具名>", "args": {...}, "context": {"workspace": "...", "read_only": true}}``
+  ``{"tool": "<工具名>", "args": {...}, "context": {"workspace": "...", "read_only": true, "agent_space": "...", "plugin_root": "..."}}``
+  （``plugin_root`` = 插件库根目录，装卸插件那类工具用它定位库；取不到时为空串）
 - 返回：**stdout 的最后一行**必须是 JSON
   ``{"ok": true, "result": "..."}`` 或 ``{"ok": false, "error": "..."}``
   （前面允许打日志，所以取最后一行）
@@ -36,6 +37,20 @@ logger = logging.getLogger(__name__)
 
 # 单次调用默认超时（秒）：插件可执行文件的启动 + 执行
 DEFAULT_TIMEOUT = 60
+
+
+def _plugin_root_for_context() -> str:
+    """插件库根目录（给 bin 子进程的 context 用）。
+
+    取不到就返回空串——插件侧有兜底（自己按默认 ``~/.keeper/plugins`` 解析），
+    别为了一个上下文字段把整次工具调用拖失败。
+    """
+    try:
+        from ..plugin import plugins_root
+
+        return str(plugins_root())
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 class SubprocessToolError(RuntimeError):
@@ -106,7 +121,7 @@ async def call_subprocess_tool(
     # 与上面的 read_only 是两回事：那个是「工作区只读」，这个是「这个工具不改东西」。
     tool_read_only: bool = False,
 ) -> str:
-    """起一次子进程调用工具，返回 ``result`` 字符串；失败抛 ``SubprocessToolError``。"""
+    """起一次子进程调用工具，返回 ``result`` 字符串；失败抛 ``SubprocessToolError`。"""
     payload = json.dumps(
         {
             "tool": tool,
@@ -115,6 +130,10 @@ async def call_subprocess_tool(
                 "workspace": str(workspace) if workspace else "",
                 "read_only": read_only,
                 "agent_space": str(agent_space) if agent_space else "",
+                # 插件库根目录（config.yaml 的 plugins.root，默认 ~/.keeper/plugins）：
+                # 装 / 卸插件那类工具需要往库里写文件，让它从上下文拿真路径，
+                # 而不是自己在插件里再解析一遍配置（两份逻辑必然漂移）。
+                "plugin_root": _plugin_root_for_context(),
             },
         },
         ensure_ascii=False,

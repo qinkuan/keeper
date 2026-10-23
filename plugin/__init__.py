@@ -10,9 +10,17 @@
 - 绑定：``link_plugin`` / ``unlink_plugin``
 - 清单与依赖：``read_manifest`` / ``parse_env_dependencies`` /
   ``check_env_requirements`` / ``detect_runtime_versions``
+- 包格式（探测 + 分派）：``detect_format`` / ``any_marker_present`` /
+  ``PluginFormat`` / ``FORMATS``
 - 类型：``LibraryPlugin`` / ``EnvDependency``
 """
 
+from .formats import (
+    FORMATS,
+    PluginFormat,
+    any_marker_present,
+    detect_format,
+)
 from .lib import (
     PLUGIN_MANIFEST,
     EnvDependency,
@@ -32,11 +40,15 @@ from .lib import (
 )
 
 __all__ = [
+    "FORMATS",
     "PLUGIN_MANIFEST",
     "EnvDependency",
     "LibraryPlugin",
+    "PluginFormat",
     "agent_plugins_dir",
+    "any_marker_present",
     "check_env_requirements",
+    "detect_format",
     "detect_runtime_versions",
     "find_plugin",
     "link_plugin",

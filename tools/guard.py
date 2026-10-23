@@ -137,6 +137,27 @@ PATH_EXEMPT: FrozenSet[str] = frozenset({
     "go", "mvn", "gradle", "git", "hg", "svn", "ssh", "scp", "rsync",
 })
 
+# 解释器的「版本探测」：只打印版本号，没有副作用，语义上等同 `ls`。
+# 装插件时经常需要先确认运行时版本（`node -v`），把它整个当"执行任意代码"拦掉
+# 会让 agent 反复绕路。**只有参数全是版本开关**时才当读操作——带上脚本、
+# `-c`、`-e` 一律照旧拒绝。
+_VERSION_FLAGS = frozenset({"--version", "-V"})
+# `-v` 在不同解释器里含义不同：node/deno/bun 是版本号，python 是 verbose（会执行
+# 脚本），所以短横小写只对前者开放。
+_VERSION_SHORT_V = frozenset({"node", "nodejs", "deno", "bun"})
+
+
+def _is_version_probe(cmd: str, rest: List[str]) -> bool:
+    """这次调用是不是「只问版本」的解释器调用（``node -v`` / ``python3 --version``）。"""
+    if cmd not in INTERPRETERS or not rest:
+        return False
+    flags = {_unwrap(w) for w in rest}
+    if not flags <= (_VERSION_FLAGS | {"-v"}):
+        return False
+    if "-v" in flags and cmd not in _VERSION_SHORT_V:
+        return False
+    return True
+
 
 # ---------------------------------------------------------------- 文本处理
 
@@ -323,12 +344,16 @@ def _judge_segment(
         return None
     cmd = Path(_unwrap(words[idx])).name
     rest = words[idx + 1:]
+    # 解释器的「版本探测」是纯读操作（只打印版本号，无副作用）：装插件时经常要
+    # 先确认运行时版本（`node -v`）。仅当参数**只有**版本开关时才按读命令放行。
+    version_probe = _is_version_probe(cmd, rest)
 
     # 1) 解释器与执行包装：任何情况下都拒绝。
     #    `python -c "..."` / `xargs rm` / `sudo rm` 的命令名看着无害，
     #    但它们能执行任意代码——放进白名单等于洞开着。
     if cmd in INTERPRETERS:
-        return f"`{cmd}` 是解释器，能执行任意代码，不在只读环境的允许范围内"
+        if not version_probe:
+            return f"`{cmd}` 是解释器，能执行任意代码，不在只读环境的允许范围内"
     if cmd in EXEC_WRAPPERS:
         return f"`{cmd}` 能把参数交给别的程序执行（`{cmd} rm` 这类手法），已禁用"
 
@@ -343,7 +368,7 @@ def _judge_segment(
 
     # 3) 白名单检查
     if cmd not in SAFE_COMMANDS:
-        if read_only:
+        if read_only and not version_probe:
             return (
                 f"`{cmd}` 不在只读环境的读命令白名单内"
                 f"（允许的是 ls / cat / grep / find / git status / pip list 这类）"

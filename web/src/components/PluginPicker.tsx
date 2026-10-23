@@ -31,7 +31,8 @@ export default function PluginPicker({
     <div className="max-h-[264px] w-[min(440px,90vw)] overflow-auto rounded-xl border border-line-soft bg-panel p-1 shadow-[0_12px_36px_-10px_rgba(0,0,0,0.28)]">
       {items.length === 0 ? (
         <div className="px-2.5 py-2 text-[12.5px] text-ink-muted">
-          没有可动态加载的插件（库里没有未链接的 bin 类插件）
+          没有可动态加载的插件（库里的插件都已绑定给这个 agent，或只有暂不支持的
+          mcp 类）
         </div>
       ) : (
         items.map((p, i) => (

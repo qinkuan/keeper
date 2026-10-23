@@ -28,7 +28,14 @@ from sqlalchemy import select
 
 from ..mcp.locate import ExecutableNotFoundError
 from ..plat.fetcher import FetchError
-from ..plugin import agent_plugins_dir, find_plugin, link_plugin, linked_plugins
+from ..plugin import (
+    agent_plugins_dir,
+    any_marker_present,
+    detect_format,
+    find_plugin,
+    link_plugin,
+    linked_plugins,
+)
 from ..skill import SkillRegistry
 from ..store import (
     Agent,
@@ -41,9 +48,9 @@ from ..store import (
 
 logger = logging.getLogger(__name__)
 
-# 插件清单文件名：包解压后根目录的这一份是**真源**（库里 manifest 只是快照）
-PLUGIN_MANIFEST = "keeper-plugin.json"
 # MCP 组件的 server 名与工具名的分隔符（与 MCPSession.prefixed 一致）
+# （插件清单文件名与格式探测见 plugin/formats.py——keeper-plugin.json /
+#   .claude-plugin/plugin.json 都算，装配侧经 detect_format 分派读取）
 _MCP_SEP = "__"
 
 
@@ -559,7 +566,7 @@ def _expand_plugin_vars(
 
 
 def _resolve_plugin_root(dest: Path) -> Path:
-    """确定插件包的**真实根目录**：包根就有清单就直接用；否则往下探一层。
+    """确定插件包的**真实根目录**：包根就有格式标志就直接用；否则往下探一层。
 
     常见打包失误：压缩时把外层文件夹也打了进去，解压后变成
     ``<dest>/<同名目录>/keeper-plugin.json``。而清单读取是按包根找的，找不到就
@@ -567,11 +574,14 @@ def _resolve_plugin_root(dest: Path) -> Path:
 
     所以这里宽容一层，但条件收严，避免误判：
 
-    - 包根自己有清单 → 直接用，**不**下探；
-    - 否则只看**恰好一个**子目录里是否有清单（跳过隐藏目录与 ``__MACOSX``）；
+    - 包根自己有**任意已知格式的标志** → 直接用，**不**下探；
+    - 否则只看**恰好一个**子目录里是否有标志（跳过隐藏目录与 ``__MACOSX``）；
     - 一个都没有 / 有多个 → 不动（按原样处理，由后续逻辑告警）。
+
+    标志不限于 keeper-plugin.json——Claude 包的 ``.claude-plugin/plugin.json``
+    同样算（见 ``plugin/formats.py``）。
     """
-    if (dest / PLUGIN_MANIFEST).is_file():
+    if any_marker_present(dest):
         return dest
     try:
         cands = [
@@ -580,7 +590,7 @@ def _resolve_plugin_root(dest: Path) -> Path:
             if p.is_dir()
             and not p.name.startswith(".")
             and p.name != "__MACOSX"
-            and (p / PLUGIN_MANIFEST).is_file()
+            and any_marker_present(p)
         ]
     except OSError:  # noqa: BLE001
         return dest
@@ -595,21 +605,21 @@ def _resolve_plugin_root(dest: Path) -> Path:
 
 
 def _read_plugin_manifest(dest: Path) -> Dict[str, Any]:
-    """读包内清单（真源）。
+    """读包内清单（真源），**按包格式分派**（见 ``plugin/formats.py``）：
+
+    - keeper 格式读包根 ``keeper-plugin.json``（行为与历史一致）；
+    - claude 格式读 ``.claude-plugin/plugin.json``（name/version/description 对齐）。
 
     清单**可选**：只有 SKILL.md 的纯知识包可以不写，按空清单处理。
     解析失败抛 ``FetchError``——装载期就暴露，而不是等到用的时候才发现。
     """
-    path = dest / PLUGIN_MANIFEST
-    if not path.is_file():
+    fmt = detect_format(dest)
+    if fmt is None:
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        raise FetchError(f"插件清单解析失败（{path}）：{e}") from e
-    if not isinstance(data, dict):
-        raise FetchError(f"插件清单必须是 JSON 对象（{path}）")
-    return data
+        return fmt.read_manifest(dest)
+    except ValueError as e:
+        raise FetchError(str(e)) from e
 
 
 _FRONTMATTER_RE = re.compile(
@@ -822,6 +832,14 @@ def _build_plugin_components(
     )
 
     manifest = _read_plugin_manifest(dest)
+    fmt = detect_format(dest)
+
+    # 包级校验（按格式）：有目录内容但该格式一期不装配 → 告警 + 诊断，不阻塞。
+    # 例：Claude 布局的 commands/、agents/、hooks/ 是另一套机制，keeper 不接。
+    if fmt is not None:
+        for w in fmt.package_warnings(dest, manifest):
+            logger.warning("插件 %s：%s", name, w)
+            out.add_diag(name, "plugin", name, True, w)
 
     # 目录与清单一致性
     for dirname, key in (("mcp", "mcpServers"), ("bin", "bin")):
@@ -833,6 +851,7 @@ def _build_plugin_components(
             )
 
     # 1) 知识组件：skills
+    skills_dir = dest / "skills"
     for skill_name, skill_path in _discover_skills(name, dest, manifest):
         if not skill_path.is_file():
             logger.warning("插件 %s 声明的 skill 文件不存在：%s", name, skill_path)
@@ -846,6 +865,24 @@ def _build_plugin_components(
         # 拆分 frontmatter（tools 软标注 + description/always）与正文。tools 不再
         # 写死为空，此前占位导致「可用技能」段永远显示「工具：无」。
         body, skill_meta = _split_skill_frontmatter(raw)
+        # 配套文件可达性：``skills/<name>/SKILL.md`` 布局且目录里除正文外还有文件
+        # （Claude 技能的 references/、scripts/ 等）时，把所在目录的绝对路径写进
+        # 正文。否则正文里的相对引用（"python3 scripts/extract.py"）对模型不可
+        # 解析——它不知道包在哪，而 keeper agent 有 bash，给了路径就能读能跑。
+        # 纯文本技能（skills/SKILL.md 或 <name>.md）不追加，不添噪。
+        extras: List[str] = []
+        res_dir = skill_path.parent
+        if res_dir != skills_dir:
+            try:
+                extras = sorted(p.name for p in res_dir.iterdir() if p != skill_path)
+            except OSError:  # noqa: BLE001
+                extras = []
+            if extras:
+                body += (
+                    f"\n\n---\n本技能随包附带配套文件（{'、'.join(extras)}），"
+                    f"位于：{res_dir}\n"
+                    f"引用或执行其中文件时使用该绝对路径（如 {res_dir / extras[0]}）。"
+                )
         # 兼容规则：**没写 description 的旧技能一律按常驻全文处理**。
         # 省 token 的前提是模型能靠概要判断要不要用；概要都没有就摘掉正文，
         # 等于让能力凭空消失——宁可不省，也不能让它退化（设计文档第九节）。
@@ -867,7 +904,8 @@ def _build_plugin_components(
             "skill",
             skill_name,
             True,
-            f"常驻={always} 声明工具={skill_meta['tools'] or '无'}",
+            f"常驻={always} 声明工具={skill_meta['tools'] or '无'}"
+            + (f" 配套文件 {len(extras)} 个" if extras else ""),
         )
 
     # 2) 能力组件：mcpServers
@@ -1037,18 +1075,21 @@ async def _load_plugins(
             logger.info("插件 %s 已被本地开关关闭，跳过装配", name)
             out.add_diag(name, "plugin", name, False, "本地开关已关闭（agent_capability_overrides）")
             continue
-        # 兼容「打包时多套一层目录」：清单不在包根就往下探唯一的那层
+        # 兼容「打包时多套一层目录」：标志不在包根就往下探唯一的那层
         dest = _resolve_plugin_root(agent_plugins_dir(agent.id) / name)
-        if not (dest / PLUGIN_MANIFEST).is_file():
+        fmt = detect_format(dest)
+        if fmt is None:
             logger.warning(
-                "插件 %s 的包根没有 %s（包根=%s）", name, PLUGIN_MANIFEST, dest
+                "插件 %s 的包根没有已知格式的清单（keeper-plugin.json / "
+                ".claude-plugin/plugin.json）（包根=%s）",
+                name, dest,
             )
             out.add_diag(
                 name, "plugin", name, False,
-                f"包根缺少 {PLUGIN_MANIFEST}（{dest}）",
+                f"包根缺少清单（{dest}）",
             )
             continue
-        logger.info("装配插件 %s（包根=%s）", name, dest)
+        logger.info("装配插件 %s（格式=%s，包根=%s）", name, fmt.name, dest)
         _build_plugin_components(
             name=name,
             dest=dest,

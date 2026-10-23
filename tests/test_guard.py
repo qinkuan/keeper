@@ -14,9 +14,15 @@ from pathlib import Path
 # parents: [0]=tests/  [1]=keeper/  [2]=项目根（keeper 包的父目录）
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from keeper.plugin import plugins_root  # noqa: E402
 from keeper.tools.guard import check_call  # noqa: E402
 
 WS = Path("/Users/admin/.keeper/workspace/session/s1")
+AGENT_SPACE = Path("/Users/admin/.keeper/workspace/session/s1/.agent")
+# 插件库根（默认 ~/.keeper/plugins）：agent 装卸插件、读技能随包附件都要读写它。
+LIB = Path(plugins_root())
+# 配置里的 settings.yaml：明确**不**随插件库一起放开。
+SETTINGS = Path.home() / ".keeper" / "settings.yaml"
 
 # (命令, 只读区是否应放行, 说明)
 READONLY_CASES = [
@@ -82,14 +88,78 @@ WRITABLE_CASES = [
 ]
 
 
-def _check(cmd: str, read_only: bool):
+def _check(cmd: str, read_only: bool, extra_roots=None):
     return check_call(
         tool_name="bash__run",
         args={"command": cmd},
         dangerous=True,
         read_only=read_only,
         workspace=WS,
+        extra_roots=extra_roots,
     )
+
+
+# 插件库放开后的边界。（命令, 是否应放行, 说明）—— 只读区视角
+PLUGIN_READONLY_CASES = [
+    (f"ls {LIB}/dashi-ppt-skill/skill/scripts/", True, "读插件库目录"),
+    (f"cat {LIB}/dashi-ppt-skill/skill/scripts/a.js", True, "读插件随包脚本"),
+    (f"grep -rn foo {LIB}/dashi-ppt-skill/", True, "在插件库内 grep"),
+    (f"ls {LIB}", True, "读插件库根本身"),
+    ("node -v", True, "解释器版本探测（纯读）"),
+    ("node --version", True, "解释器版本探测（长参）"),
+    ("python3 -V", True, "解释器版本探测（python 用 -V）"),
+    ("python3 --version", True, "解释器版本探测（python 长参）"),
+    # 版本探测之外，解释器照旧是洞：能执行任意代码
+    ("node -e 'console.log(1)'", False, "解释器执行代码仍拦"),
+    ("node script.js", False, "解释器跑脚本仍拦"),
+    ("python3 -v", False, "python 的 -v 是 verbose（会执行脚本），仍拦"),
+    ("sh -v", False, "shell 的 -v 不是版本号，仍拦"),
+    (f"rm -rf {LIB}/x", False, "只读区不删插件"),
+    (f"cat {LIB}/../settings.yaml", False, "从插件库上跳读 settings.yaml"),
+    (f"cat {SETTINGS}", False, "settings.yaml 明确不放开"),
+    ("grep foo /etc/hosts", False, "系统文件仍拦"),
+    ("cat ~/.ssh/id_rsa", False, "ssh 私钥仍拦"),
+]
+
+# （命令, 是否应拦截, 说明）—— 可写区视角（只查路径越界）
+PLUGIN_WRITABLE_CASES = [
+    (f"echo x > {LIB}/_probe.txt", False, "插件库可写（装插件要写它）"),
+    (f"ls {LIB}/pkg/skill/assets/skill/theme.png", False, "插件库可读"),
+    (f"cat {SETTINGS}", True, "settings.yaml 仍拦"),
+    (f"cat {LIB}/../settings.yaml", True, "上跳读 settings.yaml 仍拦"),
+    ("grep foo /etc/hosts", True, "系统文件仍拦"),
+]
+
+
+def _main_plugin_cases() -> int:
+    bad = 0
+    roots = [AGENT_SPACE, LIB]
+    print("=== 插件库放开（只读区）===")
+    for cmd, want_ok, why in PLUGIN_READONLY_CASES:
+        r = _check(cmd, read_only=True, extra_roots=roots)
+        ok = (r is None) == want_ok
+        if not ok:
+            bad += 1
+        print(
+            f"{'PASS' if ok else 'FAIL'}  "
+            f"{'放行' if r is None else '拦截'}  {why:<28s} {cmd[:40]}"
+        )
+        if not ok:
+            print("        理由:", (r or "")[:100])
+
+    print("\n=== 插件库放开（可写区）===")
+    for cmd, want_block, why in PLUGIN_WRITABLE_CASES:
+        r = _check(cmd, read_only=False, extra_roots=roots)
+        blocked = r is not None
+        if blocked != want_block:
+            bad += 1
+        print(
+            f"{'PASS' if blocked == want_block else 'FAIL'}  "
+            f"{'拦截' if blocked else '放行'}  {why}"
+        )
+        if blocked != want_block:
+            print("        理由:", (r or "")[:100])
+    return bad
 
 
 def main() -> None:
@@ -119,6 +189,8 @@ def main() -> None:
         )
         if blocked and blocked != want_block:
             print("        理由:", r[:100])
+
+    bad += _main_plugin_cases()
 
     print()
     print(f"失败 {bad} 项" if bad else "全部通过")

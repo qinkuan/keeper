@@ -330,10 +330,12 @@ class KeeperAgent:
         幂等：一轮开始前反复调用都安全。执行侧（``executor``）开跑前调它。
         """
         tools = await self._collect_tools()
-        # 本会话动态激活的插件(`/` 启用,见 plugin/active.py):仅 bin 类,按会话注入当轮表。
+        # 本会话动态激活的插件(`/` 启用,见 plugin/active.py):bin 工具进当轮表,
+        # skill 正文由 Process 高优先级注入(见下 set_dynamic_skills)。
+        dynamic_skills: List[Any] = []
         if session_id:
             try:
-                await self._inject_dynamic_plugins(tools, session_id)
+                dynamic_skills = await self._inject_dynamic_plugins(tools, session_id)
             except Exception as e:  # noqa: BLE001  动态插件失败不该拖垮整轮
                 logger.warning("动态插件注入失败(session=%s): %s", session_id, e)
         # 组摘要跟着工具表一起重建：折叠后的分组行靠它告诉模型「这一组是干嘛的」
@@ -354,6 +356,10 @@ class KeeperAgent:
             # 工具表归 Process 所有：就地整体替换即可，不必重建实例。
             # 快捷模式不持有工具（无 replace_tools），跳过即可。
             p.replace_tools(tools)
+        # `/` 激活的插件技能：用户显式点开的 = 高优先级，正文整段进 system。
+        # 每轮都刷（无激活时传空列表清掉上轮的，避免残留到别的会话的轮次里）。
+        if hasattr(p, "set_dynamic_skills"):
+            p.set_dynamic_skills(dynamic_skills)
         # 普通模式挂子 agent（Delegatee）：TASK 动作触达，独立于工具注册表。
         # 仅 normal——simple 不调工具；ptc 模式本身即代码循环，无需再委托。
         # 每个子 agent 按 delegatee_configs 表造「专属 LLM（独立模型）+ 工具子集」，
@@ -412,12 +418,19 @@ class KeeperAgent:
             p.delegatees = reg
         return p
 
-    async def _inject_dynamic_plugins(self, reg, session_id: str) -> None:
-        """把本会话动态激活的插件(仅 bin 类)的工具加进当轮工具表。
+    async def _inject_dynamic_plugins(self, reg, session_id: str) -> List[Any]:
+        """把本会话动态激活的插件加进当轮工具表，并返回它们的技能对象。
 
         激活态存在 ChatSession.activated_plugins(见 plugin/active.py);这里按名字从
         **插件库**(而非 link 目录)取包根,复用 agent/config 的 _build_plugin_components
-        装配,与 link 插件同一套逻辑。mcp/skill 类不支持动态加载(选择器已过滤)。
+        装配,与 link 插件同一套逻辑。
+
+        两类组件都支持动态加载:
+        - **bin** → 工具注册进当轮表(和以前一样);
+        - **skill** → 正文由调用方(process.set_dynamic_skills)整段注入 system:
+           `/` 是用户显式点开的,高优先级,不走按需加载。
+        mcp 类仍不支持(要现连 session,启动期才建)——带 mcp 组件的包在选择器里
+        已被过滤,直接调 API 进来的会在装配后看到告警。
 
         并发口径:registry/Process 跨会话共享、只有 per-session 锁(见 chat/service),
         故同一 agent 的多个会话**并发**跑时,各自 prepare 会整体替换共享表——动态插件
@@ -428,15 +441,18 @@ class KeeperAgent:
         from .config import PluginComponents, _build_plugin_components
         from ..chat.context import current_workspace
 
+        dyn_skills: List[Any] = []
         names = await get_activated(session_id)
         if not names:
-            return
+            return dyn_skills
         ws = current_workspace()
         if ws is None:
-            # 仅非请求期调 prepare 时发生(真实对话轮次必有工作空间上下文);没有工作空间
-            # 就无法安全装配 bin 工具(cwd / agent_space 无从解析),跳过。
-            logger.warning("动态插件注入跳过:无工作空间上下文(session=%s)", session_id)
-            return
+            # 仅非请求期调 prepare 时发生（真实对话轮次必有工作空间上下文）。
+            # **不再整体跳过**：skill 类不依赖工作空间（正文照常注入）；只有 bin
+            # 工具的 cwd / agent_space 需要它，没有就不注册（见下方分支）。
+            logger.info(
+                "动态插件注入:无工作空间上下文,仅注入技能正文(session=%s)", session_id
+            )
         for name in names:
             lp = find_plugin(name)
             if lp is None or lp.error:
@@ -450,27 +466,39 @@ class KeeperAgent:
                     settings={},
                     out=comps,
                     overrides={},
-                    root=ws.root,
-                    read_only=ws.read_only,
-                    agent_space=ws.agent_space,
+                    root=ws.root if ws else None,
+                    read_only=bool(ws.read_only) if ws else True,
+                    agent_space=ws.agent_space if ws else None,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("动态插件 %s 装配失败: %s", name, e)
                 continue
-            for t in comps.tools:
-                reg.register(t)
-            for g, s in (comps.group_summaries or {}).items():
-                reg.set_group_summary(g, s)
+            if ws is None:
+                # 没有工作空间：bin 工具的 cwd / agent_space 无从解析，不注册
+                # （skill 正文不受影响，下面照常收集）
+                if comps.tools:
+                    logger.info(
+                        "动态插件 %s 的 %d 个 bin 工具因无工作空间上下文跳过注册",
+                        name, len(comps.tools),
+                    )
+            else:
+                for t in comps.tools:
+                    reg.register(t)
+                for g, s in (comps.group_summaries or {}).items():
+                    reg.set_group_summary(g, s)
             if comps.mcp_servers:
                 logger.info("动态插件 %s 含 mcp 组件,一期不动态连接,已忽略", name)
-            if comps.skill_items:
-                # 选择器已按 kind 过滤（见 plugin/active.available_plugins），走到这里
-                # 的是直接调 activate API 进来的：技能固化在跨会话共享的 Process 里，
-                # 动态注入只注册工具。亮个警告，别让"激活了但什么都没发生"看不见。
-                logger.warning(
-                    "动态插件 %s 含 %d 个 skill 组件,对话内动态加载仅支持 bin 工具,已忽略",
-                    name, len(comps.skill_items),
-                )
+            # 技能正文:交给 Process 高优先级注入(显式激活 = 正文整段进 system,
+            # 不再让模型自己 load——「/ 激活了却只有一行摘要」就是这么来的)
+            for item in (comps.skill_items or []):
+                try:
+                    from ..skill.base import Skill
+
+                    sk = Skill.from_dict(dict(item))
+                    dyn_skills.append(sk)
+                except Exception as e:  # noqa: BLE001 单条坏技能不拖垮其余
+                    logger.warning("动态插件 %s 的技能条目无效,跳过: %s", name, e)
+        return dyn_skills
 
     async def _collect_tools(self) -> Any:
         """按**当前**配置收集全部可用工具，返回一张全新的工具表。

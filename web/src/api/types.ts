@@ -906,6 +906,11 @@ export interface LibraryPlugin {
   path: string;
   version: string;
   description: string;
+  /**
+   * 包格式（按特征标志识别）：keeper=原生 keeper-plugin.json；
+   * claude=.claude-plugin/plugin.json 的 Claude 布局外部包（零改装兼容）。
+   */
+  format: string;
   /** 能力类型：bin（可执行）/ mcp（MCP server）/ skill（纯知识包） */
   kinds: string[];
   envDependencies: PluginEnvRequirement[];

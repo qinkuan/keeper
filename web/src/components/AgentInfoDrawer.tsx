@@ -592,6 +592,15 @@ export default function AgentInfoDrawer({
                                   {p.kinds?.map((k) => (
                                     <KindPill key={k} k={k} />
                                   ))}
+                                  {/* 非 keeper 格式（Claude 布局外部包）打来源标 */}
+                                  {p.format && p.format !== "keeper" && (
+                                    <span
+                                      className="shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-amber-600 dark:text-amber-300"
+                                      title={`${p.format} 布局的外部插件包（按特征标志识别，零改装兼容）`}
+                                    >
+                                      {p.format}
+                                    </span>
+                                  )}
                                 </div>
                                 {p.description && (
                                   <p className="mt-0.5 text-[12px] leading-5 text-ink-muted">

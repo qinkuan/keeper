@@ -59,6 +59,19 @@ function kindPill(k: string) {
   );
 }
 
+/** 包格式徽标：只给非 keeper 格式（Claude 布局外部包）打标，原生格式不添噪 */
+function formatBadge(f: string | undefined) {
+  if (!f || f === "keeper") return null;
+  return (
+    <span
+      className="shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[11px] leading-4 text-amber-600 dark:text-amber-300"
+      title={`${f} 布局的外部插件包（按特征标志识别，零改装兼容）`}
+    >
+      {f}
+    </span>
+  );
+}
+
 function fmtSize(n: number): string {
   if (!n) return "—";
   const u = ["B", "KB", "MB", "GB"];
@@ -111,7 +124,12 @@ export default function PluginPage({
       key: "name",
       title: "名称",
       width: 200,
-      render: (r) => r.name,
+      render: (r) => (
+        <span className="flex items-center gap-1.5">
+          {r.name}
+          {formatBadge(r.format)}
+        </span>
+      ),
     },
     {
       key: "version",
@@ -216,9 +234,10 @@ export default function PluginPage({
         <Hint>
           <div className="space-y-1">
             <div>
-              手写插件包（根目录放 <Code>keeper-plugin.json</Code>）或用{" "}
-              <Code>plugin-authoring</Code> 写完导出，放进该目录即生效——不需要重启，
-              刷新本页就能看到。
+              手写插件包（根目录放 <Code>keeper-plugin.json</Code>）、用{" "}
+              <Code>plugin-authoring</Code> 写完导出、或直接放入 Claude 布局的外部技能包
+             （<Code>.claude-plugin/plugin.json</Code>，零改装兼容），放进该目录即生效——
+              不需要重启，刷新本页就能看到。
             </div>
             <div className="text-ink-faint">
               这个路径来自 config.yaml 的 plugins.root，是元配置；它不是项目结构的一部分，
