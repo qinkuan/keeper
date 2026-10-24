@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, File, FolderOpen, Loader2 } from "lucide-react";
+import { Download, FolderOpen, Loader2 } from "lucide-react";
 import type { Artifact } from "../api/types";
 import {
   apiDeployInfo,
@@ -9,6 +9,7 @@ import {
 import { isBlockArtifact } from "./viewers";
 import { ChartView, MermaidView } from "./DiagramView";
 import PanZoomStage from "./PanZoomStage";
+import FileTypeIcon from "./FileTypeIcon";
 
 /**
  * 非文件产物的渲染器。这里是 Path 2「带类型的块」的前端落点：
@@ -97,7 +98,7 @@ export function BlockView({ artifact, agentId, messageId, isLocal }: BlockViewPr
           background: "var(--kp-surface)",
         }}
       >
-        <File className="h-[18px] w-[18px] shrink-0" style={{ color: "var(--kp-primary)" }} />
+        <FileTypeIcon name={artifact.name} size="sm" />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{

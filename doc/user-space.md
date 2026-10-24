@@ -87,6 +87,37 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 | 音频 / 其它二进制 / 超 2MB | 信息卡 + 下载 | ❌ | `viewers.ts` |
 | 会话产物块 | chart / mermaid / table 内联渲染 | ❌ | `BlockView` |
 
+### 文件类型图标（已实现）
+
+目录树里一行只给一个灰图标，等于把「这是个 Excel 还是 PDF」推到点开文件才知道。
+现在的做法是**色块 + 字母标记**（`web/src/components/FileTypeIcon.tsx`）：
+
+- **形制**：圆角方块 + 居中白色粗体字母。小尺寸（16px）只放**首字母**，大尺寸
+  （28 / 40px）放完整标记（`PDF` / `XLS` / `IMG`…）。
+- **为什么不是 lucide 的 `FileXxx` 线性图标**：14–16px 下轮廓细节已被采样吃掉，
+  分不出 Excel 和 Word；色块把「颜色 + 形状」合成一个整体，扫一眼就能分类。
+- **颜色**：每类一个 `--ft-*` CSS 变量（`web/src/theme.css`），**浅色 / 深色各一套**
+  ——深色下整体提亮一档，否则色块糊进深底。白字在每个色上都过 3:1
+  （图形元素的对比门槛）。
+- **未知类型**：灰底 + 文件名首字母，至少能区分不同文件。
+
+| 类型 | 扩展名 | 标记 | 类型 | 扩展名 | 标记 |
+|---|---|---|---|---|---|
+| PDF | pdf | `PDF` | 图片 | png jpg gif webp svg… | `IMG` |
+| 表格 | xlsx xls | `XLS` | 视频 | mp4 mov mkv… | `VID` |
+| 表格 | csv / tsv | `CSV` / `TSV` | 音频 | mp3 wav flac… | `AUD` |
+| 演示 | pptx ppt | `PPT` | 压缩包 | zip tar gz… | `ZIP` |
+| 文档 | docx doc | `DOC` | 源代码 | py ts js go… | `SRC` |
+| Markdown | md mdx | `MD` | 数据 / 配置 | json yaml toml… | `DATA` |
+| 纯文本 | txt log env… | `TXT` | 网页 | html htm | `HTML` |
+| 数据库 | db sqlite parquet… | `DB` | 可执行 | exe dll so… | `EXE` |
+| 字体 | woff ttf otf… | `FONT` | 其它 | — | 文件名首字母 |
+
+落点：目录树行、预览区空态卡（无法预览 / Office / HTML）、预览头、会话产物卡片
+（`ArtifactCard` / `BlockView`）、聊天输入区的引用 chip、表格预览的标题条。
+新增类型只要在 `FileTypeIcon.tsx` 的 `EXT_KIND` 加一行扩展名 + `theme.css` 加一个
+`--ft-*` 变量即可。
+
 ### 表格预览的细节（已实现，值得单独记）
 
 - 多 sheet 切换；双击 tab 重命名 sheet

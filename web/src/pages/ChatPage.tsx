@@ -3,7 +3,6 @@ import type { DragEvent } from "react";
 
 import {
   ArrowUp,
-  FileText,
   List,
   ListChecks,
   Loader2,
@@ -31,6 +30,7 @@ import { ModePicker } from "../components/ModePicker";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import MentionPicker from "../components/MentionPicker";
+import FileTypeIcon from "../components/FileTypeIcon";
 import {
   loadMention,
   resolveSnippet,
@@ -2021,7 +2021,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                     className="group flex max-w-[300px] items-center gap-1.5 rounded-full border border-brand/20 bg-brand/10 py-1 pl-1.5 pr-1 text-[12px] text-ink"
                     title={`${qq.path}\n\n${qq.text}`}
                   >
-                    <FileText className="h-3.5 w-3.5 shrink-0 text-brand" />
+                    <FileTypeIcon name={qq.path} size="xs" />
                     <span className="truncate">
                       {qq.path.split(/[\\/]/).pop()} ·{" "}
                       {qq.text.length <= 20

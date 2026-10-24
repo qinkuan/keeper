@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, Eye, File, FolderOpen, Loader2 } from "lucide-react";
+import { Download, Eye, FolderOpen, Loader2 } from "lucide-react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import type { Artifact } from "../api/types";
 import {
@@ -16,6 +16,7 @@ import MarkdownView from "./MarkdownView";
 import BlockView from "./BlockView";
 import ImageViewer from "./ImageViewer";
 import { isBlockArtifact, isMonacoKind, isUrlKind, opensInNewTab, viewerKindOf } from "./viewers";
+import FileTypeIcon from "./FileTypeIcon";
 
 interface ArtifactCardProps {
   artifact: Artifact;
@@ -206,7 +207,6 @@ export function ArtifactCard({
     ["application/json", "application/javascript"].includes(artifact.mime);
 
   const size = artifact.size;
-  const fileIconColor = artifact.mime.startsWith("image/") ? "#3fa46a" : "var(--kp-primary)";
 
   // 文件相对 HEAD 确有改动（含未跟踪新文件）→ 可切换「改动标注」
   const gitChanges = diffStatus === "ok" || diffStatus === "untracked_new";
@@ -224,10 +224,7 @@ export function ArtifactCard({
           background: "var(--kp-surface)",
         }}
       >
-        <File
-          className="h-[18px] w-[18px] shrink-0"
-          style={{ color: fileIconColor }}
-        />
+        <FileTypeIcon name={artifact.name} size="sm" />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{

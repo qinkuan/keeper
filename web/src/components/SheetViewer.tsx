@@ -4,6 +4,7 @@ import { ExternalLink } from "lucide-react";
 import { cn, isComposingKey } from "../lib/utils";
 import { toast } from "./ui/Toast";
 import SheetGrid, { type GridRange } from "./SheetGrid";
+import FileTypeIcon from "./FileTypeIcon";
 
 /**
  * 「我的空间」表格：xlsx / xls / csv / tsv。
@@ -313,6 +314,7 @@ export default function SheetViewer({
           放在 sheet tab 之上——文件名是文件级信息，tab 是表级。
           按钮在调用方给了 onOpenWithApp 时才出现（会话侧的文件卡片没有 space 桥）。 */}
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
+        <FileTypeIcon name={name} size="xs" />
         <span
           className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink-muted"
           title={name}

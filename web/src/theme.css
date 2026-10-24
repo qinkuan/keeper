@@ -127,6 +127,28 @@
   --kp-text-muted-rgb: 124 138 160;
   --kp-toolbar-rgb: 255 255 255;
 
+  /* ===== 文件类型色 =====
+     「我的空间」目录树里的文件色块（components/FileTypeIcon.tsx）。
+     白字在每个色上都过 3:1（图形元素的对比门槛），深浅两套各挑一档：
+     浅色下偏深（否则白字压不住），深色下偏亮（否则色块糊进深底）。 */
+  --ft-pdf: #e5484d;
+  --ft-sheet: #1f9d55;
+  --ft-slides: #e0662b;
+  --ft-doc: #2b6cb0;
+  --ft-markdown: #4f46e5;
+  --ft-text: #5b6b84;
+  --ft-image: #8e4ec6;
+  --ft-video: #c5306e;
+  --ft-audio: #0e8c9e;
+  --ft-archive: #b07503;
+  --ft-code: #0f766e;
+  --ft-data: #0b78b8;
+  --ft-html: #c2410c;
+  --ft-db: #8a5a20;
+  --ft-exec: #475569;
+  --ft-font: #6d3fd1;
+  --ft-unknown: #7c8aa0;
+
   /* 圆角：桌面应用尺度。控件 8、卡片 12、浮层 16、胶囊 980 */
   --kp-radius: 8px;
   --kp-radius-lg: 12px;
@@ -790,6 +812,25 @@ button {
   --kp-chart-1: #63a4ff;
   --kp-chart-2: #a9c4f5;
   --kp-chart-3: #4285f4;
+
+  /* 文件类型色：深色下整体提亮一档（深底上原来的深色块会糊进背景） */
+  --ft-pdf: #f2555a;
+  --ft-sheet: #2fbf6e;
+  --ft-slides: #f07c3c;
+  --ft-doc: #4a8fe0;
+  --ft-markdown: #6e68f0;
+  --ft-text: #8296b5;
+  --ft-image: #a963e0;
+  --ft-video: #e0568f;
+  --ft-audio: #22a7ba;
+  --ft-archive: #d09209;
+  --ft-code: #17a398;
+  --ft-data: #1e9ad6;
+  --ft-html: #e0622f;
+  --ft-db: #b37b33;
+  --ft-exec: #64748b;
+  --ft-font: #8a5fe8;
+  --ft-unknown: #8fa0b8;
 
   /* 让浏览器原生控件（滚动条、输入框、日期面板）跟随深色 */
   color-scheme: dark;

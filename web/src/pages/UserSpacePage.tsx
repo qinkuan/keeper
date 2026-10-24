@@ -4,7 +4,6 @@ import {
   Copy,
   ExternalLink,
   Eye,
-  File as FileIcon,
   Plus,
   FileText,
   Folder,
@@ -36,6 +35,7 @@ import { officeKindOf } from "../components/officeTypes";
 import { ChartView, MermaidView } from "../components/DiagramView";
 import SheetViewer from "../components/SheetViewer";
 import PdfViewer from "../components/PdfViewer";
+import FileTypeIcon from "../components/FileTypeIcon";
 
 /** 树节点：既能是目录（可展开）也能是文件（叶子）。 */
 interface TNode {
@@ -203,7 +203,7 @@ function TreeNav({
                 {n.isDir ? (
                   <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                 ) : (
-                  <FileIcon className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                  <FileTypeIcon name={n.title} size="xs" />
                 )}
                 <span className="truncate">{n.title}</span>
               </button>
@@ -289,7 +289,7 @@ function AppModal({
 function BinaryFileCard({ file, note }: { file: MySpaceFile; note?: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-      <FileText className="h-8 w-8 text-ink-faint" />
+      <FileTypeIcon name={file.name} size="md" />
       <div className="text-[13px] text-ink">无法预览此文件</div>
       <div className="text-[12px] text-ink-muted">
         {file.name} · {fmtSize(file.size)}
@@ -463,7 +463,7 @@ function FileViewer({
   if (officeKind) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
-        <FileText className="h-8 w-8 text-ink-faint" />
+        <FileTypeIcon name={f.name} size="md" />
         <div className="text-[13px] text-ink">
           {officeKind === "docx" ? "Word 文档" : "PowerPoint 演示文稿"}
         </div>
@@ -554,7 +554,7 @@ function FileViewer({
   if (kind === "html")
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-        <FileText className="h-8 w-8 text-ink-faint" />
+        <FileTypeIcon name={f.name} size="md" />
         <div className="text-[13px] text-ink">{f.name}</div>
         <div className="flex gap-2">
           <a
@@ -1293,7 +1293,7 @@ export default function UserSpacePage() {
             <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px] text-ink-muted">
               {selectedFile ? (
                 <span className="flex min-w-0 items-center gap-1.5 truncate">
-                  <FileText className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                  <FileTypeIcon name={relPath} size="xs" />
                   <span className="truncate font-mono">{relPath}</span>
                 </span>
               ) : (
