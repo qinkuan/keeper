@@ -16,7 +16,7 @@ import { Hint } from "../components/ui/Page";
 import { Pill } from "../components/ui/Pill";
 import type { PillTone } from "../components/ui/Pill";
 import { toast } from "../components/ui/Toast";
-import { cn } from "../lib/utils";
+import { cn, isComposingKey } from "../lib/utils";
 
 /** 任务视图里反复出现的三种规格，收成常量免得散落各处 */
 const BTN =
@@ -1112,6 +1112,8 @@ export default function TaskPage({ agentId, sessionId }: { agentId: string; sess
                     value={newItem}
                     onChange={(e) => setNewItem(e.target.value)}
                     onKeyDown={(e) => {
+                      // 输入法拼字中：回车是确认候选词，不是添加
+                      if (isComposingKey(e)) return;
                       if (e.key === "Enter") addItem();
                     }}
                     className={INPUT}

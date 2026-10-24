@@ -37,6 +37,8 @@ export interface SpaceApi {
   import(src: string, dstDir: string): Promise<any>;
   /** 在系统文件管理器里定位并选中该路径。 */
   reveal(p: string): Promise<any>;
+  /** 用系统默认应用打开该文件（docx/ppt 的编辑走这里）。 */
+  openWithApp(p: string): Promise<{ ok: boolean; error?: string }>;
   /** 原生选目录对话框，返回绝对路径或 null。 */
   pickFolder(): Promise<string | null>;
   /** 原生选文件对话框，multi=true 可多选，返回绝对路径数组。 */
@@ -63,6 +65,7 @@ export function makeSpaceApi(root: string): SpaceApi {
     copy: (src, dst) => s.copy(root, src, dst),
     import: (src, dst) => s.import(root, src, dst),
     reveal: (p) => s.reveal(p),
+    openWithApp: (p) => s.openWithApp(p),
     pickFolder: () => s.pickFolder(),
     pickFile: (multi) => s.pickFile(multi),
     contextMenu: (key, isDir, canPaste) => s.contextMenu(key, isDir, canPaste),

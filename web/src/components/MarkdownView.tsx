@@ -10,7 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remend from "remend";
 import type { Components } from "react-markdown";
-import { MermaidView, ChartView } from "./BlockView";
+import { MermaidView, ChartView } from "./DiagramView";
 
 /** 只预加载常用语言，控制 Shiki 体积（全量语法包有几十 MB） */
 const LANGS = [

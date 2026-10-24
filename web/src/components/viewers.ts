@@ -81,6 +81,43 @@ export function isSheetName(name: string): boolean {
   return SHEET_EXTS.has(extOf(name));
 }
 
+// ---- 图类文件（Vega 图表 / Mermaid 流程图）----
+//
+// 这类文件**描述**一张图，所以展示上该给图而不是源码。刻意不改 viewerKindOf 的
+// 既有映射（和 SHEET_EXTS 同一个理由）：那张表被会话产物（ArtifactCard）共用，
+// 改了会让聊天里的 .vg.json 文本预览回归。这里只额外导出判定，给「我的空间」
+// 的预览分派用。
+//
+// Vega 判的必须是**完整后缀**而不是扩展名：`.vg.json` 的 extOf() 取到的是 `json`，
+// 而普通 `.json` 是数据文件，该走 Monaco。两个都按 `.json` 处理就没法区分了。
+const VEGA_SUFFIXES = [".vg.json"];
+
+const MERMAID_EXTS = new Set(["mmd", "mermaid"]);
+
+/** 是否 Vega / Vega-Lite 规范文件（.vg.json）。 */
+export function isVegaName(name: string): boolean {
+  const base = (name ?? "").toLowerCase();
+  return VEGA_SUFFIXES.some((s) => base.endsWith(s));
+}
+
+/** 是否 Mermaid 图文件（.mmd / .mermaid）。 */
+export function isMermaidName(name: string): boolean {
+  return MERMAID_EXTS.has(extOf(name));
+}
+
+/** 这类文件要用哪张图渲染器；不是图类文件返回 null。 */
+export type DiagramFileKind = "vega" | "mermaid";
+
+/**
+ * 文件 → 图渲染器的分派。**新增一种图类型只要在这里加一行**，
+ * 调用方（我的空间预览）按拿到的 kind 选渲染组件。
+ */
+export function diagramKindOf(name: string): DiagramFileKind | null {
+  if (isVegaName(name)) return "vega";
+  if (isMermaidName(name)) return "mermaid";
+  return null;
+}
+
 // 网页：用浏览器渲染而不是看源码——agent 产出 HTML 的目的就是让人看到效果。
 // 安全上后端会给 text/html 加 CSP，前端用不带 allow-same-origin 的 sandbox。
 const HTML_EXTS = new Set(["html", "htm"]);

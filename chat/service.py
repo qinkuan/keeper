@@ -186,6 +186,13 @@ async def resolve_workspace(agent, session_id: str) -> WorkspaceCtx:
     agent_space = default_agent_space_root(session_id, agent.agent_id)
     agent_space.mkdir(parents=True, exist_ok=True)
 
+    # 幂等补建「我的空间」软链接：new_session 建会话时就建过，这里兜底两种漏网情况
+    # ——① 我的空间是建会话**之后**才配的；② 这个会话早于该功能存在。
+    # 命中已正确指向时只是一次 readlink，代价可忽略。
+    from ..zonefilesystem.session_link import ensure_my_space_link
+
+    ensure_my_space_link(agent_space)
+
     # 「我的空间」的绝对路径，作为 bash 等危险工具的额外合法根：
     # 让 agent 既能跑在会话空间、也能安全访问用户的「我的空间」（@我的空间 mention
     # 把它的绝对路径交给了模型）。未配置（settings.yaml 里 user_space.path 为空）时

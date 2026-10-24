@@ -586,6 +586,7 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
     会话空着是合法状态：不发消息也占一条记录，正好让新会话立刻出现在列表里。
     """
     from ..chat import service as chat_service
+    from ..zonefilesystem.session_link import ensure_my_space_link
 
     _agent(agent_id)
     svc = ChatService(agent_id=agent_id)
@@ -601,6 +602,13 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
     # 运行模式：同工作区/思考，只在建会话那一刻定。
     svc.mode = body.mode or "normal"
     sid = await svc.ensure_session_id()
+    # 会话工作区里给「我的空间」建软链接：让 agent 在会话空间 ls 就能看到用户的
+    # 文件、用相对路径就能读写（不用先知道绝对路径）。此刻 session/<sid>/ 还没被
+    # resolve_workspace 建出来，所以由 ensure_my_space_link 负责 mkdir。
+    # 失败不阻断建会话——链接是便利功能，我的空间没配/不存在都该能让会话建起来。
+    from ..agent.config import default_agent_space_root
+
+    ensure_my_space_link(default_agent_space_root(sid))
     return {"session_id": sid, "kind": body.kind}
 
 

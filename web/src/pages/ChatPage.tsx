@@ -14,7 +14,7 @@ import {
   Square,
   UploadCloud,
 } from "lucide-react";
-import { cn } from "../lib/utils";
+import { cn, isComposingKey } from "../lib/utils";
 import { X } from "lucide-react";
 import { SegmentedControl } from "../components/ui/Segmented";
 import { Hint as AlertHint } from "../components/ui/Page";
@@ -182,6 +182,16 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   const [activeMention, setActiveMention] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
+  /* IME 组合态（中文/日文输入法正在拼）。
+   *
+   * 为什么必须知道这个：拼音打到一半按回车，用户的意思是「确认候选词」，
+   * 不是「发送消息」。不拦的话，半截拼音会被直接发出去，候选词也没选上
+   * （macOS 上每次打中文都要踩一次）。
+   *
+   * 用 ref 而不是 state：keydown 里要同步读到它，而 setState 的更新赶不上
+   * 这一帧。同时兜一道 e.nativeEvent.isComposing / keyCode 229——
+   * compositionend 与 keydown 的时序在不同浏览器上不完全一致，只靠一个会漏。 */
+  const composingRef = useRef(false);
   const [mentionCfg, setMentionCfg] = useState<MentionConfig>(() =>
     loadMention()
   );
@@ -367,6 +377,17 @@ export default function ChatPage({ agentId }: { agentId: string }) {
 
 
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    /* IME 组合态：按键一律交给输入法，一个都不吃。
+     *
+     * 放在**最前面**是因为组合期间按的键全是输入法的：回车=确认候选词、
+     * 上下键=翻页候选词、空格=上屏第一个候选。而下面 mention / slash 面板
+     * 也接管了这四个键——不在这里挡住，候选词面板打开时按上下键会变成
+     * 在 mention 列表里翻页，两边抢同一个键。
+     * 注意只 return、不 preventDefault：preventDefault 会把输入法正在处理的
+     * 按键也一起否掉，反而让候选词上不了屏。 */
+    if (composingRef.current || isComposingKey(e)) {
+      return;
+    }
     if (mention && filteredMentions.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -2071,6 +2092,15 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 style={{ height: inputH }}
                 className="relative w-full resize-none break-words bg-transparent px-1 pt-0.5 text-[13.5px] leading-6 text-transparent caret-ink outline-none placeholder:text-ink-faint [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 onKeyDown={onInputKeyDown}
+                /* IME 组合的起止：维护 composingRef，供 keydown 判断「这次按键
+                   是不是输入法的」。onCompositionEnd 里要清干净——macOS 上
+                   确认候选词后如果标记没清掉，下一次正常回车会发不出消息。 */
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
                 onScroll={(e) => {
                   if (backdropRef.current)
                     backdropRef.current.scrollTop = (

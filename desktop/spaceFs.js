@@ -136,6 +136,24 @@ async function writeBinary(root, file, base64) {
   return { ok: true, path: f, size: st.size, mtime: st.mtimeMs };
 }
 
+/**
+ * 用系统默认应用打开（docx/ppt 的**唯一**编辑入口，也用于别的一键打开场景）。
+ *
+ * 为什么这两个格式只走这里：OOXML 的版面信息远多于文字，页面内预览即使做了也
+ * 与本地应用差异极大（实测"根本没法看"）；高保真方案（LibreOffice 转 PDF /
+ * OnlyOffice）与这个项目的轻量桌面定位冲突。详见 doc/roadmap.md。
+ */
+function openWithSystemApp(p) {
+  // 非 Electron 环境（单测 / 直接 require 本模块）没有 shell：给明确错误，
+  // 而不是把 TypeError 抛到前端
+  if (!shell || typeof shell.openPath !== 'function')
+    return { ok: false, error: '当前环境不支持调用系统应用（仅桌面端可用）' };
+  const abs = path.resolve(p);
+  // shell.openPath 成功回空串，失败回错误信息（如「没有能打开它的应用」）
+  const r = shell.openPath(abs);
+  return { ok: !r, error: r || '' };
+}
+
 async function mkdir(root, parent, name) {
   const p = resolveSpacePath(root, path.join(parent || '', name));
   await fsp.mkdir(p, { recursive: true });
@@ -236,4 +254,5 @@ module.exports = {
   pickFolder,
   pickFile,
   reveal,
+  openWithSystemApp,
 };

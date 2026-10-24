@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { isComposingKey } from "../lib/utils";
+
 interface Props {
   /** 模型给出的候选，直接点即提交 */
   options?: string[];
@@ -47,6 +49,8 @@ export default function AskBox({ options, disabled, onSubmit }: Props) {
           placeholder="回答上面的问题，Enter 发送"
           onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => {
+            // 输入法拼字中（拼音按回车 = 确认候选词），不是发送
+            if (isComposingKey(e)) return;
             if (e.key === "Enter") submit(val);
           }}
           className="min-w-0 flex-1 rounded-[7px] border border-line bg-panel px-2.5 text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] disabled:opacity-50"

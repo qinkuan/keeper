@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { cn } from "../lib/utils";
+import { cn, isComposingKey } from "../lib/utils";
 import {
   apiDeleteSession,
   apiRenameSession,
@@ -265,6 +265,8 @@ export default function SessionList({
               value={createTitle}
               onChange={(e) => setCreateTitle(e.target.value)}
               onKeyDown={(e) => {
+                // 输入法拼字中：回车是确认候选词，不是创建
+                if (isComposingKey(e)) return;
                 if (e.key === "Enter") doCreate();
               }}
               placeholder="给任务起个名字"

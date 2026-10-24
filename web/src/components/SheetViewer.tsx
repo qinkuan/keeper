@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as XLSX from "xlsx";
-import { cn } from "../lib/utils";
+import { ExternalLink } from "lucide-react";
+import { cn, isComposingKey } from "../lib/utils";
 import { toast } from "./ui/Toast";
 import SheetGrid, { type GridRange } from "./SheetGrid";
 
@@ -73,6 +74,7 @@ export default function SheetViewer({
   loadBytes,
   persist,
   onQuoteSelection,
+  onOpenWithApp,
 }: {
   name: string;
   loadBytes: () => Promise<ArrayBuffer>;
@@ -84,6 +86,8 @@ export default function SheetViewer({
     rows: number,
     cols: number
   ) => void;
+  /** 「用系统应用打开」：不传则不显示该按钮（会话侧的文件卡片没有 space 桥）。 */
+  onOpenWithApp?: () => void;
 }) {
   const [sheets, setSheets] = useState<SheetData[]>([]);
   const [active, setActive] = useState(0);
@@ -305,6 +309,29 @@ export default function SheetViewer({
 
   return (
     <div className="kp-sheet flex h-full min-h-0 flex-col">
+      {/* 顶部条：文件名 + 「用系统应用打开」。
+          放在 sheet tab 之上——文件名是文件级信息，tab 是表级。
+          按钮在调用方给了 onOpenWithApp 时才出现（会话侧的文件卡片没有 space 桥）。 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
+        <span
+          className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink-muted"
+          title={name}
+        >
+          {name}
+        </span>
+        {onOpenWithApp && (
+          <button
+            type="button"
+            title="用系统里的 Excel 打开（原样，含图表与格式）"
+            onClick={onOpenWithApp}
+            className="flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11.5px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+          >
+            <ExternalLink className="h-3 w-3" />
+            用系统应用打开
+          </button>
+        )}
+      </div>
+
       {sheets.length > 1 && (
         <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-line-soft px-2 py-1.5">
           {sheets.map((s, i) =>
@@ -318,6 +345,9 @@ export default function SheetViewer({
                 onClick={(e) => e.stopPropagation()}
                 onBlur={() => commitRename(i)}
                 onKeyDown={(e) => {
+                  // 输入法拼字中：按键交给输入法（回车=确认候选词），
+                  // 否则拼音打一半就把文件名改了
+                  if (isComposingKey(e)) return;
                   e.stopPropagation();
                   if (e.key === "Enter") {
                     e.preventDefault();

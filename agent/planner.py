@@ -360,13 +360,14 @@ class ReActPlanner:
         memory_hint: str = "",
         delegatees_desc: str = "",
         dynamic_extra: str = "",
+        workspace_note: str = "",
     ) -> str:
         """拼出 system 提示词。
 
         顺序是有讲究的——**越靠后权重越高**：
 
         ① 身份（名字 + persona）→ ② 可用工具 → ③ 可用技能 → ④ 工作准则
-        → ⑤ skill 的额外要求 → ⑥ 输出格式
+        → ⑤ 当前环境 → ⑥ skill 的额外要求 → ⑦ 输出格式
 
         「输出格式」必须排在最后：它是引擎契约，不能被 persona 或 skill 的内容
         覆盖掉，否则模型不再输出 `<THOUGHT>` / `<ACTION>`，ReAct 循环直接断。
@@ -406,6 +407,11 @@ class ReActPlanner:
         base += "# 工作准则\n" + "\n".join(
             f"{i}. {r}" for i, r in enumerate(rules, 1)
         ) + "\n\n"
+        # 当前环境：工作目录是会话空间、my-space 是用户的地盘（改动前先确认）。
+        # 放在「工作准则」之后、「skill 额外要求」之前：环境事实要压得住，但也不能
+        # 盖过 skill 的具体要求。
+        if workspace_note:
+            base += workspace_note.strip() + "\n\n"
         if system_extra:
             base += "# 当前技能的额外要求\n" + system_extra.strip() + "\n\n"
         # `/` 动态激活插件的正文：用户显式点开的 = 高优先级，紧跟常驻技能之后、

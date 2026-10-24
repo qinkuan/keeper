@@ -226,6 +226,7 @@ if (!app.requestSingleInstanceLock()) {
     spaceFs.importFromLocal(root, src, dstDir)
   );
   ipcMain.handle('space:reveal', (_e, file) => spaceFs.reveal(file));
+  ipcMain.handle('space:open-with-app', (_e, file) => spaceFs.openWithSystemApp(file));
   ipcMain.handle('space:pick-folder', () => spaceFs.pickFolder());
   ipcMain.handle('space:pick-file', (_e, multi) => spaceFs.pickFile(multi));
   // 「我的空间」右键菜单：原生 Menu 弹在光标处，返回用户选中的动作；取消返回 null

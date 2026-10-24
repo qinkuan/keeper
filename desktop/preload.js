@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('keeperSpace', {
   import: (root, src, dstDir) =>
     ipcRenderer.invoke('space:import', root, src, dstDir),
   reveal: (file) => ipcRenderer.invoke('space:reveal', file),
+  /** 用系统默认应用打开文件（docx/ppt 的编辑走这里） */
+  openWithApp: (file) => ipcRenderer.invoke('space:open-with-app', file),
   pickFolder: () => ipcRenderer.invoke('space:pick-folder'),
   pickFile: (multi) => ipcRenderer.invoke('space:pick-file', multi),
   /** 右键菜单：让主进程弹原生 Menu，返回用户选中的动作 */

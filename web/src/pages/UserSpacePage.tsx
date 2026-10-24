@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode }
 import {
   ChevronRight,
   Copy,
+  ExternalLink,
   Eye,
   File as FileIcon,
   Plus,
@@ -14,6 +15,7 @@ import {
   Pencil,
   RefreshCw,
   Trash2,
+  TriangleAlert,
   Upload,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,14 +24,16 @@ import type { MySpaceFile } from "../api/types";
 import { makeSpaceApi, spaceFileUrl, type SpaceApi } from "../api/spaceNative";
 import { Hint } from "../components/ui/Page";
 import { toast } from "../components/ui/Toast";
-import { cn } from "../lib/utils";
+import { cn, isComposingKey } from "../lib/utils";
 import MarkdownView from "../components/MarkdownView";
 import { addQuoteToChat } from "../lib/quote";
 import ImageViewer from "../components/ImageViewer";
 import Editor from "@monaco-editor/react";
 import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
 import { monacoLangOf } from "../monacoLang";
-import { viewerKindOf, isSheetName } from "../components/viewers";
+import { viewerKindOf, isSheetName, diagramKindOf } from "../components/viewers";
+import { officeKindOf } from "../components/officeTypes";
+import { ChartView, MermaidView } from "../components/DiagramView";
 import SheetViewer from "../components/SheetViewer";
 import PdfViewer from "../components/PdfViewer";
 
@@ -297,6 +301,42 @@ function BinaryFileCard({ file, note }: { file: MySpaceFile; note?: string }) {
   );
 }
 
+/**
+ * Office 文档解析失败时的降级卡。
+ *
+ * 为什么不显示「解析失败」就完事：docx/pptx 的格式变体极多（Word / WPS /
+ * Pages / 老版本各有差异），解析器一定会有不认的文件。这时候用户至少该知道
+ * 「是哪类问题」以及「下一步做什么」——所以按 code 给针对性文案，并把
+ * 「用系统应用打开」作为主出口。
+ */
+/** 图文件的画布高度：比 Markdown 内联的 360 高，文件预览面板本来就更大。 */
+const DIAGRAM_H = 520;
+
+/**
+ * 只读 Monaco 源码视图。图渲染失败时的降级形态，以及编辑态的「预览」也用不到它
+ * （编辑态是可写 Editor）——它只服务「想看源码但不想进编辑」这一种情况。
+ */
+function SourceOnly({ name, text }: { name: string; text: string }) {
+  return (
+    <div className="h-full min-h-0">
+      <Editor
+        height="100%"
+        language={monacoLangOf(name) ?? "plaintext"}
+        theme={KEEPER_THEME}
+        beforeMount={applyKeeperTheme}
+        value={text}
+        options={{
+          readOnly: true,
+          minimap: { enabled: false },
+          fontSize: 13,
+          scrollBeyondLastLine: false,
+          wordWrap: "on",
+        }}
+      />
+    </div>
+  );
+}
+
 function FileViewer({
   space,
   root,
@@ -328,10 +368,25 @@ function FileViewer({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  /* 图类文件的渲染失败原因。置空 = 正常显示图。
+   *
+   * 为什么不直接显示「渲染失败」卡片：.vg.json / .mmd 是**文本**文件，用户点开
+   * 多半就是为了改那张图。spec 写错时给他看源码 + 失败原因，改完保存立刻重试，
+   * 比一张死掉的错误卡有用得多。 */
+  const [diagramErr, setDiagramErr] = useState<string | null>(null);
   useEffect(() => {
     setEditing(false);
     setDraft("");
   }, [path]);
+  // 换文件 / 内容变了（保存后）就重新尝试渲染图：否则第一次失败后会一直卡在源码态。
+  // 依赖取 fq.data?.text 而不是 f.text：**这个 hook 必须在下面的提前 return 之前**，
+  // 而 f 要到 return 之后才声明。放到 return 后面会违反 Hooks 规则——首帧 isLoading
+  // 提前返回时它不执行，数据到达后重渲染才执行，hook 数量前后不一致，React 直接抛
+  // 「Rendered more hooks than during the previous render」把组件崩掉（症状：一点开
+  // 文件就白屏，且与文件类型无关）。
+  useEffect(() => {
+    setDiagramErr(null);
+  }, [path, fq.data?.text]);
   if (fq.isLoading)
     return (
       <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
@@ -346,6 +401,9 @@ function FileViewer({
       </div>
     );
   const f: MySpaceFile = fq.data!;
+  // officeKind 从 path 算（officeKindOf 取最后一段文件名），不依赖 f——首帧数据
+  // 还没到时也要能判定这是不是 Office 文档
+  const officeKind = officeKindOf(path);
   // 与「会话 / 工作区」里的文件预览共用同一张分派表（components/viewers.ts），
   // 保证同样的扩展名在两处用同一套展示器：图片 / PDF / 视频 / Markdown / 代码 / HTML。
   const kind = viewerKindOf(f.name);
@@ -362,6 +420,14 @@ function FileViewer({
 
   // 表格编辑「保存到原文件」：csv/tsv 是文本，走 space.write；xlsx/xls 是二进制，
   // 转 base64 走 space.writeBinary（桌面壳落盘为字节）。
+  /* 用系统默认应用打开（Word / PowerPoint / Excel 的「一键打开」共用这一个）。
+     失败必须给反馈：用户机器可能没装对应应用、或只装了 LibreOffice，
+     静默无响应用户会以为按钮坏了。 */
+  const openWithApp = async (p: string) => {
+    const r = await space.openWithApp(p);
+    if (!r?.ok) toast.error(r?.error || "没有能打开这个文件的应用");
+  };
+
   const persistSheet = async (p: {
     text?: string;
     binary?: ArrayBuffer;
@@ -385,6 +451,44 @@ function FileViewer({
     }
   };
 
+  // Office 文档（docx/pptx）：**只给「用系统应用打开」**，不做页面内预览。
+  //
+  // 为什么不做预览（2026-10 的决策）：OOXML 的版面信息（字体字号、分栏、浮动
+  // 定位、动画、图表）远远多于文字，只抽文字的话渲染出来与本地应用差异大到
+  // 「没法看」；要做高保真只能捆绑 LibreOffice 转 PDF（300MB）或上 OnlyOffice
+  // 那一量级，都与这个项目的轻量桌面定位冲突。而「用系统应用打开」本身就是
+  // 100% 保真的方案，所以把力气花在把它做顺（一键、失败有反馈）上。
+  //
+  // 解析器曾实现过一版内容抽取（desktop/officeDoc.js），已随之撤掉。
+  if (officeKind) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
+        <FileText className="h-8 w-8 text-ink-faint" />
+        <div className="text-[13px] text-ink">
+          {officeKind === "docx" ? "Word 文档" : "PowerPoint 演示文稿"}
+        </div>
+        <div className="text-[12px] text-ink-muted">
+          {f.name} · {fmtSize(f.size)}
+        </div>
+        <div className="max-w-[440px] text-[12px] leading-[1.7] text-ink-faint">
+          这个格式不做页面内预览——格式还原成本高且容易失真。
+          用系统里的{officeKind === "docx" ? " Word" : " PowerPoint"} 打开看原样，
+          改完保存后回到这里刷新即可看到新内容。
+        </div>
+        {/* 唯一入口。失败（没装对应应用）要给反馈，不能静默 */}
+        <button
+          type="button"
+          title={`用系统里的${officeKind === "docx" ? " Word" : " PowerPoint"} 打开`}
+          onClick={() => void openWithApp(path)}
+          className="mt-1 flex h-7 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          用系统应用打开
+        </button>
+      </div>
+    );
+  }
+
   // 我的空间专属内联预览（走二进制字节，故放在通用分派之前拦截）：
   //   表格 xlsx/xls/csv/tsv → SheetViewer；PDF → PdfViewer。
   // 只读预览：读取失败（过大 / 解析不了）时给出下载兜底，不白屏。
@@ -402,6 +506,7 @@ function FileViewer({
             text: `表格区域 ${range}`,
           });
         }}
+        onOpenWithApp={() => void openWithApp(path)}
       />
     );
   }
@@ -507,8 +612,40 @@ function FileViewer({
     setEditing(false);
   };
 
+  /* 图类文件（.vg.json → Vega，.mmd/.mermaid → Mermaid）：渲染成图来看。
+     渲染失败时降级回源码（见 diagramErr），不白屏。 */
+  const diagram = diagramKindOf(f.name);
+
   const preview =
-    kind === "markdown" ? (
+    diagram ? (
+      diagramErr ? (
+        // 降级态：图渲染不出来 → 看源码。提示条说明为什么掉下来。
+        <div className="flex h-full min-h-0 flex-col">
+          <div className="flex items-center gap-2 border-b border-line-soft bg-amber-500/[0.08] px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              {diagram === "vega" ? "图表" : "流程图"}渲染失败，已降级为源码：
+              {diagramErr}
+            </span>
+          </div>
+          <div className="min-h-0 flex-1">
+            <SourceOnly name={f.name} text={f.text} />
+          </div>
+        </div>
+      ) : diagram === "vega" ? (
+        <div className="h-full min-h-0">
+          <ChartView
+            src={f.text}
+            height={DIAGRAM_H}
+            onError={setDiagramErr}
+          />
+        </div>
+      ) : (
+        <div className="h-full min-h-0">
+          <MermaidView src={f.text} height={DIAGRAM_H} onError={setDiagramErr} />
+        </div>
+      )
+    ) : kind === "markdown" ? (
       <div className="kp-md mx-auto max-w-[900px]" onMouseUp={onSelMouseUp}>
         <MarkdownView text={f.text} mode="static" />
       </div>
@@ -1209,6 +1346,8 @@ export default function UserSpacePage() {
             value={promptState.value}
             onChange={(e) => setPromptState({ ...promptState, value: e.target.value })}
             onKeyDown={(e) => {
+              // 输入法拼字中：回车是确认候选词，不是提交这个 prompt
+              if (isComposingKey(e)) return;
               if (e.key === "Enter") {
                 const v = promptState.value.trim();
                 const r = promptState.resolve;

@@ -7,6 +7,7 @@ import {
   artifactUrl,
 } from "../api/client";
 import { isBlockArtifact } from "./viewers";
+import { ChartView, MermaidView } from "./DiagramView";
 import PanZoomStage from "./PanZoomStage";
 
 /**
@@ -178,109 +179,6 @@ export function BlockView({ artifact, agentId, messageId, isLocal }: BlockViewPr
   );
 }
 
-/**
- * 图表渲染（src 直渲版，供制品卡片与 markdown 内联共用）。
- * engine=vega-lite 走 vega-embed；engine=echarts 走 echarts.init + setOption。
- * 容器常驻，加载/失败以浮层提示，不卸载容器。
- */
-export function ChartView({
-  src,
-  engine = "vega-lite",
-}: {
-  src: string;
-  engine?: "vega-lite" | "echarts";
-}) {
-  const [state, setState] = useState<{ loading: boolean; err: string | null }>({
-    loading: true,
-    err: null,
-  });
-  const chartRef = useRef<HTMLDivElement>(null);
-  const instRef = useRef<any>(null);
-  const resizeRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    const el = chartRef.current;
-    if (!el) return;
-    (async () => {
-      try {
-        const spec = JSON.parse(src);
-        if (engine === "echarts") {
-          const echarts = (await import("echarts")).default;
-          instRef.current = echarts.init(el);
-          instRef.current.setOption(spec);
-          // echarts 不随容器尺寸自适应，渲染后补一次 resize 以铺满给定高度
-          instRef.current.resize();
-          // 窗口 resize 时也跟随：监听一次，卸载时移除，避免泄漏。
-          const onResize = () => instRef.current?.resize();
-          window.addEventListener("resize", onResize);
-          resizeRef.current = onResize;
-        } else {
-          const vegaEmbed = (await import("vega-embed")).default;
-          el.innerHTML = "";
-          await vegaEmbed(el, spec, { renderer: "svg", actions: false });
-        }
-        if (active) setState({ loading: false, err: null });
-      } catch (e) {
-        if (active)
-          setState({
-            loading: false,
-            err: e instanceof Error ? e.message : String(e),
-          });
-      }
-    })();
-    return () => {
-      active = false;
-      if (resizeRef.current) {
-        window.removeEventListener("resize", resizeRef.current);
-        resizeRef.current = null;
-      }
-      if (instRef.current) {
-        instRef.current.dispose?.();
-        instRef.current = null;
-      }
-      el.innerHTML = "";
-    };
-  }, [src, engine]);
-
-  const overlay = (text: string) => (
-    <div
-      style={{
-        position: "absolute",
-        inset: 22,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "var(--kp-text-muted)",
-        fontSize: 12,
-        textAlign: "center",
-        background: "#fff",
-        padding: 8,
-      }}
-    >
-      {text}
-    </div>
-  );
-
-  return (
-    <div style={{ position: "relative" }}>
-      <PanZoomStage height={360}>
-        <div
-          ref={chartRef}
-          style={{
-            display: "inline-block",
-            width: "100%",
-            // echarts 需要显式高度；vega 按内容自适应，给 width 即可
-            ...(engine === "echarts" ? { height: 320 } : {}),
-          }}
-        />
-      </PanZoomStage>
-      {state.loading && overlay("渲染图表中…")}
-      {state.err && overlay(`图表渲染失败：${state.err}（可下载 spec 查看）`)}
-    </div>
-  );
-}
-
 /** 图表：制品卡片入口，先取 spec（内联 src 或文件），再交给 ChartView 直渲。 */
 function ChartBlock({
   artifact,
@@ -320,68 +218,6 @@ function ChartBlock({
     return <div style={PLACEHOLDER_STYLE}>图表渲染失败：{err}（可下载 spec 查看）</div>;
   if (!src) return <div style={PLACEHOLDER_STYLE}>加载图表中…</div>;
   return <ChartView src={src} engine={(artifact.engine as any) || "vega-lite"} />;
-}
-
-let mermaidReady = false;
-/** 自增 id：mermaid.render 要求每次调用 id 唯一，否则报「id 已存在」。 */
-let mermaidSeq = 0;
-
-/** 流程图渲染（src 直渲版，供制品卡片与 markdown 内联共用）。 */
-export function MermaidView({ src, refMark }: { src: string; refMark?: string }) {
-  const [state, setState] = useState<{
-    loading: boolean;
-    err: string | null;
-    svg: string | null;
-  }>({ loading: true, err: null, svg: null });
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        let s = src;
-        // 时序图（refMark==="seq"）：agent 在 mermaid 源码里用 [seq] 占「这一步序号」的位，
-        // 渲染前统一替换成递增序号（1,2,3…）。对实时渲染和读历史一致生效，且对已经带好
-        // 序号的源码无副作用（匹配不到就不替换）。markdown 内联一般不带 ref，跳过此步。
-        if (refMark === "seq" && s) {
-          let _n = 0;
-          s = s.replace(/\[seq\]/g, () => String(++_n));
-        }
-        const mermaid = (await import("mermaid")).default;
-        if (!mermaidReady) {
-          mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
-          mermaidReady = true;
-        }
-        const { svg } = await mermaid.render("m" + ++mermaidSeq, s);
-        // 交给 React 受控渲染：SVG 随组件挂载写入，避免手动 innerHTML 时 ref 尚未挂载（白屏）。
-        if (active) setState({ loading: false, err: null, svg });
-      } catch (e) {
-        if (active)
-          setState({
-            loading: false,
-            err: e instanceof Error ? e.message : String(e),
-            svg: null,
-          });
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [src, refMark]);
-
-  if (state.loading) return <div style={PLACEHOLDER_STYLE}>渲染流程图中…</div>;
-  if (state.err)
-    return (
-      <div style={PLACEHOLDER_STYLE}>
-        流程图渲染失败：{state.err}（可下载源码查看）
-      </div>
-    );
-
-  // 缩放/平移/双击交互统一交给可复用的 PanZoomStage
-  return (
-    <PanZoomStage height={360}>
-      <div dangerouslySetInnerHTML={{ __html: state.svg || "" }} />
-    </PanZoomStage>
-  );
 }
 
 /** 流程图：制品卡片入口，先取源码（内联 src 或文件），再交给 MermaidView 直渲。 */

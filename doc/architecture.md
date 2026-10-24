@@ -240,6 +240,9 @@ test_protocol.py         ReAct 标签协议
   `root` 与 `agent_space` 指向同一份会话目录，默认可写；
 - **「我的空间」**（路径存 `~/.keeper/settings.yaml` 的 `user_space.path`）是**用户自管的目录**，
   是文件浏览 / 交付的落点，与会话空间不是一回事；
+  但两者在文件系统层面**已打通**——建会话时会在会话工作区建一个
+  `my-space/` 软链接指向它（`zonefilesystem/session_link.py`），agent 用相对路径
+  即可读写用户的文件（详见 [`user-space.md`](user-space.md)）；
 - agent 表上曾经那两列工作区列已被删除（`_drop_agent_legacy_columns`），
   工作区是**会话级属性**，不属于 agent 画像；
 - 插件的写类工具**不在装配期按只读丢弃**（与内置工具一致，改为运行时拒绝），

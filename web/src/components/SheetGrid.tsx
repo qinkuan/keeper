@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cn } from "../lib/utils";
+import { cn, isComposingKey } from "../lib/utils";
 
 /**
  * 表格网格**渲染 + 交互**（纯展示组件，不碰数据获取 / 解析）。
@@ -339,6 +339,8 @@ export default function SheetGrid({
                           onBlur={commit}
                           onMouseDown={(e) => e.stopPropagation()}
                           onKeyDown={(e) => {
+                            // 输入法拼字中：按键交给输入法（回车=确认候选词）
+                            if (isComposingKey(e)) return;
                             if (e.key === "Enter") {
                               e.preventDefault();
                               commit();

@@ -229,6 +229,49 @@ def _chars_per_token() -> float:
         return 2.0
 
 
+def _workspace_note() -> str:
+    """本次会话的环境说明（注入 system prompt），告诉模型「你在哪、别乱动」。
+
+    两件事：
+
+    1. **工作目录**是会话空间——agent 的草稿区，产物用户随时能取走。
+    2. 目录里有个 ``my-space`` 软链接指向用户的「我的空间」。那是**用户的地盘**，
+       不是你的草稿区：往里写、改、删之前先说明并拿到确认。
+
+    只在链接**真实存在**时才注入：我的空间没配 / 建链失败时，说「有个
+    ``my-space`` 链接」就是骗模型，它会去找一个不存在的东西。
+    """
+    try:
+        from ..chat.context import current_workspace
+        from ..zonefilesystem.session_link import LINK_NAME
+
+        ws = current_workspace()
+        if ws is None:
+            return ""
+        # root 与 agent_space 指向同一份会话目录，两边都看一眼，兼容旧上下文
+        for base in (getattr(ws, "agent_space", None), getattr(ws, "root", None)):
+            if not base:
+                continue
+            if (Path(base) / LINK_NAME).is_symlink():
+                break
+        else:
+            return ""
+    except Exception:  # noqa: BLE001 说明文字不该影响主流程
+        return ""
+
+    return (
+        "## 当前环境\n"
+        f"- 你当前的工作目录是**会话空间**（{ws.root}）：这是你的草稿区，"
+        "产物写在这里，用户随时能取走。\n"
+        f"- 该目录下的 `{LINK_NAME}/` 是一个**软链接**，指向用户的「我的空间」"
+        "（用户自己的文件地盘）。你可以读它；\n"
+        f"  但**写入 / 改名 / 删除 `{LINK_NAME}/` 里的东西前，必须先说明你要动哪几个文件、"
+        "并得到用户确认**。\n"
+        "  用户没明确要求把产物放进「我的空间」时，一律先写在会话空间里，"
+        "再问要不要交付过去。\n"
+    )
+
+
 @dataclass
 class Step:
     # thought 允许为空：并非每步都有「想法」，比如 human_answer（用户的回答）只是
@@ -1694,6 +1737,7 @@ class ReactProcess:
             system_extra=self.system_extra,
             dynamic_extra=self.dynamic_extra,
             memory_hint=memory_hint or "",
+            workspace_note=_workspace_note(),
         )
         # 系统侧预加载拼进 **system**，不是 messages：history 每轮都在长，放 messages
         # 里前缀会被冲掉；system 才是那段稳定的前缀（多轮也能命中缓存）。
