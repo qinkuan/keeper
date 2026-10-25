@@ -39,6 +39,11 @@ def keeper_tools_from_agent(agent) -> ToolRegistry:
 
     for t in build_memory_tools().all():
         reg.register(t)
+    # 知识库：把本地 PDF 的页面以截图形式交给 agent（kb.search_pdf / kb.read_pdf）
+    from ..knowledge.tools import build_knowledge_tools
+
+    for t in build_knowledge_tools().all():
+        reg.register(t)
     return reg
 
 

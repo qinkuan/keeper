@@ -395,6 +395,27 @@ def externalize(tool: str, raw: str, min_chars: Optional[int] = None) -> str:
 
 # ---- 压缩 ----
 
+def _content_text(content) -> str:
+    """消息 content 里的**文本部分**。
+
+    content 有两种形态：普通字符串，或带多模态块的数组
+    （``[{"type":"text",...}, {"type":"file",...}]``，来自 PDF 页面截图那类工具）。
+
+    数组时只取文本块：图片的体积由厂商按自己的规则算（缩放后按 token 计），
+    跟字符数没关系，拿 Python 列表的字面量长度去估会算出一个离谱的数字
+    （一串 ``{'type': 'file', 'file_id': '...'}`` 的 repr 有好几十字符）。
+    """
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict) and b.get("type") == "text":
+                parts.append(str(b.get("text") or ""))
+        return "\n".join(parts)
+    return str(content or "")
+
+
 def estimate_tokens(messages: List[dict]) -> int:
     """粗估输入 token：字符数 / ``chars_per_token``（中文≈1.5，英文≈4，默认 2.5）。
 
@@ -404,7 +425,7 @@ def estimate_tokens(messages: List[dict]) -> int:
     try:
         cfg = ctx_cfg()
         per = float(getattr(cfg, "chars_per_token", 2.5) or 2.5) if cfg else 2.5
-        chars = sum(len(str(m.get("content") or "")) for m in messages)
+        chars = sum(len(_content_text(m.get("content"))) for m in messages)
         return int(chars / per)
     except Exception:  # noqa: BLE001
         return 0
@@ -487,13 +508,21 @@ class Compactor:
                 # 这里不碰——两边职责分开，互不猜对方的心思。
                 out.append(m)
                 continue
+            if m.get("_media"):
+                # 带多模态块的消息（PDF 页面截图）：**不能碰**。
+                #
+                # 外部化会把 content 换成一段文字 + block_id——那是给**文本**用的
+                # 机制（模型 read(block_id) 读回的是文字）。图片一旦被这样处理，
+                # 块就没了，模型永远看不到那张截图。所以这类消息整条跳过。
+                out.append(m)
+                continue
             if (
                 i < start
                 and m.get("role") == "tool"
                 and not m.get("_ext")  # 已换过的不再处理
-                and "block_id=" not in str(m.get("content") or "")[:200]
+                and "block_id=" not in _content_text(m.get("content"))[:200]
             ):
-                content = str(m.get("content") or "")
+                content = _content_text(m.get("content"))
                 if content:
                     new = externalize(m.get("name") or "tool", content)
                     if new != content:
@@ -592,7 +621,7 @@ class Compactor:
         n = 0
         for m in chunk:
             role = m.get("role")
-            content = str(m.get("content") or "")
+            content = _content_text(m.get("content"))
             if role == "assistant":
                 n += 1
                 out.append(f"=== step {n}（模型输出）===\n{content}")

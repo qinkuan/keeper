@@ -54,7 +54,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     body_len      INTEGER,       -- tokens 的词数（长度归一用）
     title_len     INTEGER,       -- title_tokens 的词数（长度归一用）
     locator       TEXT,           -- 定位串：PDF 形如 "第 12 页"，Markdown 为 NULL
-    embed_version INTEGER         -- 嵌入文本格式版本（config.EMBED_FORMAT_VERSION）
+    page_start    INTEGER,        -- PDF 叶子块的精确起始页（1-based）；Markdown 为 NULL
+    page_end      INTEGER,        -- PDF 叶子块的精确结束页（1-based）
+    embed_version INTEGER,        -- 嵌入文本格式版本（config.EMBED_FORMAT_VERSION）
+    chunk_version INTEGER         -- 切片格式版本（config.CHUNK_FORMAT_VERSION）
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc    ON chunks(doc_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
@@ -143,6 +146,16 @@ _ADDED_COLUMNS = (
     ("chunks", "doc_title_tokens", "TEXT"),
     ("chunks", "body_len", "INTEGER"),
     ("chunks", "title_len", "INTEGER"),
+    # PDF 叶子块的**精确页码**（1-based，闭区间）。
+    #
+    # 为什么不能只靠 locator：locator 是给人看的字符串（"第 12 页" /
+    # "第 5-12 页"），解析它要靠正则，且分不清「章节区间」和「精确页」。
+    # 给 agent 渲染页面时需要的是**数值**的精确页——渲染错页 = agent 编答案。
+    ("chunks", "page_start", "INTEGER"),
+    ("chunks", "page_end", "INTEGER"),
+    # 切片格式版本：切片逻辑变了（而正文没变）时用它把老 chunk 标记为过期，
+    # 让 prescreen 不再跳过这个文件。向量仍按 content_hash 复用。
+    ("chunks", "chunk_version", "INTEGER"),
 )
 
 
@@ -618,6 +631,31 @@ def doc_embed_version(conn, doc_id):
     return None
 
 
+def doc_chunk_version(conn, doc_id):
+    """该文档已有 chunk 的**切片格式**版本（只有一个值时才返回；混着就返回 None）。
+
+    与 :func:`doc_embed_version` 分开记，因为它管的是另一件事：
+
+    - ``embed_version`` 变了 → ``embed_text`` 的构造变了 → 旧向量作废，要重嵌；
+    - ``chunk_version`` 变了 → **切片方式**变了（比如 PDF 从「章节页区间」改成
+      「精确页」），正文文字可能一个字都没动 → 旧向量**仍然有效**，只是
+      chunk 里的定位信息过期了。
+
+    合成一列会让「要重嵌」和「只要重切」混为一谈：前者花钱，后者不花钱。
+    分开之后，升级切片格式只付重新切片的时间，不付嵌入的钱。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT chunk_version FROM chunks WHERE doc_id=?", (doc_id,)
+        ).fetchall()
+    except sqlite3.Error:  # noqa: BLE001 老库还没这列 → 视为版本不匹配
+        return None
+    versions = {r[0] for r in rows}
+    if len(versions) == 1:
+        return versions.pop()
+    return None
+
+
 def sync_chunks(conn, doc_id, chunks, vectors):
     """同步某文档的 chunk 集合。
 
@@ -673,13 +711,18 @@ def sync_chunks(conn, doc_id, chunks, vectors):
         title_len = len(title_tokens.split())
 
         # locator：PDF 的「第 12 页」定位串（Markdown 没有 → None）
-        locator = (c.metadata or {}).get("locator")
+        meta = c.metadata or {}
+        locator = meta.get("locator")
+        # 精确页范围（PDF 叶子块才有）：给 agent 渲染页面时按它取页，不用再猜
+        page_start = meta.get("page_start")
+        page_end = meta.get("page_end")
         conn.execute(
             "INSERT INTO chunks(chunk_id,doc_id,parent_id,is_parent,is_doc_root,"
             "title_level,titlepath,text,embed_text,vector,start_line,end_line,"
             "content_hash,chunk_index,tokens,title_tokens,name_tokens,"
-            "doc_title_tokens,body_len,title_len,locator,embed_version) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "doc_title_tokens,body_len,title_len,locator,page_start,page_end,"
+            "embed_version,chunk_version) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(chunk_id) DO UPDATE SET "
             "doc_id=excluded.doc_id, parent_id=excluded.parent_id, "
             "is_parent=excluded.is_parent, is_doc_root=excluded.is_doc_root, "
@@ -691,15 +734,18 @@ def sync_chunks(conn, doc_id, chunks, vectors):
             "name_tokens=excluded.name_tokens, "
             "doc_title_tokens=excluded.doc_title_tokens, "
             "body_len=excluded.body_len, title_len=excluded.title_len, "
-            "locator=excluded.locator, embed_version=excluded.embed_version",
+            "locator=excluded.locator, "
+            "page_start=excluded.page_start, page_end=excluded.page_end, "
+            "embed_version=excluded.embed_version, "
+            "chunk_version=excluded.chunk_version",
             (
                 c.chunk_id, doc_id, c.parent_id, 1 if c.is_parent else 0,
                 1 if c.is_doc_root else 0, c.title_level, c.titlepath, c.text,
                 c.embed_text, _serialize(vec) if vec is not None else None,
                 c.start_line, c.end_line, c.content_hash, c.chunk_index,
                 tokens, title_tokens, name_tokens, doc_title_tokens,
-                body_len, title_len, locator,
-                config.EMBED_FORMAT_VERSION,
+                body_len, title_len, locator, page_start, page_end,
+                config.EMBED_FORMAT_VERSION, config.CHUNK_FORMAT_VERSION,
             ),
         )
 
@@ -795,6 +841,7 @@ def count_keywords(conn):
 
 _CHUNK_COLS = ("c.chunk_id, c.doc_id, c.parent_id, c.title_level, c.titlepath, "
                "c.text, c.start_line, c.end_line, c.chunk_index, c.locator, "
+               "c.page_start, c.page_end, "
                "d.file_path, d.title, d.mtime, d.source_kind")
 
 
@@ -834,7 +881,8 @@ def _page_of(locator):
 def _make_result(row):
     """把一行 chunk + document 记录组装成统一的结果结构。"""
     (cid, doc_id, parent_id, title_level, titlepath, text, start_line, end_line,
-     chunk_index, locator, file_path, title, mtime, source_kind) = row
+     chunk_index, locator, page_start, page_end,
+     file_path, title, mtime, source_kind) = row
     return {
         "chunk_id": cid, "doc_id": doc_id, "parent_id": parent_id,
         "title_level": title_level, "titlepath": titlepath,
@@ -844,6 +892,9 @@ def _make_result(row):
         "chunk_index": chunk_index, "locator": locator,
         # PDF 的起始页码（1-based）；Markdown 为 None
         "page": _page_of(locator),
+        # PDF 叶子块的**精确页范围**（1-based 闭区间）。老库没有这两列时为
+        # None，调用方要能退回 locator 解析（见 _page_of）。
+        "page_start": page_start, "page_end": page_end,
         "path": file_path, "title": title,
         "mtime": mtime, "source_kind": source_kind,
     }

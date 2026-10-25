@@ -67,3 +67,14 @@ numpy>=1.24
 # ---- Office AI 编辑工具（tools/builtin/office.py：excel_edit / pdf_edit）----
 openpyxl>=3.1          # Excel(.xlsx) 读写
 pypdf>=4.0             # PDF 合并/拆分/旋转/删页/抽文字（纯 Python，无平台二进制）
+
+# ---- PDF 页面渲染（pdfpage/render.py）：把某一页整页渲染成 PNG 给 agent 看----
+# pypdfium2 = PDFium（Google）的 Python 绑定。
+# 为什么不用 PyMuPDF：PyMuPDF 是 **AGPL**，会传染到整个产品，闭源桌面应用不能用。
+# pypdfium2 是 **Apache-2.0 / BSD-3-Clause 双许可任选**，且官方提供
+# macOS(x86_64/arm64) / Windows(32/64/ARM) / Linux 全平台预编译 wheel——
+# 自带 PDFium 二进制，不需要本地编译工具链，Windows 上也**不需要**额外安装
+# Microsoft VC++ 运行库（PDFium 用 /MT 静态链接了 CRT）。
+# 锁 <6：5.x 与 4.x 的 API 不兼容（render() 的返回形态变了），别让用户装到 4.x。
+# 不用 Pillow：pdfpage/render.py 走 PdfBitmap.to_numpy() + 自写 PNG 编码。
+pypdfium2>=5.14,<6

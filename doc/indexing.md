@@ -168,12 +168,26 @@ PDF 没有 Markdown 那样的显式标题树，但**大纲（书签 / outline）
 | 跨页段落 | 上页末行不是句末标点 → 与下页首行接成同一段 |
 | 行 → 段 | PDF 的「行」是排版产物：一句话会被拆成好几行 → 段内硬换行合并（中文直接接，西文补空格） |
 | 中文字距 | PPT 常把字距拉开（提取成"摘 要"）→ 压掉**中文**单字之间的空格。**英文不压**：带空格的英文 jieba 仍能切成完整词，压掉反而搜不到 |
-| 定位 | 每个 chunk 带 `locator`（"第 12 页" / "第 12-13 页"） |
+| 定位 | 每个 chunk 带 `locator`（"第 12 页" / "第 12-13 页"）+ 数值列 `page_start`/`page_end`（精确页码，1-based 闭区间） |
 | 扫描件 | **跳过**：全文文本 < 100 字 → 视为图片型 PDF，不索引（只索引章节标题等于"能搜到名字、搜不到内容"，反而误导） |
+
+> **定位必须是「精确页」，不是「章节页区间」**（2026-10 修正）。
+> 原来叶子块的 `locator` 写的是**它所属章节的页区间**（"第 5-12 页"），
+> 于是「命中一个块 → 拿区间去渲染页面」可能渲染出一整页都不含命中内容的图
+> —— agent 看着图编答案。
+> 现在：`_join_pages` 额外返回每页在正文里的字符区间，`_paragraphs_spans`
+> 给每个段落带上它在原文里的字符区间，两者求交即得段落落在哪几页 →
+> 块的 `page_start`/`page_end`。
+> **正文一个字都没变** → `content_hash` 不变 → 旧向量全部复用（不重嵌不花钱）。
+> 配套：新增 `config.CHUNK_FORMAT_VERSION` + `chunks.chunk_version` 列，
+> 让 prescreen 不再跳过这些文件（详见 [kb-pdf-pages.md](kb-pdf-pages.md)）。
 
 **已知短板**（纯文本方案的固有边界）：表格会被拉平成数字和竖线（搜不到）、
 双栏排版会串行、图里的文字丢失。要解决得换提取实现（`pymupdf` / `pdfplumber`），
 本模块接口按「可替换」设计。
+
+> 这条短板在「把 PDF 页面给 agent」这件事上有解：不用文字层，改用**整页渲染的
+> 截图**（版面信息全在）。见 [kb-pdf-pages.md](kb-pdf-pages.md)。
 
 **成本**（1000 份 × 平均 50 页）：提取约 21 分钟、嵌入约 25～50 分钟，首次全量约 1 小时
 （后台跑）；之后只有改动过的 PDF 才重做（stat 预筛直接跳过）。
@@ -229,7 +243,10 @@ CREATE TABLE chunks (
     body_len      INTEGER,                   -- tokens 的词数（长度归一用）
     title_len     INTEGER,                   -- title_tokens 的词数（长度归一用）
     locator       TEXT,                       -- 定位串：PDF 形如"第 12 页"；Markdown 为 NULL
-    embed_version INTEGER                     -- 嵌入文本格式版本（config.EMBED_FORMAT_VERSION）
+    page_start    INTEGER,                    -- PDF 叶子块的精确起始页（1-based）；Markdown 为 NULL
+    page_end      INTEGER,                    -- PDF 叶子块的精确结束页（1-based）
+    embed_version INTEGER,                    -- 嵌入文本格式版本（config.EMBED_FORMAT_VERSION）
+    chunk_version INTEGER                     -- 切片格式版本（config.CHUNK_FORMAT_VERSION）
 );
 
 CREATE INDEX idx_chunks_doc    ON chunks(doc_id);

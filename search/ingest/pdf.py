@@ -41,7 +41,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .chunk import (
     DOC_PREFIX,
@@ -121,39 +121,86 @@ def _join_lines(lines: List[str]) -> str:
 
 def _paragraphs(text: str) -> List[str]:
     """把页面文本重组成段落（空行分段，段内硬换行合并）。"""
-    paras: List[str] = []
+    return [p for p, _s, _e in _paragraphs_spans(text)]
+
+
+def _paragraphs_spans(text: str) -> List[Tuple[str, int, int]]:
+    """把页面文本重组成段落，**并带上每段在原文里的字符区间**。
+
+    段落文本与 :func:`_paragraphs` 逐字一致（同一套 :func:`_join_lines` 合并规则），
+    区间则是「首行起始偏移 → 末行结束偏移」——用来把段落**映射回它的来源页**。
+
+    为什么两者要分开记
+    ------------------
+    段落文本是**重组**过的（每行 strip、行间按中英文字 rules 拼接），与原文区间
+    里的字符并不逐字对应（缩进没了、空格被规范化了）。但我们只需要知道
+    「这段话大致落在原文的哪一段里」——区间只要**包住**它就够了，不必逐字对齐。
+
+    于是「这一段来自第几页」这个问题就变成了区间求交，精确且不需要改动
+    任何文本内容（content_hash 不变 → 旧向量全部可复用）。
+    """
+    out: List[Tuple[str, int, int]] = []
     cur: List[str] = []
+    cur_start = 0
+    offset = 0
     for raw in text.split("\n"):
+        line_start = offset
+        offset += len(raw) + 1        # +1 是这一行后面的换行符
         if not raw.strip():
             if cur:
-                paras.append(_join_lines(cur))
+                p = _join_lines(cur)
+                if p:
+                    out.append((p, cur_start, line_start - 1))
                 cur = []
             continue
+        if not cur:
+            cur_start = line_start
         cur.append(raw)
     if cur:
-        paras.append(_join_lines(cur))
-    return [p for p in paras if p]
+        p = _join_lines(cur)
+        if p:
+            out.append((p, cur_start, offset - 1))
+    return out
 
 
-def _join_pages(texts: List[str]) -> str:
-    """把若干页的文本接成一段连续的正文。
+def _join_pages(texts: List[str], offset: int = 0) -> Tuple[str, List[Tuple[int, int, int]]]:
+    """把若干页的文本接成一段连续的正文，**并记录每页在结果里的字符区间**。
 
     跨页段落：上一页最后一行**不是句末标点** → 下一页开头很可能是它的续接，
     用「单换行」连接（视作同一段）；否则用空行断开（是两个段落）。
+
+    返回 ``(正文, spans)``，spans 的每项是 ``(起始字符, 结束字符, 页号)``。
+    页号是 0-based 且**已加上 offset**（调用方传章节起始页，得到全局页号）。
+
+    正文内容与旧版**逐字相同**（只是多返回了区间），所以 chunk 的 content_hash
+    不变 → 旧向量全部可复用，不需要重新嵌入。
     """
     out = ""
-    for t in texts:
+    spans: List[Tuple[int, int, int]] = []
+    for idx, t in enumerate(texts):
         t = t.strip()
         if not t:
             continue
         if not out:
             out = t
+            spans.append((0, len(out), idx + offset))
             continue
-        if out.endswith(_SENTENCE_END):
-            out += "\n\n" + t
-        else:
-            out += "\n" + t
-    return out
+        sep = "\n\n" if out.endswith(_SENTENCE_END) else "\n"
+        out += sep + t
+        spans.append((len(out) - len(t), len(out), idx + offset))
+    return out, spans
+
+
+def _pages_of_span(span: Tuple[int, int], spans: List[Tuple[int, int, int]]) -> List[int]:
+    """一个字符区间覆盖了哪些页（0-based，去重且有序）。
+
+    区间求交：段落区间与页区间有重叠就算命中这一页。一个段落横跨两页时
+    （段落被跨页合并规则接起来了），两页都会算进去——这正是我们要的：
+    **这一段确实出现在这两页上**。
+    """
+    s, e = span
+    pages = {p for (a, b, p) in spans if a < e and s < b}
+    return sorted(pages)
 
 
 def _strip_repeated_edges(pages: List[str]) -> List[str]:
@@ -323,28 +370,54 @@ def _leaf_sections(nodes: List[_Node], doc_title: str, npages: int) -> List[_Sec
     return sections
 
 
-def _split_section(text: str, min_chars: int, max_chars: int) -> List[str]:
-    """章节内按段落贪心切分（超长段落按句子边界兜底）。"""
-    paras = _paragraphs(text)
-    out: List[str] = []
+def _split_section(
+    text: str,
+    min_chars: int,
+    max_chars: int,
+    spans: Optional[List[Tuple[int, int, int]]] = None,
+) -> List[Tuple[str, int, int]]:
+    """章节内按段落贪心切分（超长段落按句子边界兜底）。
+
+    返回 ``[(片段文本, 起始页, 结束页)]``，页码 0-based。
+
+    片段**文本**与旧版逐字一致（同样的贪心规则、同样的拼接方式），多出来的只是
+    页码：片段由若干段落组成 → 它的页范围 = 这些段落覆盖的页的并集的最小/最大。
+    """
+    paras = _paragraphs_spans(text)
+    out: List[Tuple[str, int, int]] = []
     cur: List[str] = []
+    cur_pages: List[int] = []
     cur_len = 0
-    for p in paras:
+
+    def _flush() -> None:
+        nonlocal cur, cur_len, cur_pages
+        if cur:
+            out.append((
+                "\n\n".join(cur),
+                min(cur_pages) if cur_pages else 0,
+                max(cur_pages) if cur_pages else 0,
+            ))
+        cur, cur_len, cur_pages = [], 0, []
+
+    for (p, s, e) in paras:
+        pages = _pages_of_span((s, e), spans) if spans else []
         if len(p) > max_chars:
-            if cur:
-                out.append("\n\n".join(cur))
-                cur, cur_len = [], 0
-            out.extend(split_by_sentence(p, max_chars))
+            # 超长段落：按句子边界兜底切分。每一刀都在这一段里 → 整段共用同一页范围。
+            _flush()
+            lo = min(pages) if pages else 0
+            hi = max(pages) if pages else 0
+            for piece in split_by_sentence(p, max_chars):
+                out.append((piece, lo, hi))
             continue
         add = len(p) + (2 if cur else 0)
         if cur and cur_len + add > max_chars:
-            out.append("\n\n".join(cur))
-            cur, cur_len = [p], len(p)
+            _flush()
+            cur, cur_len, cur_pages = [p], len(p), list(pages)
         else:
             cur.append(p)
             cur_len += add
-    if cur:
-        out.append("\n\n".join(cur))
+            cur_pages.extend(pages)
+    _flush()
     return out
 
 
@@ -405,7 +478,10 @@ def chunk_pdf(
     # （元数据 /Title，缺失时用文件名），标题天然已经在嵌入文本里了。
 
     for sec in sections:
-        sec_text = _join_pages(pages[sec.start_page:sec.end_page + 1])
+        # offset 把页号从「章节内相对」换算成「整份文档的绝对页号」
+        sec_text, sec_spans = _join_pages(
+            pages[sec.start_page:sec.end_page + 1], offset=sec.start_page
+        )
         if not sec_text.strip():
             continue
         total_text_len += len(sec_text)
@@ -430,10 +506,13 @@ def chunk_pdf(
             chunk_index=-1,
             metadata={**(metadata or {}), "title": doc_title,
                       "page_count": npages, "source_kind": "pdf",
-                      "locator": _locator(sec.start_page, sec.end_page)},
+                      "locator": _locator(sec.start_page, sec.end_page),
+                      # 父块是章节级：页范围就是整个章节
+                      "page_start": sec.start_page + 1,
+                      "page_end": sec.end_page + 1},
         ))
 
-        for piece in _split_section(sec_text, min_chars, max_chars):
+        for piece, p_from, p_to in _split_section(sec_text, min_chars, max_chars, sec_spans):
             cid = leaf_chunk_id(file_path, tp, idx)
             embed_text = f"{DOC_PREFIX}{tp}\n{piece}"
             leaf_chunks.append(Chunk(
@@ -445,13 +524,19 @@ def chunk_pdf(
                 title_path=list(sec.title_path),
                 text=piece,
                 embed_text=embed_text,
-                start_line=sec.start_page + 1,
-                end_line=sec.end_page + 1,
+                # **叶子块的行号 = 它内容的精确页码**（1-based）。
+                # 以前这里写的是章节页区间：命中一个块却拿到「第 5-12 页」，
+                # 拿这个区间去渲染页面时可能整页都不含命中内容 —— agent 看着图
+                # 编答案。现在写精确页，渲染出来的就是命中内容所在的那一页。
+                start_line=p_from + 1,
+                end_line=p_to + 1,
                 content_hash=_sha(piece),
                 chunk_index=idx,
                 metadata={**(metadata or {}), "title": doc_title,
                           "page_count": npages, "source_kind": "pdf",
-                          "locator": _locator(sec.start_page, sec.end_page)},
+                          "locator": _locator(p_from, p_to),
+                          "page_start": p_from + 1,
+                          "page_end": p_to + 1},
             ))
             idx += 1
 

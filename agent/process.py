@@ -22,6 +22,7 @@ from . import protocol
 from .context_store import Compactor, clip_observation, ctx_cfg, externalize
 from .delegatee import Ctx, DelegateeRegistry, Requirement
 from .planner import ReActPlanner
+from ..tools.base import ToolResult
 
 if TYPE_CHECKING:  # 仅类型检查时引入，避免运行时循环导入
     from .keeper import KeeperAgent
@@ -114,6 +115,34 @@ def _fit_observation(tool: str, raw: str, limit: int) -> tuple[str, int]:
             )
             return kept, raw_len
     return clip_observation(raw, limit), raw_len
+
+
+def _tool_message(name: str, obs: str, blocks: Optional[list] = None) -> dict:
+    """构造一条 tool 消息。
+
+    带多模态块（PDF 页面截图）时，``content`` 从字符串变成**数组**：
+    ``[{"type":"text", ...}, {"type":"file", "file_id": ...}, ...]``。
+
+    为什么数组是安全的
+    ------------------
+    发给厂商前，``llm/client.py`` 会把 tool 消息转成 ``HumanMessage``——也就是
+    **role=user** 的消息。于是「工具结果里带图片」在协议层就是
+    「一条 user 消息里带图片」，与用户上传附件那条链路**完全同构**：
+    厂商侧早就支持这种消息（``_has_file_blocks`` 会识别它并走直连发送，
+    绕开 langchain 对 file 块的形状改写）。
+
+    ``_media`` 标记的作用：告诉上下文压缩器「这条消息带图，别拿字符串那套
+    规矩处理它」——压缩器按 ``str(content)`` 处理会把块变成 Python 列表的字面量，
+    图就没了。
+    """
+    if blocks:
+        return {
+            "role": "tool",
+            "name": name,
+            "content": [{"type": "text", "text": obs}] + list(blocks),
+            "_media": True,
+        }
+    return {"role": "tool", "name": name, "content": obs}
 
 
 def _call_key(name: str, args: Any) -> str:
@@ -736,12 +765,16 @@ class ReactProcess:
 
     async def _exec_raw(
         self, name: str, args: Optional[dict]
-    ) -> "tuple[str, bool, int, int, bool]":
-        """执行一个工具，返回 ``(裁剪后的 obs, 是否成功, 耗时ms, 原始长度, 是否被截断)``。
+    ) -> "tuple[str, bool, int, int, bool, list]":
+        """执行一个工具，返回
+        ``(裁剪后的 obs, 是否成功, 耗时ms, 原始长度, 是否被截断, 多模态块)``。
 
         **不记账、不抛异常**：记账由调用方按「串行 / 并行」分别决定（并行时各工具
         的耗时会重叠，sum 会高估），异常则转成错误文本——批量执行里**一个失败不该
         拖垮整批**，让模型自己看到「哪个没成」比直接终止更好。
+
+        最后一项是工具返回的**多模态块**（目前只有 PDF 页面截图）：文本照旧走
+        截断 / 外部化那套，块原样带出去（不进文本预算）。
         """
         t0 = time.perf_counter()
         tool = self.registry.get(name)
@@ -750,25 +783,30 @@ class ReactProcess:
                 f"[没有名为 {name} 的工具，可用："
                 f"{', '.join(t.name for t in self.registry.all())}]"
             )
-            return obs, False, int((time.perf_counter() - t0) * 1000), len(obs), False
+            return obs, False, int((time.perf_counter() - t0) * 1000), len(obs), False, []
         # 重复动作检测放在这里（执行前）：连续两次**完全相同**的调用都失败时，
         # 第三次直接拦下并换策略提示。实测过一次 30 步打转——模型把同一条
         # `cat a b > out` 重发了十几次，每次失败的理由还略有不同，它始终没
         # 意识到「重发没用，得换思路」。让它继续撞南墙是纯浪费。
         blocked = self._repeat_guard(name, args or {})
         if blocked:
-            return blocked, False, int((time.perf_counter() - t0) * 1000), len(blocked), False
+            return blocked, False, int((time.perf_counter() - t0) * 1000), len(blocked), False, []
         # 危险工具的守卫放在这里：这是所有工具唯一的必经之路，且在真正执行
         # **之前**——所以拦下来时副作用为零，模型看到的是一段可读的拒绝理由，
         # 可以改用别的方式达成目标，而不是被硬碰断。
         blocked = self._guard_check(name, tool, args or {})
         if blocked:
-            return blocked, False, int((time.perf_counter() - t0) * 1000), len(blocked), False
+            return blocked, False, int((time.perf_counter() - t0) * 1000), len(blocked), False, []
         try:
             raw = await tool.execute(args or {})
         except Exception as e:  # noqa: BLE001
             obs = f"[工具 {name} 执行出错: {e}]"
-            return obs, False, int((time.perf_counter() - t0) * 1000), len(obs), False
+            return obs, False, int((time.perf_counter() - t0) * 1000), len(obs), False, []
+        blocks: list = []
+        if isinstance(raw, ToolResult):
+            # 带多模态块的工具（PDF 页面截图）：文本走既有规则，块原样带走
+            blocks = list(raw.blocks or [])
+            raw = raw.text or ""
         obs, raw_len = _fit_observation(
             name, raw if isinstance(raw, str) else str(raw), self.observation_limit
         )
@@ -778,6 +816,7 @@ class ReactProcess:
             int((time.perf_counter() - t0) * 1000),
             raw_len,
             raw_len > len(obs),
+            blocks,
         )
 
     def _dropped_actions_note(self, dec: Any) -> str:
@@ -1050,7 +1089,7 @@ class ReactProcess:
                 results.append(
                     r
                     if isinstance(r, tuple)
-                    else (f"[工具 {name} 执行出错: {r}]", False, 0, 0, False)
+                    else (f"[工具 {name} 执行出错: {r}]", False, 0, 0, False, [])
                 )
             for n, a in rest:
                 results.append(await self._exec_raw(n, a))
@@ -1062,7 +1101,7 @@ class ReactProcess:
         # step 对应的是「一次思考」，不是「一次工具调用」。否则 3 个工具就吃掉
         # 3 步配额，max_steps 会被工具数而不是思考轮数消耗光。
         segs: List[str] = []
-        for (name, args), (obs, ok, _ms, raw_len, trunc) in zip(actions, results):
+        for (name, args), (obs, ok, _ms, raw_len, trunc, blocks) in zip(actions, results):
             try:
                 args_json = json.dumps(args or {}, ensure_ascii=False, default=str)
             except Exception:  # noqa: BLE001
@@ -1082,7 +1121,7 @@ class ReactProcess:
             )
             head = f"[{name}] " if len(actions) > 1 else ""
             segs.append(head + obs)
-            messages.append({"role": "tool", "name": name, "content": obs})
+            messages.append(_tool_message(name, obs, blocks))
 
         if len(actions) > 1:
             names = ", ".join(n for n, _ in actions)
@@ -1720,9 +1759,7 @@ class ReactProcess:
                         ),
                     }
                 )
-                messages.append(
-                    {"role": "tool", "name": s.tool, "content": s.observation or ""}
-                )
+                messages.append(_tool_message(s.tool, s.observation or ""))
 
         # system_extra 交给 planner 排在「输出格式」之前：格式要求是引擎契约，
         # 不能被 skill 的内容覆盖，否则模型不再输出 <THOUGHT> / <ACTION>。
@@ -1993,9 +2030,7 @@ class ReactProcess:
                 steps.append(step)
                 if on_step is not None:
                     await on_step(len(steps), step)
-                messages.append(
-                    {"role": "tool", "name": dec.capability, "content": obs}
-                )
+                messages.append(_tool_message(dec.capability, obs))
                 if should_stop is not None and await should_stop():
                     return ProcessResult(
                         answer="", steps=steps, used_tools=True, paused=True
@@ -2040,6 +2075,7 @@ class ReactProcess:
                     f"{', '.join(t.name for t in self.registry.all())}]"
                 )
                 clipped = obs
+                blocks = []
                 # 工具不存在也算一次失败调用（错误率要能看到）
                 await self._record_tool_call(
                     dec.tool,
@@ -2063,6 +2099,7 @@ class ReactProcess:
                 if blocked:
                     clipped = blocked
                     obs = blocked
+                    blocks = []
                     await self._record_tool_call(
                         dec.tool,
                         duration_ms=int((time.perf_counter() - t_tool) * 1000),
@@ -2076,6 +2113,11 @@ class ReactProcess:
                 else:
                     try:
                         raw = await tool.execute(dec.args or {})
+                        # 带多模态块的工具（PDF 页面截图）：文本照旧，块原样带走
+                        blocks = []
+                        if isinstance(raw, ToolResult):
+                            blocks = list(raw.blocks or [])
+                            raw = raw.text or ""
                         raw = raw if isinstance(raw, str) else str(raw)
                         # 先外部化（超长时给「预览 + block_id」，模型能 read 回
                         # 全文），再退到硬截断。clipped 仍只用于落库/展示，
@@ -2123,7 +2165,7 @@ class ReactProcess:
             steps.append(step)
             if on_step is not None:
                 await on_step(len(steps), step)  # 实时落库：中途挂起/异常也不丢
-            msg = {"role": "tool", "name": dec.tool, "content": obs}
+            msg = _tool_message(dec.tool, obs, blocks)
             if dec.tool == "read":
                 # 追回的内容：标成 pin，滚动外部化时会保住**最近 N 条**，
                 # 免得出现「刚读回来 → 走出窗口被压 → 又读一遍」的抖动。

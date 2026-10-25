@@ -6,10 +6,43 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolResult:
+    """工具的返回值：**文本 + 可选的多模态块**。
+
+    为什么需要它
+    ------------
+    工具结果以前只能是**纯字符串**（``run`` 的签名就是 ``Awaitable[str]``），
+    于是「把 PDF 页面渲染成图给 agent 看」这件事没有出口——图不是字符串，
+    总不能把 PNG 的字节塞进 observation（那既撑爆上下文，模型也看不见）。
+
+    现在工具可以返回 :class:`ToolResult`：
+
+    - ``text``：给模型看的说明文字。**照旧**走截断 / 外部化那套既有逻辑；
+    - ``blocks``：要**原样附在消息里**的多模态块。目前只有厂商文件引用
+      （``{"type": "file", "file_id": ...}``）。
+
+    为什么块**不进**文本预算
+    ----------------------
+    图片的体积与计费由厂商按自己的规则算（缩放后按 token 计），跟字符数
+    没关系。如果把它当文本处理，就会被 3500 字符的 observation 上限砍掉、
+    或者被「外部化成 block_id」——而 block_id 是给**文本**用的，模型拿它
+    ``read`` 出来只会得到一堆二进制。那图就永远到不了模型眼前。
+
+    所以：文本走文本的规则，块原样带走。
+    """
+
+    text: str
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
+
+    def __str__(self) -> str:  # pragma: no cover - 只是为了日志里好看
+        return self.text
 
 
 @dataclass
@@ -17,7 +50,8 @@ class ProcessorTool:
     name: str
     description: str
     parameters: Dict[str, str]  # 参数名 -> 说明（用于拼 system prompt）
-    run: Callable[[dict], Awaitable[str]]
+    #: 返回类型：``str``（绝大多数工具）或 :class:`ToolResult`（带多模态块的工具）。
+    run: Callable[[dict], Awaitable[Any]]
     read_only: bool = False
     #: 能否执行命令 / 以非常规方式触达文件（shell、解释器、任意读写）。
     #: 这类工具执行前要过 :mod:`keeper.tools.guard`：只读工作区按「读命令白名单」
@@ -28,7 +62,13 @@ class ProcessorTool:
     #: 工具清单，也不会被模型调用（调用时也过 chat/context 的会话类别守卫）。
     browser_only: bool = False
 
-    async def execute(self, args: dict) -> str:
+    async def execute(self, args: dict) -> Any:
+        """执行工具。返回值可能是 ``str``，也可能是 :class:`ToolResult`。
+
+        出错时**不抛异常**，而是回一句人话——工具失败是 agent 循环里的正常
+        一环（参数写错、文件不在），让它自己看到理由并改策略，比整个
+        agent 崩掉有用得多。
+        """
         try:
             return await self.run(args or {})
         except Exception as e:  # 工具出错不应让整个 agent 崩溃

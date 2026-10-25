@@ -42,13 +42,17 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
     # 预筛：stat 没变 -> 内容几乎不可能变，连文件都不打开
     # **但嵌入格式版本变了不行**：embed_text 的构造方式变了（比如把文件名
     # 加进去），旧向量就是过期的，必须重新切片 + 重新嵌入。
+    # **切片格式版本变了也不行**：切片方式变了（正文可能一个字没动），chunk 里的
+    # 定位信息过期了，得重新切一遍——但向量仍按 content_hash 复用，不花钱。
     if (prescreen and not force
             and existing
             and existing["index_status"] == "done"
             and existing["mtime"] == mtime
             and existing["size"] == size
             and dbmod.doc_embed_version(conn, existing["id"])
-                == config.EMBED_FORMAT_VERSION):
+                == config.EMBED_FORMAT_VERSION
+            and dbmod.doc_chunk_version(conn, existing["id"])
+                == config.CHUNK_FORMAT_VERSION):
         return "skipped"
 
     chash = known_hash if known_hash else detect.compute_hash(path)
@@ -64,7 +68,9 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
             and existing["content_hash"] == chash
             and existing["index_status"] == "done"
             and dbmod.doc_embed_version(conn, existing["id"])
-                == config.EMBED_FORMAT_VERSION):
+                == config.EMBED_FORMAT_VERSION
+            and dbmod.doc_chunk_version(conn, existing["id"])
+                == config.CHUNK_FORMAT_VERSION):
         # 内容没变 **且** 嵌入格式版本也没变 → 真的可以跳过。
         # （版本变了说明 embed_text 的构造方式变了，旧向量是过期的，
         #   必须继续往下走：重新切片 + 重新嵌入。）

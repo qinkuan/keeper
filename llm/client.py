@@ -303,8 +303,13 @@ class LLM(Protocol):
 def _has_file_blocks(msgs: list) -> bool:
     """这批发给模型的消息里有没有 file 附件块。
 
-    只看 ``HumanMessage`` 且 content 是列表的那种：附件只可能出现在第一轮
-    user 消息上（chat/service.py 注入），后续 ReAct 轮次都是纯文本。
+    只看 content 是列表的那种消息。附件出现在两处：
+
+    - 第一轮 user 消息（chat/service.py 注入的用户上传文件）；
+    - **工具消息**（PDF 页面截图那类工具返回的多模态块）。
+
+    两种都要触发直连发送：langchain 会把 DeepSeek 的扁平 file 块改写成
+    OpenAI 的嵌套形状（模型就看不见图了），所以带 file 块的消息一律绕开它。
     """
     for m in msgs or []:
         content = getattr(m, "content", None)
@@ -493,7 +498,30 @@ class LangChainLLM:
                 msgs.append(AIMessage(content=content))
             elif role == "tool":
                 tag = f"[工具 {name} 返回结果]\n" if name else "[工具返回结果]\n"
-                msgs.append(HumanMessage(content=tag + content))
+                if isinstance(content, list):
+                    # 工具结果里带**多模态块**（目前只有 PDF 页面截图）：
+                    # content 是 [文本, 块, 块, ...] 的数组。
+                    #
+                    # 为什么不拆成两条消息：块必须和这次工具结果的文本**在同一条
+                    # 消息里**——模型看到的语义是「这次工具返回了这些图」，
+                    # 拆开就变成「工具说了一句话」+「用户塞了几张图」，因果关系断了。
+                    #
+                    # 为什么这样发是安全的：tool 消息在这里被转成 HumanMessage
+                    # （role=user），于是「一条带图的用户消息」与用户上传附件那条
+                    # 链路完全同构——厂商侧早就支持，``_has_file_blocks`` 也会
+                    # 识别它并走直连发送（绕开 langchain 对 file 块的形状改写）。
+                    blocks = list(content)
+                    if blocks and isinstance(blocks[0], dict) and \
+                            blocks[0].get("type") == "text":
+                        # 前缀并进第一个文本块（少一个块，厂商那边更干净）
+                        first = dict(blocks[0])
+                        first["text"] = tag + str(first.get("text") or "")
+                        blocks = [first] + blocks[1:]
+                    else:
+                        blocks = [{"type": "text", "text": tag}] + blocks
+                    msgs.append(HumanMessage(content=blocks))
+                else:
+                    msgs.append(HumanMessage(content=tag + content))
             else:
                 msgs.append(HumanMessage(content=content))
         return msgs
