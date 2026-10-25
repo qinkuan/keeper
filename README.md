@@ -18,8 +18,10 @@ keeper 是一个**跑在自己机器上**的 agent 内核 + 桌面应用，围�
 
 数据全部留在本地：文件是你的文件，记忆是你的记忆，会话与可观测数据也只在本机。
 
-> **「找」这一层正在补**：现在是目录树浏览 + agent 的 `grep` / `find`；
-> **向量化 + 跨模态的语义检索**与**长期事实库**在建，见 [Roadmap](#roadmap)。
+> **「找」这一层有两套**：目录树浏览 + agent 的 `grep` / `find`；
+> 以及**本地语义检索**（`search/`：Markdown 结构化切片 → 向量 + 关键词混合检索，
+> 全部在本机跑，文件内容不外传）。跨模态（图片 / 音视频）与**长期事实库**在建，
+> 见 [Roadmap](#roadmap)。
 
 完整设计见 [`doc/architecture.md`](doc/architecture.md)。
 
@@ -743,6 +745,7 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 | 模型预设 / 绑定 / 计价 | [`llm.md`](doc/llm.md) |
 | 插件库与绑定 | [`plugin-design.md`](doc/plugin-design.md) |
 | **我的空间**（展示编辑 + 向量搜索） | [`user-space.md`](doc/user-space.md) |
+| **检索层**（切片 / 索引 / 混合检索） | [`indexing.md`](doc/indexing.md) |
 | 跨端协作 | [`collaboration-contract.md`](doc/collaboration-contract.md) |
 | 可观测 | [`observability-design.md`](doc/observability-design.md) |
 | 评测 | [`evals.md`](doc/evals.md) |

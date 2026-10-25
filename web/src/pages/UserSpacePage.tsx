@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Eye,
   Plus,
+  ArrowLeft,
   FileText,
   Folder,
   FolderOpen,
@@ -13,13 +14,15 @@ import {
   PanelLeft,
   Pencil,
   RefreshCw,
+  Search as SearchIcon,
   Trash2,
   TriangleAlert,
   Upload,
+  X,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGetMySpace, apiSetMySpace } from "../api/client";
-import type { MySpaceFile } from "../api/types";
+import { apiGetMySpace, apiSearchQuery, apiSearchStats, apiSetMySpace } from "../api/client";
+import type { MySpaceFile, SearchHit } from "../api/types";
 import { makeSpaceApi, spaceFileUrl, type SpaceApi } from "../api/spaceNative";
 import { Hint } from "../components/ui/Page";
 import { toast } from "../components/ui/Toast";
@@ -94,6 +97,198 @@ const fmtSize = (size: number) => {
 };
 const fmtMtime = (mtime: number) =>
   new Date(mtime * 1000).toLocaleString("zh-CN", { hour12: false });
+
+/** 把命中的词标出来（搜索结果摘要用）。 */
+function Highlight({ text, terms }: { text: string; terms: string[] }) {
+  const usable = terms.map((t) => t.trim()).filter((t) => t.length > 0);
+  if (!usable.length) return <>{text}</>;
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 长词优先：「缓存穿透」要先于「缓存」被匹配，否则高亮会断成一截一截
+  const alt = [...new Set(usable)]
+    .sort((a, b) => b.length - a.length)
+    .map(esc)
+    .join("|");
+  const re = new RegExp(`(${alt})`, "g");
+  const out: ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <mark
+        key={out.length}
+        className="rounded bg-brand/15 px-0.5 text-ink-strong"
+      >
+        {m[0]}
+      </mark>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return <>{out}</>;
+}
+
+/**
+ * 搜索结果里的一个文件：同一文件可能命中好几段，这里合并成一条，
+ * 取分数最高的那段当摘要，并记下命中了几段。
+ */
+interface FileHit {
+  path: string;
+  rel: string;
+  name: string;
+  score: number;
+  text: string;
+  titlepath: string;
+  locator: string | null;
+  start_line: number;
+  end_line: number;
+  /** PDF 的起始页码（1-based）；Markdown 为 null */
+  page: number | null;
+  count: number;
+  /** 这个文件里实际命中的词（后端分词后给的）——用来高亮 */
+  matched: string[];
+}
+
+/** 把片段级结果聚合成文件级结果（按路径去重，按最高分排序）。 */
+function groupByFile(hits: SearchHit[], root: string): FileHit[] {
+  const map = new Map<string, FileHit>();
+  for (const h of hits) {
+    if (!h.path) continue;
+    // 索引里可能有「换过空间」之前的旧文件，点开会打不开 → 直接不展示
+    if (root && !h.path.startsWith(root)) continue;
+    const rel = h.path.slice(root.length).replace(/^\//, "") || h.path;
+    const cur = map.get(h.path);
+    if (!cur) {
+      map.set(h.path, {
+        path: h.path,
+        rel,
+        name: basename(h.path),
+        score: h.score,
+        text: h.text || "",
+        titlepath: h.titlepath || "",
+        locator: h.locator,
+        start_line: h.start_line,
+        end_line: h.end_line,
+        page: h.page ?? null,
+        count: 1,
+        matched: [...(h.matched_terms ?? [])],
+      });
+    } else {
+      cur.count += 1;
+      for (const t of h.matched_terms ?? [])
+        if (!cur.matched.includes(t)) cur.matched.push(t);
+      if (h.score > cur.score) {
+        cur.score = h.score;
+        cur.text = h.text || "";
+        cur.titlepath = h.titlepath || "";
+        cur.locator = h.locator;
+        cur.start_line = h.start_line;
+        cur.end_line = h.end_line;
+        cur.page = h.page ?? cur.page;
+      }
+    }
+  }
+  return [...map.values()].sort((a, b) => b.score - a.score);
+}
+
+/** 搜索结果列表：一个文件一条（同一文件的多个片段已合并）。 */
+function SearchResults({
+  hits,
+  terms,
+  loading,
+  error,
+  noIndex,
+  degraded,
+  onOpen,
+}: {
+  hits: FileHit[];
+  terms: string[];
+  loading: boolean;
+  error?: string;
+  noIndex: boolean;
+  degraded?: boolean;
+  onOpen: (hit: FileHit) => void;
+}) {
+  if (loading)
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        搜索中…
+      </div>
+    );
+  if (error)
+    return (
+      <Hint tone="danger" title="搜索失败">
+        {error}
+      </Hint>
+    );
+  if (noIndex)
+    return (
+      <Hint tone="warn" title="还没有建立索引">
+        搜索依赖本地索引，当前还没有索引任何内容。到「搜索」页点「建立索引」，
+        索引完成后回到这里就能搜了。
+      </Hint>
+    );
+  if (!hits.length)
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">
+        <SearchIcon className="h-8 w-8" />
+        <div className="text-[13px]">没有匹配的文件</div>
+        <div className="text-[12px]">只有被索引过的文件（Markdown / PDF）能被搜到</div>
+      </div>
+    );
+  return (
+    <div className="flex flex-col gap-2 pb-2">
+      {degraded && (
+        <div className="rounded-md border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-1.5 text-[11.5px] leading-5 text-amber-700 dark:text-amber-300">
+          语义模型未就绪，本次只按字面匹配（关键词通道）搜索。
+        </div>
+      )}
+      {hits.map((h) => (
+        <button
+          key={h.path}
+          type="button"
+          onClick={() => onOpen(h)}
+          title={h.page ? `打开并跳到第 ${h.page} 页` : h.start_line ? `打开并跳到第 ${h.start_line} 行` : "打开这个文件"}
+          className="flex flex-col gap-1.5 rounded-lg border border-line-soft bg-surface px-3 py-2.5 text-left transition-colors hover:border-brand/40 hover:bg-panel"
+        >
+          <div className="flex items-center gap-2">
+            <FileTypeIcon name={h.name} size="xs" />
+            <span className="truncate text-[13px] font-medium text-ink-strong">
+              {h.name}
+            </span>
+            <span className="tabular-nums text-[11px] text-ink-faint">
+              {h.score.toFixed(3)}
+            </span>
+            {h.count > 1 && (
+              <span className="shrink-0 text-[11px] text-ink-faint">
+                {h.count} 处命中
+              </span>
+            )}
+          </div>
+          <div className="truncate font-mono text-[11px] text-ink-muted" title={h.rel}>
+            {h.rel}
+          </div>
+          {h.text && (
+            <div className="line-clamp-2 text-[12px] leading-5 text-ink-muted">
+              <Highlight text={h.text} terms={[...h.matched, ...terms]} />
+            </div>
+          )}
+          {(h.titlepath || h.locator || h.start_line) && (
+            <div className="truncate text-[11px] text-ink-faint">
+              {h.titlepath}
+              {h.locator
+                ? ` · ${h.locator}`
+                : h.start_line
+                  ? ` · 第 ${h.start_line}-${h.end_line} 行`
+                  : ""}
+            </div>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** 目录树里每行右侧的小操作按钮（hover 才显示）。 */
 function RowBtn({
@@ -341,10 +536,19 @@ function FileViewer({
   space,
   root,
   path,
+  jump,
 }: {
   space: SpaceApi;
   root: string;
   path: string;
+  /**
+   * 跳转目标（从搜索结果点进来时带上）：
+   *   line —— Markdown 的源文件行号（1-based）
+   *   page —— PDF 的页码（1-based）
+   *   terms—— 实际命中的词（把位置精确到那句）
+   *   seq  —— 递增序号：同一位置连点两次也要重新跳
+   */
+  jump?: { line?: number; page?: number; terms?: string[]; seq?: number } | null;
 }) {
   const qc = useQueryClient();
   const fq = useQuery({
@@ -511,7 +715,13 @@ function FileViewer({
     );
   }
   if (kind === "pdf") {
-    return <PdfViewer name={f.name} loadBytes={loadBytes} />;
+    return (
+      <PdfViewer
+        name={f.name}
+        loadBytes={loadBytes}
+        jumpToPage={jump?.page ? { page: jump.page, seq: jump.seq } : null}
+      />
+    );
   }
 
   // 二进制：不渲染，只给下载
@@ -647,7 +857,7 @@ function FileViewer({
       )
     ) : kind === "markdown" ? (
       <div className="kp-md mx-auto max-w-[900px]" onMouseUp={onSelMouseUp}>
-        <MarkdownView text={f.text} mode="static" />
+        <MarkdownView text={f.text} mode="static" jumpTo={jump} />
       </div>
     ) : (
       <div className="h-full min-h-0">
@@ -799,6 +1009,15 @@ export default function UserSpacePage() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // 跳转目标：从搜索结果点进来时带上（行号 / 页码 / 命中词）。
+  // seq 每次 +1 —— 同一个文件同一处连点两次也要重新跳（否则第二次没反应）。
+  const [jump, setJump] = useState<{
+    path: string;
+    line?: number;
+    page?: number;
+    terms?: string[];
+    seq: number;
+  } | null>(null);
 
   // 目录树宽度（可拖拽调节，落 localStorage）；默认 = 原 280px 的 80% = 224px
   const [treeWidth, setTreeWidth] = useState<number>(() => {
@@ -810,6 +1029,57 @@ export default function UserSpacePage() {
   }, [treeWidth]);
   // 目录树可整体收起为细条（仿左侧「隐藏菜单」的折叠交互）
   const [treeCollapsed, setTreeCollapsed] = useState(false);
+
+  // ── 文件搜索（跨两栏，在文件浏览区最上方）──
+  const [kw, setKw] = useState("");
+  const [debouncedKw, setDebouncedKw] = useState("");
+  // 输入停 400ms 才真的发请求：中文输入法拼字过程中不该一直打后端
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedKw(kw), 400);
+    return () => clearTimeout(t);
+  }, [kw]);
+  // "results" = 右侧展示搜索结果；"browse" = 展示文件内容
+  const [view, setView] = useState<"browse" | "results">("browse");
+  useEffect(() => {
+    setView(debouncedKw.trim() ? "results" : "browse");
+  }, [debouncedKw]);
+
+  // 走内核的检索接口（索引在 Python 侧）。min_score 不传 = 用 UI 门槛 0.5，
+  // 低于它的结果不展示——「目录里给人看的搜索」就该是这个严格度。
+  const searchQ = useQuery({
+    queryKey: ["space-file-search", debouncedKw.trim()],
+    queryFn: async () => {
+      const q = debouncedKw.trim();
+      try {
+        const r = await apiSearchQuery({ query: q, top_k: 100, mode: "hybrid" });
+        return { ...r, degraded: false };
+      } catch (e) {
+        // embedding 模型没就绪时退回纯关键词（关键词通道不需要模型），
+        // 总比整个搜索不可用强——但得让用户知道这次搜的是"字面匹配"。
+        const r = await apiSearchQuery({ query: q, top_k: 100, mode: "keyword" });
+        return { ...r, degraded: true };
+      }
+    },
+    enabled: debouncedKw.trim().length > 0,
+    staleTime: 30_000,
+  });
+  // 索引有没有建：没建索引时搜索必然是空的，得说清楚原因而不是显示"没找到"
+  const idxQ = useQuery({
+    queryKey: ["search-stats"],
+    queryFn: apiSearchStats,
+    enabled: view === "results",
+    staleTime: 20_000,
+  });
+
+  const fileHits = useMemo(
+    () => groupByFile(searchQ.data?.results ?? [], path),
+    [searchQ.data, path]
+  );
+  // 高亮用的词：用户输入按空格切 + 整串本身
+  const kwTerms = useMemo(() => {
+    const t = kw.trim();
+    return t ? [t, ...t.split(/\s+/)] : [];
+  }, [kw]);
 
   const saveM = useMutation({
     mutationFn: (p: string) => apiSetMySpace(p),
@@ -1193,8 +1463,43 @@ export default function UserSpacePage() {
           </button>
         </div>
       ) : (
-        /* 已配置：两栏文件浏览器（目录树可拖宽 / 可收起） */
-        <div className="mt-4 flex min-h-0 flex-1">
+        /* 已配置：顶部搜索 + 两栏文件浏览器（目录树可拖宽 / 可收起） */
+        <div className="mt-4 flex min-h-0 flex-1 flex-col">
+          {/* ── 最上方：文件搜索 ── */}
+          <div className="mb-3 flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
+              <input
+                value={kw}
+                onChange={(e) => setKw(e.target.value)}
+                onKeyDown={(e) => {
+                  // 输入法拼字中：回车是确认候选词，不是提交
+                  if (isComposingKey(e)) return;
+                  if (e.key === "Enter") {
+                    setDebouncedKw(kw.trim());
+                    setView("results");
+                  }
+                }}
+                placeholder="搜索「我的空间」里的文件…"
+                className="h-9 w-full rounded-lg border border-line-soft bg-panel pl-8 pr-8 text-[13px] text-ink shadow-card outline-none placeholder:text-ink-faint focus:border-brand/50"
+              />
+              {kw && (
+                <button
+                  type="button"
+                  onClick={() => setKw("")}
+                  title="清空"
+                  className="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            {searchQ.isFetching && (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ink-faint" />
+            )}
+          </div>
+
+          <div className="flex min-h-0 flex-1">
           {/* 左侧目录树：收起时退化为细条 + 展开按钮 */}
           {treeCollapsed ? (
             <div className="flex w-9 shrink-0 flex-col items-center rounded-xl border border-line bg-panel py-2">
@@ -1288,10 +1593,20 @@ export default function UserSpacePage() {
           <HResizeBar onResize={(dx) => setTreeWidth((w) => Math.max(180, Math.min(640, w + dx)))} />
           </>)}
 
-          {/* 右侧内容预览 */}
+          {/* 右侧内容预览 / 搜索结果 */}
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-panel">
             <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px] text-ink-muted">
-              {selectedFile ? (
+              {view === "results" ? (
+                <span className="flex min-w-0 items-center gap-1.5 truncate">
+                  <SearchIcon className="h-3.5 w-3.5 shrink-0 text-brand" />
+                  <span>搜索结果</span>
+                  {fileHits.length > 0 && (
+                    <span className="tabular-nums text-ink-faint">
+                      （{fileHits.length} 个文件）
+                    </span>
+                  )}
+                </span>
+              ) : selectedFile ? (
                 <span className="flex min-w-0 items-center gap-1.5 truncate">
                   <FileTypeIcon name={relPath} size="xs" />
                   <span className="truncate font-mono">{relPath}</span>
@@ -1299,28 +1614,68 @@ export default function UserSpacePage() {
               ) : (
                 <span className="text-ink-faint">未选择文件</span>
               )}
-              {selectedFile && (
-                <button
-                  type="button"
-                  onClick={() => doOpen(selectedFile, false)}
-                  title="在文件管理器中打开"
-                  className="ml-auto shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
-                >
-                  打开
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={refreshFile}
-                title="刷新文件（读取外部修改后的最新内容）"
-                className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
-              >
-                刷新
-              </button>
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                {view === "browse" && kw.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setView("results")}
+                    className="flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                  >
+                    <ArrowLeft className="h-3 w-3" />
+                    搜索结果
+                  </button>
+                )}
+                {view === "browse" && selectedFile && (
+                  <button
+                    type="button"
+                    onClick={() => doOpen(selectedFile, false)}
+                    title="在文件管理器中打开"
+                    className="rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                  >
+                    打开
+                  </button>
+                )}
+                {view === "browse" && (
+                  <button
+                    type="button"
+                    onClick={refreshFile}
+                    title="刷新文件（读取外部修改后的最新内容）"
+                    className="rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                  >
+                    刷新
+                  </button>
+                )}
+              </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-4">
-              {selectedFile ? (
-                <FileViewer space={space} root={path} path={selectedFile} />
+              {view === "results" ? (
+                <SearchResults
+                  hits={fileHits}
+                  terms={kwTerms}
+                  loading={searchQ.isLoading || idxQ.isLoading}
+                  error={(searchQ.error as Error)?.message}
+                  noIndex={idxQ.data ? idxQ.data.documents === 0 : false}
+                  degraded={!!searchQ.data?.degraded}
+                  onOpen={(h) => {
+                    setSelectedFile(h.path);
+                    // 把落点带过去：Markdown 跳到那一行，PDF 跳到那一页
+                    setJump((prev) => ({
+                      path: h.path,
+                      line: h.start_line || undefined,
+                      page: h.page || undefined,
+                      terms: h.matched,
+                      seq: (prev?.seq ?? 0) + 1,
+                    }));
+                    setView("browse");
+                  }}
+                />
+              ) : selectedFile ? (
+                <FileViewer
+                  space={space}
+                  root={path}
+                  path={selectedFile}
+                  jump={jump && jump.path === selectedFile ? jump : null}
+                />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">
                   <FileText className="h-8 w-8" />
@@ -1328,6 +1683,7 @@ export default function UserSpacePage() {
                 </div>
               )}
             </div>
+          </div>
           </div>
         </div>
       )}

@@ -717,6 +717,29 @@ button {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* ===== 搜索结果跳转的落点高亮 =====
+   从搜索结果点进文件时，落点要闪一下——否则用户不知道"跳到哪了"，
+   尤其 Markdown 跳到的是段落中间时。 */
+.kp-jump-flash {
+  animation: kp-jump-flash 1.8s ease-out;
+  border-radius: 6px;
+}
+@keyframes kp-jump-flash {
+  0% {
+    background-color: var(--kp-primary-ring);
+    box-shadow: 0 0 0 4px var(--kp-primary-ring);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+/* PDF 的落点：整页描一圈边 */
+.kp-page-hit {
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px var(--kp-primary);
+}
+
 /* ===== 深色主题（可选）：给 <html> 加 class="dark" 即整体切换 =====
    同样只换变量值，组件一行都不用改。 */
 .dark {

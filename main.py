@@ -153,6 +153,12 @@ def make_app():
     from keeper.chat.api import trash_router
 
     app.include_router(trash_router)
+    # 检索：索引管理（模型状态 / 下载 / 建索引 / 清索引）+ 检索
+    # 端点是**同步**的（sqlite3 + numpy 阻塞调用），FastAPI 会丢到线程池，
+    # 不会卡住事件循环——详见 keeper/search/api.py 的说明。
+    from keeper.search.api import router as search_router
+
+    app.include_router(search_router)
     # 可观测：用量聚合查询（/metrics/...），数据来自 llm_calls 事实表
     app.include_router(metrics_router)
     # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/evals/api.py）
@@ -187,6 +193,27 @@ def make_app():
                 for a in list_keepers()
             ],
         }
+
+    # 检索模型预热：索引库里已经有向量时，在后台把 embedding 模型加载好——
+    # 用户第一次搜索就不用等 1～7 秒的模型加载（见 keeper/search/warmup.py）。
+    #
+    # 放在路由挂载**之后**：预热是 daemon 线程，不阻塞 make_app 返回，
+    # 所以桌面壳的 /health 探测不会被拖慢。
+    try:
+        from keeper.search.warmup import warmup_in_background
+
+        warmup_in_background()
+    except Exception as e:  # noqa: BLE001 预热失败不该影响 keeper 起得来
+        logging.getLogger("keeper").warning("检索模型预热启动失败：%s", e)
+
+    # 索引自动同步：定时增量扫描「我的空间」，把用户在外部改掉的文件补进索引
+    # （见 keeper/search/sync.py）。同样是 daemon 线程，不阻塞启动。
+    try:
+        from keeper.search.sync import start_background as start_sync
+
+        start_sync()
+    except Exception as e:  # noqa: BLE001 同步启动失败不该影响 keeper 起得来
+        logging.getLogger("keeper").warning("索引自动同步启动失败：%s", e)
 
     # 生产托管：把构建好的前端（web/dist）作为站点根，单进程同时提供 API + 页面。
     # 放在最后，确保 /agents、/health 等业务路由优先于通配的静态挂载匹配。

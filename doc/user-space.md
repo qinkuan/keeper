@@ -149,6 +149,7 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 | 在文件管理器中定位 | `shell.showItemInFolder` |
 | 系统剪贴板（`Ctrl/Cmd+V` 粘贴导入） | `clipboard` |
 | 前端调用通道 | `preload.js` 暴露的 `window.keeperSpace` |
+| 文件变化监听（改了文件，检索索引秒级跟上） | `fs.watch`（`spaceWatch.js`）→ `POST /search/index {paths}` |
 
 路径安全由 `spaceFs.js::resolveSpacePath` 兜住：所有路径必须在空间根之下。
 

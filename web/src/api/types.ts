@@ -1605,3 +1605,209 @@ export interface TaskReviewResp extends TaskDetailResp {
   question?: string | null;
 }
 
+
+// ---- 检索（search/）----
+//
+// 检索层从独立项目 k-search 迁入，端点前缀 /search。类型与后端 search/api.py
+// 的返回结构一一对应。
+
+/** embedding 模型状态。 */
+export interface SearchModelState {
+  /** 权重文件是否已在本地 */
+  ready: boolean;
+  /** idle | downloading | done | error */
+  status: string;
+  message: string;
+  source: string;
+  model_dir: string;
+  model_file: string;
+  model_repo: string;
+  backend: string;
+  /** 配置值：auto / cpu / gpu */
+  backend_config?: string;
+  /** 实际在用的后端：gpu / cpu（模型还没加载过时为空） */
+  backend_active?: string;
+  /** 从 GPU 回退到 CPU 的原因（没有就空） */
+  backend_note?: string;
+  /** 静态探测：有没有可能用上 GPU */
+  gpu_probe?: { available: boolean; reason: string };
+  /** 模型是否已加载并预热好（启动时后台预热的标志） */
+  warmed?: boolean;
+  /** litert-lm 装了没——决定向量通道能不能用（没装只有关键词检索） */
+  available: boolean;
+}
+
+/** 索引统计。 */
+export interface SearchStats {
+  documents: number;
+  chunks: number;
+  leaves: number;
+  parents: number;
+  keywords: number;
+  db_path: string;
+}
+
+/** 一次索引任务的统计。 */
+export interface SearchIndexStats {
+  indexed: number;
+  skipped: number;
+  empty: number;
+  deleted: number;
+  moved: number;
+}
+
+/** 索引进度（后台跑，前端轮询）。 */
+export interface SearchIndexState {
+  running: boolean;
+  stats: SearchIndexStats | null;
+  error: string;
+  started_at: number;
+  finished_at: number;
+  current: string;
+}
+
+/** 检索参数摘要。 */
+export interface SearchConfig {
+  db_path: string;
+  /** 被索引的目录（默认「我的空间」） */
+  roots: string[];
+  search_mode: string;
+  /** 融合方式与向量权重由服务端定死，不开放给前端调节 */
+  fusion_mode: string;
+  hybrid_alpha: number;
+  default_top_k: number;
+  chunk_min_chars: number;
+  chunk_max_chars: number;
+}
+
+/** 自动同步状态（索引跟着文件自动更新）。 */
+export interface SearchSyncState {
+  /** 后台定时扫描是否已启动 */
+  enabled: boolean;
+  /** 扫描间隔（秒） */
+  interval: number;
+  /** 全量校准间隔（秒） */
+  full_interval: number;
+  /** 当前是否有索引任务在跑 */
+  running: boolean;
+  /** 已完成的扫描轮数 */
+  scans: number;
+  /** 最近一次扫描结束的时刻（unix 秒），0 = 还没扫过 */
+  last_scan_at: number;
+  /** 最近一次全量校准的时刻（unix 秒） */
+  last_full_at: number;
+  /** 最近一次的统计 */
+  last_stats: { indexed?: number; skipped?: number; deleted?: number; moved?: number } | null;
+  /** 最近一次失败原因 */
+  last_error: string;
+  /** 文件监听累计通知进来的路径数 */
+  watched_paths: number;
+}
+
+/** 索引同步配置（可编辑，保存后立即生效）。 */
+export interface SearchSyncConfig {
+  /** 是否启用后台定时扫描 */
+  sync_enabled: boolean;
+  /** 增量扫描间隔（秒） */
+  sync_interval: number;
+  /** 全量校准间隔（秒） */
+  sync_full_interval: number;
+}
+
+/** 首屏一次性拉全的状态。 */
+export interface SearchStatus {
+  model: SearchModelState;
+  stats: SearchStats;
+  index: SearchIndexState;
+  sync: SearchSyncState;
+  config: SearchConfig;
+}
+
+/** 父块（章节级上下文）。 */
+export interface SearchParent {
+  chunk_id: string;
+  parent_id: string | null;
+  title_level: number;
+  titlepath: string;
+  text: string;
+  start_line: number;
+  end_line: number;
+}
+
+/** 兄弟片段（同一文档中相邻的片段）。 */
+export interface SearchSibling {
+  chunk_id: string;
+  titlepath: string;
+  text: string;
+  start_line: number;
+  end_line: number;
+  chunk_index: number;
+  parent_id: string | null;
+}
+
+/** 一条命中。 */
+export interface SearchHit {
+  chunk_id: string;
+  doc_id: number;
+  parent_id: string | null;
+  title_level: number;
+  /** 斜杠形式的标题路径，如 "/项目复盘/问题分析" */
+  titlepath: string;
+  title_path: string[];
+  text: string;
+  content: string;
+  start_line: number;
+  end_line: number;
+  chunk_index: number;
+  /** 定位串：PDF 形如「第 12 页」；Markdown 为 null（用行号） */
+  locator: string | null;
+  /** 源类型：markdown / pdf */
+  source_kind: string | null;
+  /** 命中文件的绝对路径 */
+  path: string;
+  title: string;
+  mtime: number;
+  /** 融合后的总分 */
+  score: number;
+  /** 原始余弦相似度（纯关键词模式下为 null） */
+  vec_score: number | null;
+  /** 原始 BM25（越大越相关） */
+  kw_score: number | null;
+  /** 实际命中的查询词（分词后）——前端用它做关键词高亮 */
+  matched_terms?: string[];
+  /** PDF 的起始页码（1-based）；Markdown 为 null —— 前端用它「跳到那一页」 */
+  page?: number | null;
+  parent?: SearchParent | null;
+  siblings?: SearchSibling[];
+}
+
+/** 检索结果。 */
+export interface SearchQueryResp {
+  results: SearchHit[];
+  mode: string;
+}
+
+/** 已索引的一个文档。 */
+export interface SearchDocument {
+  id: number;
+  file_path: string;
+  path: string;
+  name: string;
+  dir: string;
+  doc_type: string;
+  title: string | null;
+  mtime: number;
+  size: number;
+  content_hash: string;
+  index_status: string;
+  indexed_at: number | null;
+  error: string | null;
+}
+
+/** 已索引文档列表。 */
+export interface SearchDocumentsResp {
+  documents: SearchDocument[];
+  total: number;
+  limit: number;
+  offset: number;
+}

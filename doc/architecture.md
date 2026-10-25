@@ -35,7 +35,7 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 |---|---|---|
 | **知识来源**（「我的空间」） | `zonefilesystem/` + `desktop/spaceFs.js` | [`user-space.md`](user-space.md) |
 | **读 / 改** | 前端 `UserSpacePage` + `components/` | 同上 |
-| **找** | 目录树 + `bash` 插件；**向量检索在建** | [`roadmap.md`](roadmap.md) ② |
+| **找** | 目录树 + `bash` 插件；**向量 / 混合检索**（`search/`） | [`indexing.md`](indexing.md)、[`roadmap.md`](roadmap.md) ② |
 | **交**（交付块） | `viewer/block.py` + `tools/builtin/` | [`artifact-design.md`](artifact-design.md) |
 | **记** | `memory/`；**长期事实库在建** | [`memory.md`](memory.md)、[`roadmap.md`](roadmap.md) ③ |
 
@@ -69,6 +69,7 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 │           llm/      模型工厂与调用                             │
 │           mcp/      MCP 多 server 连接                         │
 │           memory/   记忆存储 / 检索 / 摘要 / 召回工具            │
+│           search/   文档切片 / 索引 / 向量+关键词混合检索        │
 │           peer/ a2a/  对外协作（我→对端 / 对端→我）             │
 ├─────────────────────────────────────────────────────────────┤
 │ 支撑层    store/    数据库与 ORM 模型                          │
@@ -176,6 +177,25 @@ MCP 组件或 bin 组件）。
   ——同一天开的多个会话共享记忆
 - `extractor.py`：异步记忆块摘要（LLM 解耦）
 - `tools.py`：agentic retrieval 工具（`recall` / `read`）
+
+### `search/` —— 检索（切片 / 索引 / 混合检索）
+
+原是独立项目 k-search，2026-10 整体迁入。详见 [`indexing.md`](indexing.md)。
+
+- `ingest/chunk.py`：Markdown 结构化切片（标题树 → 块级元素 → 叶子 chunk → 父子链父块）
+- `ingest/embed.py` + `ingest/model.py`：本地 embedding（LiteRT-LM / `.litertlm`）与模型下载
+- `indexer.py`：增量索引（内容 hash 比对，文件移动不重嵌）
+- `store/db.py`：SQLite 存储（`documents` / `chunks` / FTS5 外部内容表 `chunks_fts`）
+- `rank.py`：关键词打分（自己算 BM25F：文档级 idf + 分字段 tf + 长度归一）
+- `query.py`：向量召回 + 关键词召回 → 融合排序
+- `service.py`：装配层（连接 + 模型 + 索引 + 检索），将来接 agent 工具的入口
+- `warmup.py`：启动预热（索引库里已有向量时后台加载模型，首次查询无感）
+- `sync.py`：索引自动同步（stat 预筛 + 定时增量扫描 + 定期全量校准 + 全局索引互斥）
+- `ingest/pdf.py`：PDF 提取与切片（大纲标题树 + 页级切片；扫描件跳过）
+- `api.py`：`/search` 路由（索引管理 + 检索），前端「搜索」页消费这组接口
+
+数据落在 `~/.keeper/search/`（索引库 `search.db` + 模型权重 `models/`）；
+被索引的目录默认是「我的空间」。
 
 ### `evals/` —— 评测闭环
 
@@ -341,6 +361,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 │   ├── agent/<agent_id>/       agent 级私有产物（插件索引 / 缓存）
 │   └── session/<session_id>/   会话空间（这一轮的工作目录）
 ├── memory/days/<日期>/         记忆：turns.jsonl + FTS5 索引
+├── search/                     检索：索引库 search.db + models/（embedding 权重）
 ├── evals/                      评测产物（基线 / 运行记录）
 ├── prompt-dump/                prompt 落盘（调试，默认关）
 ├── context-store/              跨轮上下文
@@ -420,6 +441,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 | `memory/` | [`memory.md`](memory.md) | 短期记忆、检索、**长期记忆库规划** |
 | `agent/context_store.py` | [`context.md`](context.md) | 外部化、压缩、水位 |
 | `zonefilesystem/` | [`user-space.md`](user-space.md) | 我的空间、文件展示与编辑、**向量跨模态搜索规划** |
+| `search/` | [`indexing.md`](indexing.md) | 文档切片、索引、向量 + 关键词混合检索 |
 | `viewer/` | [`artifact-design.md`](artifact-design.md) | 交付块模型与渲染 |
 | `observability/` | [`observability-design.md`](observability-design.md) | 事实表、指标、定价 |
 | `evals/` | [`evals.md`](evals.md) | 用例集、基线、报告 |

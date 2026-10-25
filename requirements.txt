@@ -49,6 +49,21 @@ dulwich>=1.2
 # FTS5 自带分词器不会做中文分词，需在 Python 侧用 jieba 预分词后再喂 FTS5。
 jieba>=0.42
 
+# ---- 检索层（search/）：本地文档的向量索引与混合检索 ----
+# numpy 只有**向量**路径要（余弦相似度、向量序列化）。关键词检索走 SQLite
+# FTS5 + BM25，不依赖它——所以代码里是延迟导入（search/deps.py），
+# 没装也能用纯关键词检索，只是没有语义召回。
+numpy>=1.24
+# 可选：本地 embedding 运行时（LiteRT-LM Python SDK，进程内加载 .litertlm）。
+# **不装也能用**——search 的关键词检索（mode="keyword"）不依赖它，只有向量召回
+# 需要；装不上时 search 会明确报错并提示改用关键词模式。
+# 之所以留在注释里而不是列进硬依赖：litert-lm 只有**平台相关**的 wheel
+# （win_amd64 / manylinux x86_64+aarch64 / macosx arm64），**Intel Mac 没有**——
+# 在那种机器上 pip install 会直接失败，把整个依赖安装流程（连带 keeper 起不来）
+# 堵死。start_keeper.sh 会按平台自动装（Intel Mac 跳过）；手动装：
+#   pip install litert-lm==0.18.0
+# litert-lm==0.18.0
+
 # ---- Office AI 编辑工具（tools/builtin/office.py：excel_edit / pdf_edit）----
 openpyxl>=3.1          # Excel(.xlsx) 读写
 pypdf>=4.0             # PDF 合并/拆分/旋转/删页/抽文字（纯 Python，无平台二进制）

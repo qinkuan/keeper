@@ -23,10 +23,13 @@ const path = require('path');
 const { fileURLToPath } = require('url');
 const { startSidecar, stopSidecar } = require('./sidecar');
 const spaceFs = require('./spaceFs');
+const { startSpaceWatch } = require('./spaceWatch');
 
 let win = null;
 /** 内核启动的 Promise（单例）：并发调用共享同一次启动，而不是各起一个 */
 let booting = null;
+/** 「我的空间」文件监听句柄（退出时要关） */
+let spaceWatcher = null;
 /**
  * 读系统剪贴板里「被复制的文件 / 文件夹」的绝对路径列表。
  *
@@ -175,11 +178,35 @@ function registerSpaceProtocol() {
   });
 }
 
+/**
+ * 「我的空间」文件监听：文件一变就通知内核重新索引（秒级）。
+ *
+ * 路径不在这儿硬编码——向内核问（GET /search/status 的 config.roots）：
+ * 内核读的是 settings.yaml 的 user_space.path，与 Python 侧索引用的是同一个真源，
+ * 用户改了设置两边一起生效。
+ */
+async function startIndexWatch(sidecarUrl) {
+  try {
+    const res = await fetch(`${sidecarUrl}/search/status`);
+    const data = await res.json();
+    const roots = (data && data.config && data.config.roots) || [];
+    if (!roots.length) {
+      console.log('[desktop] 未配置「我的空间」，不监听文件变化');
+      return;
+    }
+    spaceWatcher = startSpaceWatch({ root: roots[0], url: sidecarUrl });
+  } catch (e) {
+    console.error('[desktop] 启动文件监听失败：', e && e.message);
+  }
+}
+
 async function bootstrap() {
   try {
     const sidecar = await boot();
     registerSpaceProtocol();
     createWindow(sidecar.url);
+    // 文件监听：内核起来后就开始盯「我的空间」，用户改完文件立刻能搜到
+    startIndexWatch(sidecar.url);
   } catch (err) {
     const msg = (err && err.message) || String(err);
     console.error('[desktop] 启动失败：', msg);
@@ -285,6 +312,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    if (spaceWatcher) {
+      spaceWatcher.close();
+      spaceWatcher = null;
+    }
     stopSidecar();
   });
 

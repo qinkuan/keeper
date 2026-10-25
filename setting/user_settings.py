@@ -34,7 +34,7 @@ SETTINGS_FILENAME = "settings.yaml"
 # 允许出现在 settings.yaml 里的段：只有「设置页会改」的东西才准进，
 # 免得这个文件慢慢变成第二个 config.yaml。
 #
-KNOWN_SECTIONS = ("observability", "a2a", "context", "user_space")
+KNOWN_SECTIONS = ("observability", "a2a", "context", "user_space", "search")
 
 # 曾经合法、功能已移除的段：启动时从文件里清掉（见 _drop_deprecated_sections）
 DEPRECATED_SECTIONS = ("auth",)
@@ -237,6 +237,83 @@ def set_user_space_path(path: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 检索索引的自动同步参数（search 段）
+#
+# 放在 settings.yaml 而不是 config.yaml：这两个是「用的时候改」的东西——
+# 语料大了就把扫描间隔调长，语料小就调短，属于产品动作，改完立即生效。
+# 默认值来自 keeper/search/config.py（单一来源：文件里写的初始值 == 不写时生效的值）。
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def get_search_config() -> Dict[str, Any]:
+    """取检索索引的同步配置（``search`` 段）。
+
+    缺省 / 类型不对时回落到代码默认（``keeper/search/config.py``），
+    所以这个函数永远返回三个可用的键。
+    """
+    from ..search import config as sc
+
+    v = load_raw().get("search")
+    v = v if isinstance(v, dict) else {}
+    return {
+        "sync_enabled": _as_bool(v.get("sync_enabled"), sc.SYNC_ENABLED),
+        "sync_interval": _as_float(v.get("sync_interval"), sc.SYNC_INTERVAL),
+        "sync_full_interval": _as_float(
+            v.get("sync_full_interval"), sc.SYNC_FULL_INTERVAL
+        ),
+    }
+
+
+def set_search_config(values: Dict[str, Any]) -> Dict[str, Any]:
+    """写入检索索引的同步配置（只动 ``search`` 这一段，其余段原样保留）。"""
+    from ..search import config as sc
+
+    data = load_raw()
+    sec = data.get("search")
+    if not isinstance(sec, dict):
+        sec = {}
+    if "sync_enabled" in values:
+        sec["sync_enabled"] = bool(values["sync_enabled"])
+    if "sync_interval" in values:
+        sec["sync_interval"] = _as_float(values["sync_interval"], sc.SYNC_INTERVAL)
+    if "sync_full_interval" in values:
+        sec["sync_full_interval"] = _as_float(
+            values["sync_full_interval"], sc.SYNC_FULL_INTERVAL
+        )
+    data["search"] = sec
+    data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
+    save_raw(data)
+    invalidate_caches()
+    return get_search_config()
+
+
+def _as_float(value: Any, fallback: float) -> float:
+    """把配置值转成 float；转不了就用默认（用户手改 YAML 写错值也不该炸）。"""
+    try:
+        if value is None:
+            return float(fallback)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _as_bool(value: Any, fallback: bool) -> bool:
+    """把配置值转成 bool；认不出来就用默认。"""
+    if value is None:
+        return bool(fallback)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return bool(fallback)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # 默认值回填：settings.yaml 里**应当有每一项的显式配置**，初始值 = 代码默认
 #
 # 为什么要有这一步
@@ -282,12 +359,22 @@ def default_settings() -> Dict[str, Any]:
 
     from ..config import A2ASection, ContextSection, PromptDumpSection
 
+    # 检索索引的同步参数：默认值取自 keeper/search/config.py（单一来源，
+    # 免得这里写一份、那里写一份，改了一处忘了另一处）。
+    from ..search import config as search_config
+
     return {
         "context": asdict(ContextSection()),
         "a2a": asdict(A2ASection()),
         "observability": {"prompt_dump": asdict(PromptDumpSection())},
         # 我的空间：单一用户空间，路径存这里；空串=尚未配置（前端会提示去选）。
         "user_space": {"path": ""},
+        # 检索索引自动同步：增量扫描间隔 / 全量校准间隔 / 开关。
+        "search": {
+            "sync_enabled": search_config.SYNC_ENABLED,
+            "sync_interval": search_config.SYNC_INTERVAL,
+            "sync_full_interval": search_config.SYNC_FULL_INTERVAL,
+        },
         # 核心 agent：默认全空 → 运行期回落到"第一个已装载的 agent"，
         # 所以这个文件生成了、用户没改，行为与完全不配一致。
     }

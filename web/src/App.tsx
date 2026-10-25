@@ -6,6 +6,7 @@ import {
   Database,
   MessageSquare,
   PanelLeft,
+  Search,
   Settings,
   Trash2,
   Users,
@@ -36,6 +37,7 @@ import UserSpacePage from "./pages/UserSpacePage";
 import ObservabilityPage from "./pages/ObservabilityPage";
 import ModelManage from "./pages/ModelManage";
 import RecycleBinPage from "./pages/RecycleBinPage";
+import SearchPage from "./pages/SearchPage";
 import { apiHealth, apiListAgents } from "./api/client";
 import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
@@ -447,6 +449,12 @@ export default function App() {
                   onSelect={() => setRoute({ page: "observability" })}
                 />
                 <MenuLink
+                  icon={Search}
+                  label="搜索"
+                  active={route.page === "search"}
+                  onSelect={() => setRoute({ page: "search" })}
+                />
+                <MenuLink
                   icon={Trash2}
                   label="回收站"
                   active={route.page === "trash"}
@@ -571,6 +579,11 @@ export default function App() {
           {route.page === "observability" && (
             <div className="h-full animate-fade-up">
               <ObservabilityPage />
+            </div>
+          )}
+          {route.page === "search" && (
+            <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
+              <SearchPage />
             </div>
           )}
           {route.page === "trash" && (

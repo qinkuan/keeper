@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import type {
 
   AgentConfig,
@@ -114,6 +115,17 @@ import type {
   EvalSuite,
 
   EvalRunStatus,
+  SearchStatus,
+  SearchStats,
+  SearchModelState,
+  SearchIndexState,
+  SearchIndexStats,
+  SearchSyncConfig,
+  SearchConfig,
+  SearchQueryResp,
+  SearchHit,
+  SearchDocument,
+  SearchDocumentsResp,
 
   PluginLibraryResp,
 
@@ -136,7 +148,16 @@ import type {
 
 // 生产（dist 被 keeper 进程同源托管）下前端与后端同域，直接请求 /agents、/manage 等。
 
-const BASE = (import.meta as any).env?.DEV ? "/api" : "";
+//
+// 这里用精确的 `import.meta.env.DEV`（vite 的 define 会把它替换成常量），
+// 而不是 `(import.meta as any).env?.DEV`：后者每次都要做一次运行时属性查找，
+// 而且类型退化成 any。
+//
+// **坑**：vite 判断「是不是生产」看的是 `process.env.NODE_ENV`——**不是** mode。
+// 所以环境里若带着 `NODE_ENV=production`，连 `vite dev` 都会注入 DEV=false，
+// BASE 变空串，所有 API 都打到前端路由（返回 index.html），页面表现为「服务离线」。
+// 本地起 dev server 时用 `NODE_ENV=development npx vite`。
+const BASE = import.meta.env.DEV ? "/api" : "";
 
 
 function qs(params?: Record<string, string | undefined>) {
@@ -2779,3 +2800,110 @@ export function apiReviewTask(
 }
 
 
+
+
+// ---- 检索（/search）----
+//
+// 检索层从独立项目 k-search 迁入。端点是**同步**的（后端阻塞调用跑在它自己的
+// 线程池里），所以前端不用特殊处理，但**建索引是后台任务**——它立即返回，
+// 真正的进度要轮询 /search/status 看。
+
+/** 首屏一次性拉全：模型状态 + 索引统计 + 索引进度 + 参数摘要。 */
+export function apiSearchStatus() {
+  return apiGet<SearchStatus>("/search/status");
+}
+
+/** 索引统计。 */
+export function apiSearchStats() {
+  return apiGet<SearchStats>("/search/stats");
+}
+
+/** embedding 模型状态（是否就绪 / 下载中 / 失败）。 */
+export function apiSearchModelStatus() {
+  return apiGet<SearchModelState>("/search/model/status");
+}
+
+/** 后台下载 embedding 模型（几百 MB，不能等它下完）。 */
+export function apiSearchModelDownload(source: "auto" | "hf" | "modelscope" = "auto") {
+  return apiPost<{ status: string; source: string }>("/search/model/download", {
+    source,
+  });
+}
+
+/**
+ * 建索引（**后台跑**）。
+ *
+ * `roots` 省略 = 索引「我的空间」；`force` = 忽略内容哈希强制重嵌；
+ * `paths` = 只索引这几个文件（桌面端文件监听用）。
+ *
+ * 返回的 `status` 可能是 `already_running`——自动同步正在跑时不必重复触发。
+ */
+export function apiSearchIndex(body?: { roots?: string[]; force?: boolean; paths?: string[] }) {
+  return apiPost<{ status: string }>("/search/index", body ?? {});
+}
+
+/**
+ * 读索引同步配置（当前生效值）。
+ */
+export function apiSearchConfig() {
+  return apiGet<SearchSyncConfig>("/search/config");
+}
+
+/**
+ * 保存索引同步配置，**立即生效**（内核会立刻调整后台扫描，不用重启）。
+ */
+export function apiSearchSaveConfig(body: {
+  sync_enabled?: boolean;
+  sync_interval?: number;
+  sync_full_interval?: number;
+}) {
+  return apiPost<SearchSyncConfig>("/search/config", body);
+}
+
+/**
+ * 检索。mode: hybrid（默认）/ vector / keyword。
+ *
+ * 融合方式与向量权重**不开放给前端**：由服务端 config 定死（见 search/config.py），
+ * 这类调参项对普通用户没有意义，却很容易被调坏（分数不再是 0~1 的置信度，
+ * 门槛就失效了）。需要调试请直接改服务端配置。
+ */
+export function apiSearchQuery(body: {
+  query: string;
+  top_k?: number;
+  mode?: "hybrid" | "vector" | "keyword";
+  neighbor_span?: number;
+  path_prefix?: string;
+  title?: string;
+}) {
+  return apiPost<SearchQueryResp>("/search/query", body);
+}
+
+/** 已索引文档列表。 */
+export function apiSearchDocuments(limit = 200) {
+  return apiGet<SearchDocumentsResp>("/search/documents", { limit: String(limit) });
+}
+
+/** 删除某文档及其全部片段（只删索引，不动磁盘上的文件）。 */
+export function apiSearchDeleteDocument(docId: number) {
+  return apiDelete<{ status: string; doc_id: number }>(`/search/documents/${docId}`);
+}
+
+/** 只删该文档的片段，保留文件记录（标记 pending，待重新索引）。 */
+export function apiSearchDeleteDocumentChunks(docId: number) {
+  return apiDelete<{ status: string; doc_id: number }>(
+    `/search/documents/${docId}/chunks`
+  );
+}
+
+/**
+ * 清空索引。
+ *
+ * `dropDocuments=false` 时只清片段、保留文件清单（之后重新索引即可恢复，
+ * 不用重新扫描目录）。
+ */
+export function apiSearchClearIndex(dropDocuments = true) {
+  return apiPost<{ status: string; drop_documents: boolean; chunks: number; keywords: number }>(
+    "/search/cache/clear",
+    { drop_documents: dropDocuments }
+  );
+}

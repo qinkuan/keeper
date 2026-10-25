@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 // Vite 以 URL 方式引入 worker（?url 由 vite/client 类型支持），避免运行时找不到 worker。
 import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -14,20 +14,29 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorker;
  * 2. **虚拟滚动**：只渲染视口附近（rootMargin ±1.5 屏）的页；滚远的页卸掉 canvas（留
  *    同高占位，滚动条位置不乱），滚回去再按需重绘。否则滚得越多常驻 canvas 越多，
  *    大 PDF 能把内存吃到 GB 级——这正是「已加载的页面能否卸载」要解决的问题。
- * 3. **滚动续页**：不一次性建全部占位（那也是几百次 getPage），首批 50 页，滚到底
- *    附近再放一批；MAX_PAGES 封顶，超出引导下载 / 用系统查看器。
+ * 3. **占位高度用基准值，不逐页量**：同一份 PDF 的页高基本一致（幻灯片 PDF 完全一致），
+ *    所以只量第 1 页，其余页的占位直接用这个高度建出来——**不用等 getPage**。
+ *    这样「跳到第 500 页」也是瞬时的：先建占位（瞬间），再后台补齐精确高度。
+ * 4. **滚动续页**：占位先建一批，滚到底附近再放一批；占位很便宜（一个 div），
+ *    但 DOM 节点不能无限多，MAX_PAGES 封顶，超出引导下载 / 用系统查看器。
  */
 
-const PAGE_BATCH = 50; // 每批创建占位的页数（首批同量）
-const MAX_PAGES = 200; // 预览硬上限：占位与缓存随页数线性涨，见模块注释
+const PAGE_BATCH = 200; // 每批创建占位的页数（首批同量）
+const MAX_PAGES = 2000; // 预览硬上限：占位 DOM 节点数封顶
 const ROOT_MARGIN = "150% 0px"; // 视口上下各 1.5 屏内保留渲染，之外卸载
 
 export default function PdfViewer({
   name,
   loadBytes,
+  jumpToPage,
 }: {
   name: string;
   loadBytes: () => Promise<ArrayBuffer>;
+  /**
+   * 跳到第几页（1-based）。搜索结果点进来时用。
+   * seq 递增——同一页连点两次也要重新跳，靠它触发 effect。
+   */
+  jumpToPage?: { page?: number; seq?: number } | null;
 }) {
   const [pages, setPages] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -40,6 +49,11 @@ export default function PdfViewer({
   const [builtCount, setBuiltCount] = useState(0);
   // 页码 → 占位 wrap；页码 → PDFPageProxy（proxy 不持有位图，缓存可减小反复 getPage 开销）。
   const wrapsRef = useRef<Map<number, HTMLDivElement>>(new Map());
+  // 各页的**精确**内容高度（px）。没量过的页用 baseHeight 兜底。
+  const heightsRef = useRef<Map<number, number>>(new Map());
+  // 基准页高：量第 1 页得到，同一份 PDF 的页高基本一致，其余页直接用它建占位——
+  // 这样建 2000 页占位也只是一瞬间，不必串行 getPage 2000 次。
+  const baseHeightRef = useRef<number>(0);
   const pageCacheRef = useRef<Map<number, pdfjsLib.PDFPageProxy>>(new Map());
   // 「文档+宽度」签名：变了才整体重建占位，否则只往后追加。
   const sigRef = useRef("");
@@ -77,6 +91,8 @@ export default function PdfViewer({
   useEffect(() => {
     wrapsRef.current.clear();
     pageCacheRef.current.clear();
+    heightsRef.current.clear();
+    baseHeightRef.current = 0;
     sigRef.current = "";
     setBuiltCount(pages ? Math.min(pages, PAGE_BATCH) : 0);
   }, [pages]);
@@ -98,6 +114,41 @@ export default function PdfViewer({
   // 组件卸载：收掉观察器
   useEffect(() => () => ioRef.current?.disconnect(), []);
 
+  /** 跳到指定页：滚到那一页 + 闪一下。占位还没建好时什么也不做（稍后重试）。 */
+  const tryJump = useCallback(() => {
+    const p = jumpToPage?.page;
+    if (!p || p < 1) return;
+    const host = hostRef.current;
+    const wrap = wrapsRef.current.get(p);
+    if (!host || !wrap) return;
+    // wrap 的 offsetTop 相对 host（host 是 relative）→ 直接就是可滚动距离
+    const top = Math.max(0, wrap.offsetTop - host.clientHeight / 3);
+    // 精确高度补齐后会再跳一次；位置没变就别再闪一遍高亮
+    const moved = Math.abs(top - host.scrollTop) > 4;
+    host.scrollTop = top;
+    if (!moved) return;
+    wrap.classList.remove("kp-page-hit");
+    // 强制重排再重新加类：连点两次也能重新触发。
+    // 不用 requestAnimationFrame——窗口不在前台时 rAF 不执行，高亮就永远加不上。
+    void wrap.offsetWidth;
+    wrap.classList.add("kp-page-hit");
+    window.setTimeout(() => wrap.classList.remove("kp-page-hit"), 1800);
+  }, [jumpToPage?.page, jumpToPage?.seq]);
+
+  // 目标页在预览上限之外（MAX_PAGES）时只能作罢
+  const jumpPage = jumpToPage?.page ?? 0;
+  const jumpSeq = jumpToPage?.seq ?? 0;
+
+  // 目标页还没建占位：先把占位建到那一页（否则无处可滚）。
+  // 占位现在很便宜（一个 div，不用等 getPage），所以允许直接建到目标页——
+  // 200 页、2000 页都一样是瞬时的。
+  useEffect(() => {
+    if (!jumpPage || !pages) return;
+    if (jumpPage > builtCount) {
+      setBuiltCount(Math.min(jumpPage, Math.min(pages, MAX_PAGES)));
+    }
+  }, [jumpPage, pages, builtCount]);
+
   // 建占位 wrap（增量）；签名变=整体重建。渲染交给下面的 IntersectionObserver。
   useEffect(() => {
     if (loading || !pages) return;
@@ -107,6 +158,23 @@ export default function PdfViewer({
     if (!host || !doc) return;
 
     const avail = Math.max(120, (hostW || host.clientWidth) - 24);
+
+    /** 第 p 页的内容高度（px）：已知精确值用精确值，否则用基准页高。 */
+    const heightOf = (p: number) =>
+      heightsRef.current.get(p) ?? (baseHeightRef.current || 0);
+
+    /**
+     * 把某页占位的高度改成真实高度，并**补偿滚动位置**。
+     * 改的是视口上方的页时，下面整体移位了，视口也要跟着移同样的距离，
+     * 否则用户会看到内容"跳一下"。
+     */
+    const applyHeight = (wrap: HTMLDivElement, realH: number) => {
+      const oldH = parseFloat(wrap.style.height || "0") || 0;
+      if (Math.abs(oldH - realH) < 0.5) return;
+      const wasAbove = wrap.offsetTop < host.scrollTop;
+      wrap.style.height = realH + "px";
+      if (wasAbove) host.scrollTop += realH - oldH;
+    };
 
     // 把一页画进它的占位 wrap（已渲染 / 渲染中 / 期间被卸载 都直接跳过）。
     const renderIfNeeded = async (wrap: HTMLDivElement, p: number) => {
@@ -134,6 +202,8 @@ export default function PdfViewer({
         }).promise;
         // 渲染期间被卸载 / 重排：丢掉结果，不往旧位置塞
         if (!wrap.isConnected || wrap.querySelector("canvas")) return;
+        // 真实高度可能和占位（基准）高度不同 → 修正占位 + 补偿滚动位置
+        applyHeight(wrap, Math.floor((target * base.height) / base.width));
         wrap.appendChild(canvas);
       } catch {
         // 渲染被打断（卸载 / 切文件），属正常
@@ -181,28 +251,72 @@ export default function PdfViewer({
     };
 
     const end = Math.min(builtCount, pages, MAX_PAGES);
-    const ensure = async () => {
-      for (let p = 1; p <= end; p++) {
+    /**
+     * 给第 p 页建占位 wrap。**不等 getPage**：高度先用基准页高，
+     * 真实高度后台补齐时再修正。这样建 2000 页占位也只是一瞬间。
+     */
+    const createWrap = (p: number) => {
+      if (wrapsRef.current.has(p)) return;
+      const wrap = document.createElement("div");
+      wrap.className = "mb-3 flex justify-center";
+      wrap.style.height = heightOf(p) + "px";
+      wrap.dataset.page = String(p);
+      wrapsRef.current.set(p, wrap);
+      host.appendChild(wrap);
+      io?.observe(wrap);
+    };
+    /** 后台补齐各页的精确高度（并发），并修正已建好的占位。 */
+    const refineHeights = async (from: number, to: number) => {
+      const BATCH = 32;
+      for (let s = from; s <= to; s += BATCH) {
         if (dead) return;
-        if (wrapsRef.current.has(p)) continue;
-        const page = await getPageCached(doc, p);
-        const base = page.getViewport({ scale: 1 });
-        const target = Math.min(avail, base.width);
-        const wrap = document.createElement("div");
-        wrap.className = "mb-3 flex justify-center";
-        wrap.style.height =
-          Math.floor((target * base.height) / base.width) + "px";
-        wrap.dataset.page = String(p);
-        wrapsRef.current.set(p, wrap);
-        host.appendChild(wrap);
-        io?.observe(wrap);
+        const ps: number[] = [];
+        for (let p = s; p <= Math.min(s + BATCH - 1, to); p++) ps.push(p);
+        await Promise.all(
+          ps.map(async (p) => {
+            if (heightsRef.current.has(p)) return;
+            const pg = await getPageCached(doc, p);
+            const base = pg.getViewport({ scale: 1 });
+            const realH = Math.floor(
+              (Math.min(avail, base.width) * base.height) / base.width
+            );
+            heightsRef.current.set(p, realH);
+            const w = wrapsRef.current.get(p);
+            if (w) applyHeight(w, realH);
+          })
+        );
       }
+    };
+    const ensure = async () => {
+      // 基准页高：只量第 1 页（同一份 PDF 页高基本一致），
+      // 其余页直接用它建占位 → 「跳到第 500 页」也是瞬时的。
+      if (!baseHeightRef.current) {
+        const pg = await getPageCached(doc, 1);
+        if (dead) return;
+        const base = pg.getViewport({ scale: 1 });
+        const h = Math.floor(
+          (Math.min(avail, base.width) * base.height) / base.width
+        );
+        baseHeightRef.current = h;
+        heightsRef.current.set(1, h);
+      }
+      // 建到 builtCount 为止（builtCount 已经保证 >= 目标页，见上面的 effect）
+      const limit = end;
+      for (let p = 1; p <= limit; p++) {
+        if (dead) return;
+        createWrap(p);
+      }
+      // 占位齐了（瞬间）→ 跳
+      tryJump();
+      // 后台补齐精确高度（不阻塞跳转）；补齐后落点可能偏一点，再精确跳一次
+      await refineHeights(1, limit);
+      tryJump();
     };
     void ensure();
     return () => {
       dead = true;
     };
-  }, [pages, loading, hostW, builtCount]);
+  }, [pages, loading, hostW, builtCount, tryJump, jumpSeq, jumpPage]);
 
   // 滚到底部附近：再建一批占位（新占位进入缓冲范围会被 IO 自动渲染）。
   useEffect(() => {
@@ -221,6 +335,8 @@ export default function PdfViewer({
   }, [loading, pages]);
 
   const capped = builtCount >= MAX_PAGES && pages > MAX_PAGES;
+  // 目标页在预览上限之外：跳不过去，得说清楚，而不是让人干瞪眼
+  const jumpOutOfRange = jumpPage > MAX_PAGES;
 
   if (loading)
     return (
@@ -240,10 +356,15 @@ export default function PdfViewer({
             ? `（仅预览前 ${MAX_PAGES} 页，更多请下载或用系统查看器）`
             : `（已加载前 ${builtCount} 页，滚动到底部继续）`
           : "（已全部加载）"}
+        {jumpOutOfRange && (
+          <span className="ml-1.5 text-amber-600 dark:text-amber-400">
+            （命中在第 {jumpPage} 页，超出前 {MAX_PAGES} 页的预览范围，无法跳转）
+          </span>
+        )}
       </div>
       <div
         ref={hostRef}
-        className="min-h-0 flex-1 overflow-auto bg-black/[0.04] p-3"
+        className="relative min-h-0 flex-1 overflow-auto bg-black/[0.04] p-3"
       />
     </div>
   );

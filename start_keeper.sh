@@ -85,6 +85,34 @@ else
   echo "[keeper] 依赖未变化，跳过安装"
 fi
 
+# ---- 可选依赖：litert-lm（本地 embedding 运行时）----
+#
+# 为什么单独装、而不是写进 requirements.txt：
+#   litert-lm 只有**平台相关**的 wheel（win_amd64 / manylinux x86_64+aarch64 /
+#   macosx arm64），**Intel Mac 没有**。写进硬依赖会在不支持的平台上直接
+#   `pip install` 失败，把整个依赖安装流程（连带 keeper 起不来）堵死。
+#
+# 装不上 / 平台不支持都没关系：检索会自动降级成**纯关键词**（SQLite FTS5 +
+# BM25），向量召回不可用而已——不该因为一个可选组件起不来整个 keeper。
+#
+# 独立 stamp：litert-lm 不在 requirements.txt 里，它的安装状态得单独记。
+LITERT_STAMP="$VENV/.litert-lm.stamp"
+LITERT_VERSION="0.18.0"
+if python -c "import litert_lm" >/dev/null 2>&1; then
+    :
+elif [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "x86_64" ]; then
+    echo "[keeper] Intel Mac 没有 litert-lm wheel，跳过（检索走纯关键词模式）"
+elif [ ! -f "$LITERT_STAMP" ] || [ "$(cat "$LITERT_STAMP" 2>/dev/null || echo x)" != "$LITERT_VERSION" ]; then
+    echo "[keeper] 安装 litert-lm==${LITERT_VERSION}（向量检索运行时）..."
+    if pip install -q "litert-lm==$LITERT_VERSION"; then
+        echo "$LITERT_VERSION" > "$LITERT_STAMP"
+    else
+        echo "[keeper] litert-lm 安装失败，向量检索不可用（关键词检索正常）"
+    fi
+else
+    echo "[keeper] litert-lm 之前装失败过，跳过重试（pip install litert-lm==${LITERT_VERSION} 可手动重试）"
+fi
+
 # 确保插件里的可执行文件有 +x（从 zip / 别的机器拷过来常常会丢）
 if [ -d "$PLUGIN_ROOT" ]; then
   find "$PLUGIN_ROOT" -maxdepth 3 -type f -path '*/mcp/*' ! -perm -u+x -exec chmod +x {} + 2>/dev/null || true
