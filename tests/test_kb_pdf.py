@@ -313,8 +313,8 @@ def part_tools() -> None:
 
 
 def part_search_tool() -> None:
-    """kb.search_pdf 的契约（走真实索引）。"""
-    print("\n[5] 工具契约：kb.search_pdf（走真实索引）")
+    """kb.search 的契约（走真实索引）：Markdown 给行，PDF 给图。"""
+    print("\n[5] 工具契约：kb.search（走真实索引，Markdown 给行 / PDF 给图）")
     tmp = Path(tempfile.mkdtemp())
     pdf = make_text_pdf(tmp / "cache.pdf", [
         _long_page("Chapter one talks about cache penetration"),
@@ -323,6 +323,17 @@ def part_search_tool() -> None:
         _long_page("Chapter four talks about the bloom filter"),
         _long_page("Chapter five talks about the mutex rebuild"),
     ])
+    md = tmp / "notes.md"
+    md.write_text(
+        "# 缓存笔记\n\n## 布隆过滤器\n\n"
+        + _long_page("The bloom filter rejects missing keys before they reach the database")
+        + "\n\n## 互斥锁重建\n\n"
+        + _long_page("Only one thread rebuilds the value while the others wait")
+        + "\n\n## 雪花算法\n\n"
+        + _long_page("The snowflake identifier assigns a unique cache key per node")
+        + "\n",
+        encoding="utf-8",
+    )
 
     up = _FakeUploader()
     _patch_uploader(up)
@@ -346,7 +357,7 @@ def part_search_tool() -> None:
 
         svc = SearchService()
         try:
-            svc.index_paths([str(pdf)], force=True)
+            svc.index_paths([str(pdf), str(md)], force=True)
             hits = svc.search("cache avalanche", top_k=5, mode="keyword")
         finally:
             svc.close()
@@ -357,28 +368,83 @@ def part_search_tool() -> None:
             str([(h.get("locator"), h.get("page_start")) for h in hits]),
         )
 
-        res = asyncio.run(kbtools._search_pdf({"keyword": "cache avalanche"}))
-        check("search_pdf 返回 3 个图片块", len(res.blocks) == 3, str(res.blocks))
-        check("说明里有命中页", "命中第" in res.text, res.text)
+        # ---- 命中 PDF → 给那 3 页的图 ----
+        res = asyncio.run(kbtools._search({"keyword": "cache avalanche"}))
+        check("PDF 命中 → 3 个图片块", len(res.blocks) == 3, str(res.blocks))
+        check("说明里标了类型与命中页",
+              "PDF｜" in res.text and "命中第" in res.text, res.text[:300])
         check("块都是 file 形状", all(b.get("type") == "file" for b in res.blocks))
+        check("给了下一步该调什么工具", "kb.read_pdf" in res.text, res.text[-300:])
 
-        # 「cache」出现在好几页 → 能召回多块，这时 block=2 才有意义
-        res2 = asyncio.run(kbtools._search_pdf({"keyword": "cache", "block": 2}))
-        check("block=2 也能取到 3 页", len(res2.blocks) == 3, str(res2.blocks))
-        check("block=2 的说明里标了第 2 块", "第 2/" in res2.text, res2.text)
+        # ---- 命中 Markdown → 给附近的行（纯文本，无图）----
+        # 「snowflake」只在 markdown 里出现 → 这一条命中应当只有文本
+        res_md = asyncio.run(kbtools._search({"keyword": "snowflake"}))
+        check("Markdown 命中 → 不给图片块", not res_md.blocks, str(res_md.blocks))
+        check("Markdown 命中 → 给了行号",
+              "Markdown｜" in res_md.text and "行" in res_md.text, res_md.text[:300])
+        check("Markdown 命中 → 给出了正文",
+              "snowflake" in res_md.text.lower(), res_md.text[:300])
+        check("给了下一步该调什么工具", "kb.read_markdown" in res_md.text, res_md.text[-300:])
 
-        res99 = asyncio.run(kbtools._search_pdf({"keyword": "cache", "block": 99}))
-        check("block 越界有人话报错", not res99.blocks and "不存在" in res99.text, res99.text)
+        # ---- 两种形态出现在同一次结果里 ----
+        res_mix = asyncio.run(kbtools._search({"keyword": "cache"}))
+        check(
+            "同一次结果里两种形态都有",
+            ("Markdown｜" in res_mix.text) and ("PDF｜" in res_mix.text),
+            res_mix.text[:400],
+        )
 
-        res_none = asyncio.run(kbtools._search_pdf({"keyword": "quantum chromodynamics"}))
+        res_none = asyncio.run(kbtools._search({"keyword": "quantum chromodynamics"}))
         check(
             "召回不到时明确说召回不到",
             not res_none.blocks and "没有召回" in res_none.text,
             res_none.text,
         )
     finally:
-        embedmod.get_embedder = old_get
+        embedmod.get_embedger = old_get
         scfgmod.DB_PATH = old_db
+
+
+def part_read_markdown() -> None:
+    """kb.read_markdown 的契约。"""
+    print("\n[6] 工具契约：kb.read_markdown")
+    tmp = Path(tempfile.mkdtemp())
+    md = tmp / "notes.md"
+    md.write_text("\n".join(f"第 {i} 行内容" for i in range(1, 51)) + "\n", encoding="utf-8")
+
+    import asyncio
+
+    import keeper.setting as settingmod
+
+    old_root = settingmod.get_user_space_path
+    settingmod.get_user_space_path = lambda: str(tmp)
+    try:
+        res = asyncio.run(kbtools._read_markdown({"path": "notes.md", "start_line": 1}))
+        check("读到了内容", "第 1 行内容" in res.text, res.text[:120])
+        check("给了行号范围", "第 1-50 行" in res.text, res.text[:120])
+        check("纯文本（无图片块）", not res.blocks)
+
+        res2 = asyncio.run(
+            kbtools._read_markdown({"path": "notes.md", "start_line": 10, "lines": 5})
+        )
+        check("按行数读", "第 10-14 行" in res2.text, res2.text[:120])
+
+        res_oob = asyncio.run(
+            kbtools._read_markdown({"path": "notes.md", "start_line": 999})
+        )
+        check("行号越界被拒", "超出" in res_oob.text, res_oob.text)
+
+        res_miss = asyncio.run(
+            kbtools._read_markdown({"path": "nope.md", "start_line": 1})
+        )
+        check("文件不存在被拒", "不存在" in res_miss.text, res_miss.text)
+
+        res_esc = asyncio.run(
+            kbtools._read_markdown({"path": "../../etc/hosts", "start_line": 1})
+        )
+        check("路径越界被拦", "我的空间" in res_esc.text, res_esc.text)
+    finally:
+        settingmod.get_user_space_path = old_root
 
 
 def part_pipeline() -> None:
@@ -461,6 +527,7 @@ def main() -> int:
     part_render()
     part_tools()
     part_search_tool()
+    part_read_markdown()
     part_pipeline()
     part_store()
     print(f"\n结果：{PASS} 通过，{FAIL} 失败")
