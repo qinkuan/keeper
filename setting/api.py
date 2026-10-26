@@ -320,6 +320,18 @@ async def get_settings() -> Dict[str, Any]:
     return _dump()
 
 
+@router.get("/debug", response_model=Dict[str, Any])
+async def get_debug() -> Dict[str, Any]:
+    """读取调试模式开关（settings.yaml 顶层 ``debug``，默认 False）。
+
+    前端据此决定要不要显示调试用的功能与诊断信息；普通用户保持关闭，
+    界面以最简洁形式呈现。手改 settings.yaml 后立即生效（文件指纹 / 缓存失效）。
+    """
+    from .user_settings import is_debug
+
+    return {"debug": is_debug()}
+
+
 @router.put("", response_model=Dict[str, Any])
 async def update_settings(body: SettingsIn) -> Dict[str, Any]:
     """保存设置（立即生效，无需重启）。

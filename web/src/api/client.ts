@@ -648,14 +648,15 @@ export function apiReloadSettings() {
 
 }
 
+/** 读取调试模式开关（settings.yaml 顶层 debug，默认 false） */
+export function apiGetDebug() {
+  return apiGet<{ debug: boolean }>("/manage/settings/debug");
+}
+
 /** 手动解除熔断：不传 peer 表示全部重置 */
-
 export function apiResetBreaker(peer?: string) {
-
   return apiPost<SettingsResp>("/manage/settings/a2a/breaker/reset", {
-
     peer: peer ?? null,
-
   });
 
 }

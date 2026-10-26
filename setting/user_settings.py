@@ -192,8 +192,8 @@ def save_sections(
         data["a2a"] = a2a
     if context is not None:
         data["context"] = context
-    # 只保留已知段，避免写进杂项后没人认识
-    data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
+    # 只保留已知段 + 顶层标量（如 debug），避免写进杂项后没人认识
+    data = _keep_on_save(data)
     save_raw(data)
     # 写完了就立即生效：清掉各处的配置缓存，别让用户等缓存过期
     invalidate_caches()
@@ -204,6 +204,30 @@ def section(name: str) -> Dict[str, Any]:
     """取某一段的原始 dict（没设过就是空 dict）。"""
     v = load_raw().get(name)
     return v if isinstance(v, dict) else {}
+
+
+def is_debug() -> bool:
+    """是否处于**调试模式**。
+
+    读 settings.yaml 顶层 ``debug`` 键（缺省 / 值不对时回落 ``False``）。
+    调试模式开启后，前端会显示更多调试用的功能与诊断信息；关闭时这些界面以
+    最简洁形式呈现，普通用户无需开启。手动改文件或设置页保存后都立即生效
+    （依赖文件指纹 / 缓存失效）。
+    """
+    return _as_bool(load_raw().get("debug"), False)
+
+
+def _keep_on_save(data: Dict[str, Any]) -> Dict[str, Any]:
+    """保存时**只保留已知段 + 顶层标量**。
+
+    已知段是 dict（observability / a2a / context / user_space / search），一律保留；
+    顶层标量（如 ``debug: true``）也保留——否则用户在 settings.yaml 里手配的
+    ``debug`` 会在「设置页改了别的」被整体回写时一笔抹掉。未知的子 dict 段
+    （历史遗留 / 拼错的）仍然丢弃，不让文件慢慢变成第二个 config.yaml。
+    """
+    return {
+        k: v for k, v in data.items() if k in KNOWN_SECTIONS or not isinstance(v, dict)
+    }
 
 
 def get_user_space_path() -> str:
@@ -230,8 +254,8 @@ def set_user_space_path(path: str) -> None:
         us = {}
     us["path"] = path.strip()
     data["user_space"] = us
-    # 只保留已知段（含新增的 user_space），避免写入杂项
-    data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
+    # 只保留已知段（含新增的 user_space）+ 顶层标量（如 debug），避免写入杂项
+    data = _keep_on_save(data)
     save_raw(data)
     invalidate_caches()
 
@@ -281,7 +305,7 @@ def set_search_config(values: Dict[str, Any]) -> Dict[str, Any]:
             values["sync_full_interval"], sc.SYNC_FULL_INTERVAL
         )
     data["search"] = sec
-    data = {k: v for k, v in data.items() if k in KNOWN_SECTIONS}
+    data = _keep_on_save(data)
     save_raw(data)
     invalidate_caches()
     return get_search_config()
@@ -346,6 +370,10 @@ _DEFAULT_HEADER = """# 用户设置（本机的 ~/.keeper/settings.yaml）：设
 #
 # 下面每一项都是**显式写出的**，初始值等于代码默认（keeper/config.py 的 dataclass
 # 字段）；启动时代码里新增的键会自动补到这里，值同样取默认。
+#
+# 调试模式（可选，单独一行、不在上面的段里）：
+#   debug: true      # 开启后前端显示更多调试用的功能与诊断信息；默认 false（不开）。
+#                    普通用户无需开启；手改本文件后，下次读取会被自动发现并生效。
 """
 
 

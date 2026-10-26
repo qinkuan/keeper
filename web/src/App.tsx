@@ -6,6 +6,7 @@ import {
   Database,
   MessageSquare,
   PanelLeft,
+  Puzzle,
   Search,
   Settings,
   Trash2,
@@ -42,20 +43,22 @@ import { apiHealth, apiListAgents } from "./api/client";
 import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
 import { Stat } from "./components/ui/Stat";
+import { useDebug } from "./hooks/useDebug";
 
 /**
- * 侧栏常驻导航。三项，都是"去干活"而不是"去配置"：
+ * 侧栏常驻导航。两项，都是"去干活"而不是"去配置"：
  *
- * - **对话**：点一下开一段新对话并进去。它是侧栏里的**主动作**，但形式上和
- *   「智能体」一样是导航项 —— 因为两者回答的是同一个问题："我要干什么"，
- *   而不是一个是动作、一个是页面。点击时会先建好会话（见 startChat）。
- * - **智能体**：装下「我的智能体 / 我的插件」两个 tab。
+ * - **对话**：点一下开一段新对话并进去。它是侧栏里的**主动作**，点击时会先建好
+ *   会话（见 startChat）。
+ * - **我的空间**：高频入口，提升为顶部主导航项。
  *
  * 会话记录本身（增删改查）搬进了对话页的「会话管理 / 任务管理」面板：那是会话
  * 真正待着的地方，把它们拆在两个界面只会让人找不到重命名和删除。
  *
- * 低频配置（设置 / 可观测 / 回收站 / 模型管理）收在底部 Keeper 菜单；
- * 「我的空间」是高频入口，提升为顶部主导航项。
+ * 「智能体」与「我的插件」两个 tab 已从原先的「智能体」页拆出来，作为 Keeper 主下拉区里
+ * 同级的「智能体」「插件」两项（分别落到「我的智能体」「我的插件」tab）。侧栏「智能体」
+ * 导航项因此移除，避免与这两个入口重复。低频配置（设置 / 可观测 / 回收站 / 模型管理）
+ * 也收在底部 Keeper 菜单。
  */
 /**
  * macOS 桌面壳：窗口**没有系统标题栏**（main.js 设了 titleBarStyle: 'hidden'），
@@ -126,9 +129,39 @@ function HResizer({ onResize }: { onResize: (dx: number) => void }) {
 
 const NAV_MAIN = [
   { key: "chat", label: "对话", icon: MessageSquare },
-  { key: "agents", label: "智能体", icon: Bot },
   { key: "user-spaces", label: "我的空间", icon: Users },
 ] as const;
+
+/**
+ * 侧栏宽度。
+ *
+ * 展开态 160px：侧栏只有两个导航项（「对话」「我的空间」），宽裕的留白没用，
+ * 全给内容区更实在。160px 放得下 14px 的中文标签（4 个字 ≈ 56px + 图标 16 +
+ * 间距 8 + 内边距 20 ≈ 100px），底部 Keeper 块也还放得下。
+ *
+ * 走 style 而不是 Tailwind 类：Tailwind 的 JIT 只认源码里出现过的**静态**类名，
+ * 模板拼出来的 `w-[${n}px]` 会被整个漏掉（宽度直接变 0）。
+ */
+const SIDEBAR_WIDTH = 160;
+/** 折叠态是图标窄轨：红绿灯那组按钮约 52px 宽，侧栏比它窄按钮会探出去。 */
+const SIDEBAR_WIDTH_COLLAPSED = 52;
+
+/**
+ * 只在**调试模式**下才出现的设置段。
+ *
+ * 「上下文」（长任务下上下文怎么治理）、「协作」（调对端时的超时与熔断）、
+ * 「子 agent」（每个子 agent 独立的模型与插件）、「输入 @ 快捷项」——
+ * 这四段都低频、偏排障或面向高级用户。普通用户的设置里只留「核心 agent」
+ * （默认落点 + 人设）那一段，不该被一堆用不上的开关淹没。
+ *
+ * 「调试」段本身不在这个表里：它是"调试模式的开关页"，逻辑写在渲染处。
+ */
+const DEBUG_ONLY_SECTIONS: SettingsSection[] = [
+  "context",
+  "a2a",
+  "delegatee",
+  "mention",
+];
 
 type Route = {
   page: string;
@@ -154,9 +187,12 @@ export default function App() {
   };
   const [route, setRoute] = useState<Route>(() => {
     const agentId = new URLSearchParams(window.location.search).get("agent");
-    // 落地页 =「智能体」：概览页已撤下，而"开始对话"需要先有已装载的 agent，
-    // 所以默认停在能给出这个前提的那一页
-    return agentId ? { page: "chat", agentId } : { page: "agents" };
+    // 落地页 =「对话」（侧栏的主动作），**不是** Keeper 菜单里的「智能体」。
+    // 「智能体」是"去装载 / 配置"的地方，不该是启动即落地的界面。
+    // agentId 先空着：核心 agent 的 id 要等后端列表回来才知道，拿到后自动补上
+    // （见下面的 effect）。对话页会自己恢复上次看的那条会话（ChatPage 的
+    // remembered()），所以落地即上次现场，不需要先建一条空会话。
+    return { page: "chat", agentId: agentId ?? undefined };
   });
 
   /* 设置弹窗当前展示哪一段；null = 未打开。设置从侧栏底部齿轮进入，
@@ -164,6 +200,10 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(
     null
   );
+
+  /* 调试模式：开启后设置子菜单里才出现「调试」段（prompt 落盘等排查功能），
+     普通用户保持最简洁、看不到这些。 */
+  const debug = useDebug();
 
   /* 「我的空间」右侧常驻对话面板的宽度（可拖拽调节，落 localStorage）。 */
   const [chatWidth, setChatWidth] = useState<number>(() => {
@@ -185,6 +225,22 @@ export default function App() {
    一个 agent 都没装配成功。共用 ["agents"] 缓存，不会多打一次请求。 */
   const agentsQ = useQuery({ queryKey: ["agents"], queryFn: apiListAgents });
   const coreAgentId = agentsQ.data?.core_agent_id ?? null;
+
+  /* 核心 agent 到位后，把它补进「对话」路由。
+   *
+   * 核心 agent 的 id 由后端从配置解析（config.yaml 的 core_agent.id，默认 "core"），
+   * 所以拿到列表时它基本总在；**一个 agent 都没装载**时才会没有 —— 那时唯一
+   * 能做的就是先去「智能体」页装载一个，所以回退到那一页（而不是白屏）。
+   *
+   * 只在 route 还停在"chat 且没有 agentId"时动手：用户手动切去别的页面、
+   * 或从 URL 带 agent 进来，都不该被这个 effect 改掉。 */
+  useEffect(() => {
+    if (agentsQ.isLoading) return;
+    setRoute((r) => {
+      if (r.page !== "chat" || r.agentId) return r;
+      return coreAgentId ? { ...r, agentId: coreAgentId } : { page: "agents" };
+    });
+  }, [agentsQ.isLoading, coreAgentId]);
 
   /* 「对话」：**直接进对话页**，不预建会话。
 
@@ -253,10 +309,13 @@ export default function App() {
                · hover：整块填满深蓝 + 文字/图标转白；
                · 选中：白底。
              宽度 = 侧栏宽 - 左右各 10px 内边距，即与菜单栏同宽（只留一点边距），
-             所以色块是"贴着"侧栏边缘的一整条，而不是缩在中间的小药丸。 */
-          "group relative mb-0.5 flex items-center gap-2.5 rounded-[8px] py-[6px] px-2.5 text-[14px]",
+             所以色块是"贴着"侧栏边缘的一整条，而不是缩在中间的小药丸。
+             字号 15px（比正文大一号）：导航是"去哪里"的主入口，标签要一眼认得出；
+             侧栏变窄后 gap 收到 8px，4 个中文字（60px）+ 图标仍有余量。 */
+          "group relative mb-0.5 flex items-center gap-2 rounded-[8px] py-[6px] px-2.5 text-[14px]",
           "transition-colors duration-150 ease-apple",
-          collapsed ? "w-[34px] justify-center px-0" : "w-full",
+          /* 折叠态：侧栏 52px - 左右内边距各 10px = 32px，正好是图标方块。 */
+          collapsed ? "w-[32px] justify-center px-0" : "w-full",
           disabled && "cursor-not-allowed opacity-45",
           /* 选中态是**淡蓝底**而不是白块：侧栏底色是 App Store 的冷灰（#F2F2F7），
              白块会和底色糊在一起，"当前在哪"就看不清了。 */
@@ -307,7 +366,8 @@ export default function App() {
       onSelect={onSelect}
       className={cn(
         "flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100",
-        active ? "bg-brand/12" : "data-[highlighted]:bg-brand/12"
+        "data-[highlighted]:bg-brand/12 data-[highlighted]:ring-1 data-[highlighted]:ring-brand/40",
+        active ? "bg-brand/12 ring-1 ring-brand/40" : ""
       )}
     >
       <Icon
@@ -356,18 +416,17 @@ export default function App() {
           "transition-[width] duration-200 ease-apple",
           /* box-border：项目关了 preflight，box-sizing 默认 content-box，
              边框/内边距会额外加在宽度外面。 */
-          "box-border",
-          /* 收起态就是 52px（图标窄轨）。红绿灯那组按钮宽约 52px，
-             侧栏比它窄时按钮会探出一点、压到顶条上 —— 顶条是空的（只有拖拽区），
-             所以压不到任何东西。不必为了"把红绿灯包进侧栏"而把侧栏撑宽。 */
-          collapsed ? "w-[52px]" : "w-[168px]"
+          "box-border"
         )}
         style={{
-          /* 侧栏从顶条下面开始（不再自己留红绿灯的位置）：顶条已经横跨整窗，
-             红绿灯浮在顶条上。侧栏与内容区的分界就是内容面板的圆角那条线，
-             所以这里不画右边框 —— 画了会是直线，圆角接不上。 */
+          /* 宽度走 style（不是 Tailwind 类）：Tailwind 的 JIT 只认源码里出现过的
+             静态类名，模板拼出来的 w-[${n}px] 会被漏掉，宽度会变成 0。
+             收起态 52px = 图标窄轨：红绿灯那组按钮宽约 52px，侧栏比它窄时按钮
+             会探出一点、压到顶条上 —— 顶条是空的（只有拖拽区），压不到东西。 */
+          width: collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH,
         }}
       >
+
         {/* 1. **开始对话**
 
             这里原来有一块"产品名 + Keeper 字样 + 在线状态 + 折叠按钮"。它已整块
@@ -424,7 +483,9 @@ export default function App() {
                     "flex items-center gap-2.5 rounded-[8px] py-[6px] pl-2.5 pr-2",
                     "text-left transition-colors duration-150 ease-apple",
                     "hover:bg-brand/12 dark:hover:bg-brand/20",
-                    collapsed ? "w-[34px] justify-center px-0" : "min-w-0 flex-1"
+                    /* 去掉全局 :focus-visible 的蓝色聚焦环（点击空白关闭后按钮会获得焦点） */
+                    "focus-visible:outline-none focus-visible:shadow-none",
+                    collapsed ? "w-[32px] justify-center px-0" : "min-w-0 flex-1"
                   )}
                 >
                   <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] bg-brand-gradient text-[12px] font-semibold text-white shadow-[0_2px_6px_-1px_rgba(66,133,244,0.5),inset_0_1px_0_rgba(255,255,255,0.28)]">
@@ -432,17 +493,29 @@ export default function App() {
                   </span>
                   {!collapsed && (
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-semibold leading-tight tracking-[-0.01em] text-ink-strong">
-                        Keeper
+                      <span className="flex items-center gap-1.5">
+                        <span className="block truncate text-[13px] font-semibold leading-tight tracking-[-0.01em] text-ink-strong">
+                          Keeper
+                        </span>
                       </span>
-                      <span className="mt-[1px] flex items-center gap-1.5 text-[10.5px] leading-tight text-ink-faint">
+                      <span className="mt-[1px] flex items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10.5px] leading-tight text-ink-faint">
                         <span
                           className={cn(
                             "h-1.5 w-1.5 shrink-0 rounded-full",
                             online ? "bg-emerald-500" : "bg-red-500"
                           )}
                         />
-                        {online ? "服务正常" : "服务离线"}
+                        {/* 「正常 / 离线」而不是「服务正常 / 服务离线」：侧栏收窄后，
+                            这一行还要给 debug 徽标让位，四个字会被挤成竖排。
+                            圆点已经说明了这是服务状态。shrink-0：文字不许被压扁。 */}
+                        <span className="shrink-0">{online ? "正常" : "离线"}</span>
+                        {/* debug 徽标放第二行：侧栏收窄后，它挤在第一行
+                            会把「Keeper」截成「K...」。 */}
+                        {debug && (
+                          <span className="shrink-0 rounded bg-amber-500/20 px-[3px] py-px text-[8px] font-bold uppercase leading-none tracking-wide text-amber-500">
+                            debug
+                          </span>
+                        )}
                       </span>
                     </span>
                   )}
@@ -453,7 +526,7 @@ export default function App() {
                 side="top"
                 align="start"
                 sideOffset={6}
-                className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop"
+                className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop outline-none"
               >
                 {/* 设置：带子菜单。子菜单由 Radix 在**悬停**时自动展开——
                     这比"点开子菜单"少一次点击，也符合桌面应用的习惯。
@@ -461,7 +534,7 @@ export default function App() {
                     不再归在「设置」子菜单里。 */}
                 <DropdownMenu.Sub>
                   <DropdownMenuSubTrigger
-                    className="flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+                    className="flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12 data-[highlighted]:ring-1 data-[highlighted]:ring-brand/40"
                   >
                     <Settings className="h-[15px] w-[15px] shrink-0 text-ink-faint" />
                     <span className="flex-1 font-medium text-ink-strong">
@@ -471,13 +544,20 @@ export default function App() {
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent
                     sideOffset={4}
-                    className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop"
+                    className="z-[1700] min-w-[236px] overflow-hidden rounded-[10px] border border-line-soft bg-panel p-1 shadow-pop outline-none"
                   >
-                    {SETTINGS_SECTIONS.map((s) => (
+                    {SETTINGS_SECTIONS.filter((s) => {
+                      /* 「调试」段是调试模式的开关页：只在调试模式下出现。 */
+                      if (s.key === "debug") return debug;
+                      /* 上下文 / 协作 / 子 agent / 输入 @ 快捷项：低频、偏排障，
+                         普通用户的设置里不该出现（见 DEBUG_ONLY_SECTIONS）。 */
+                      if (DEBUG_ONLY_SECTIONS.includes(s.key)) return debug;
+                      return true;
+                    }).map((s) => (
                       <DropdownMenuItem
                         key={s.key}
                         onSelect={() => setSettingsSection(s.key)}
-                        className="flex cursor-pointer flex-col gap-0.5 rounded-[7px] px-2.5 py-2 outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+                        className="flex cursor-pointer flex-col gap-0.5 rounded-[7px] px-2.5 py-2 outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12 data-[highlighted]:ring-1 data-[highlighted]:ring-brand/40"
                       >
                         <span className="text-[13px] font-medium text-ink-strong">
                           {s.label}
@@ -490,12 +570,33 @@ export default function App() {
                   </DropdownMenuSubContent>
                 </DropdownMenu.Sub>
 
+                {/* 「智能体」与「可观测」只在调试模式下出现：前者是装载 / 配置 agent
+                    的地方，后者是排查用的诊断面板 —— 对普通用户都是噪音。
+                    注意：「智能体」页本身并没有被藏（路由直达仍然能打开），
+                    藏的只是菜单里的入口。 */}
+                {debug && (
+                  <MenuLink
+                    icon={Bot}
+                    label="智能体"
+                    active={route.page === "agents" && agentTab === "mine"}
+                    onSelect={() => setRoute({ page: "agents", agentTab: "mine" })}
+                  />
+                )}
                 <MenuLink
-                  icon={Activity}
-                  label="可观测"
-                  active={route.page === "observability"}
-                  onSelect={() => setRoute({ page: "observability" })}
+                  icon={Puzzle}
+                  label="插件"
+                  active={route.page === "agents" && agentTab === "plugins"}
+                  onSelect={() => setRoute({ page: "agents", agentTab: "plugins" })}
                 />
+
+                {debug && (
+                  <MenuLink
+                    icon={Activity}
+                    label="可观测"
+                    active={route.page === "observability"}
+                    onSelect={() => setRoute({ page: "observability" })}
+                  />
+                )}
                 <MenuLink
                   icon={Search}
                   label="搜索"
@@ -659,6 +760,14 @@ export default function App() {
           )}
           {inChat && (
             <ChatPage agentId={route.agentId!} />
+          )}
+          {/* 「对话」页但核心 agent 还没到位（列表还在飞）：给个占位，别白屏。
+              一个 agent 都没装载时上面的 effect 会把路由切到「智能体」页，
+              那时这里不会渲染。 */}
+          {route.page === "chat" && !route.agentId && (
+            <div className="flex h-full items-center justify-center px-6 text-center text-[13px] leading-6 text-ink-muted">
+              {agentsQ.isLoading ? "正在连接智能体…" : "正在准备工作区…"}
+            </div>
           )}
         </main>
       </div>

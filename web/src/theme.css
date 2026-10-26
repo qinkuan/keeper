@@ -410,6 +410,16 @@ button {
   border-radius: 6px;
 }
 
+/* Radix 弹层容器（下拉菜单等）不吃上面的全局 focus 环：环画在整个菜单外圈，
+   看起来就像给菜单加了个"蓝边框"。焦点指示交给条目自身的高亮
+   （data-highlighted 底色 + 边框），容器聚焦时保持它自己的浮起阴影
+   （shadow-pop = --kp-shadow-lg），不变成扁平块。!important 确保压过
+   工具类层与全局 :focus-visible 规则。 */
+[role="menu"]:focus-visible {
+  outline: none !important;
+  box-shadow: var(--kp-shadow-lg) !important;
+}
+
 /* ===== 玻璃材质 ===== */
 /* 顶栏、浮层用：饱和度补偿 + 大半径模糊，macOS 材质的关键是
    backdrop 的 saturate，否则隔着它看底色会发灰发闷。 */
