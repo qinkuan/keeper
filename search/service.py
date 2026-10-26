@@ -100,6 +100,7 @@ class SearchService:
         force: bool = False,
         doc_type: Optional[str] = None,
         prescreen: bool = True,
+        on_progress=None,
     ) -> Dict[str, int]:
         """索引目录（默认「我的空间」），返回统计。
 
@@ -129,6 +130,7 @@ class SearchService:
             force=force,
             doc_type=doc_type,
             prescreen=prescreen,
+            on_progress=on_progress,
         )
 
     def index_paths(
@@ -136,6 +138,7 @@ class SearchService:
         paths: List[str],
         force: bool = False,
         doc_type: Optional[str] = None,
+        on_progress=None,
     ) -> Dict[str, int]:
         """索引**指定的一批文件**（桌面端文件监听用），返回统计。
 
@@ -156,6 +159,7 @@ class SearchService:
             [Path(p).expanduser() for p in (paths or [])],
             force=force,
             doc_type=doc_type,
+            on_progress=on_progress,
         )
 
     # ---------------------------------------------------------------- 检索

@@ -1663,7 +1663,18 @@ export interface SearchIndexState {
   error: string;
   started_at: number;
   finished_at: number;
-  current: string;
+  /** 本轮参与的文件总数 */
+  total: number;
+  /** 已处理 / 正在处理的文件序号（1-based，收尾 = total） */
+  current: number;
+  /** 正在处理的文件路径 */
+  current_path: string;
+  /** 正在处理的文件名（current_path 的 basename） */
+  current_name: string;
+  /** 阶段：pending / scanning / indexing / done */
+  stage: string;
+  /** 完成百分比（0~100） */
+  pct: number;
 }
 
 /** 检索参数摘要。 */

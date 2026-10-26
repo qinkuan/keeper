@@ -43,6 +43,16 @@ if (Test-Path $AppDir) {
             Where-Object { $_.DirectoryName -notlike "*Resources*" } | Select-Object -First 1
 }
 
+# 内核端口（后面几项要用）
+$Port = 18731
+
+# 内置的 python3.exe：内核 exe 的**同目录副本**，靠文件名切解释器模式
+# （见 packaging/launcher.py）。后面几步都要用它跑脚本。
+$PyExe = Join-Path (Split-Path $KernelExe) "python3.exe"
+if ((Test-Path $KernelExe) -and -not (Test-Path $PyExe)) {
+  Copy-Item $KernelExe $PyExe -Force
+}
+
 Write-Host "kernel: $KernelExe"
 Write-Host "app   : $(if ($AppExe) { $AppExe.FullName } else { '(未找到)' })"
 
@@ -55,7 +65,7 @@ $env:USERPROFILE = $TmpHome
 
 Step "1. 冻结内核能自己起来（/health）" {
   if (-not (Test-Path $KernelExe)) { throw "内核不存在：$KernelExe" }
-  $port = 18731
+  $port = $Port
   $log = Join-Path $TmpHome "kernel.out"
   $proc = Start-Process -FilePath $KernelExe `
       -ArgumentList @("--config", (Join-Path $TmpHome ".keeper\config.yaml"), "$port") `
@@ -139,6 +149,61 @@ Step "6. 打包好的桌面 app 能起来并拉起内核" {
   $kernel = Get-Process -Name "keeper-kernel" -ErrorAction SilentlyContinue
   if (-not $kernel) { throw "app 起来了但没拉起内核（看 $outFile）" }
   Write-Host "内核进程：$($kernel.Id -join ',')"
+}
+
+# ── 检索能力（关键词路）：SQLite FTS5 + jieba + 检索端点 ───────────────
+Step "7. SQLite FTS5 可用（关键词检索的地基）" {
+  if (-not (Test-Path $PyExe)) { throw "没有内置 python3.exe：$PyExe" }
+  $script = Join-Path $TmpHome "fts5_test.py"
+  Set-Content -Path $script -Encoding utf8 -Value @'
+import sqlite3
+c = sqlite3.connect(":memory:")
+c.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+print("FTS5-OK")
+'@
+  $out = & $PyExe $script 2>&1 | Out-String
+  if ($out -notmatch "FTS5-OK") { throw "FTS5 不可用（Windows 的 Python 没编 FTS5？）：$out" }
+  Write-Host $out.Trim()
+}
+
+Step "8. jieba 分词可用（中文检索的前提）" {
+  if (-not (Test-Path $PyExe)) { throw "没有内置 python3.exe：$PyExe" }
+  $script = Join-Path $TmpHome "jieba_test.py"
+  Set-Content -Path $script -Encoding utf8 -Value @'
+import jieba
+print("JIEBA-OK", "/".join(jieba.cut("向量检索测试")))
+'@
+  $out = & $PyExe $script 2>&1 | Out-String
+  if ($out -notmatch "JIEBA-OK") { throw "jieba 不可用（词典没打进包？）：$out" }
+  Write-Host $out.Trim()
+}
+
+Step "9. 检索端点 /search/query 可用（关键词模式，不需要模型）" {
+  $body = @{ query = "向量检索"; top_k = 5; mode = "keyword" } | ConvertTo-Json
+  $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/search/query" -Method POST `
+      -Body $body -ContentType "application/json" -UseBasicParsing -TimeoutSec 15
+  if ($r.StatusCode -ne 200) { throw "检索端点返回 $($r.StatusCode)：$($r.Content)" }
+  Write-Host "检索端点正常：$($r.Content)"
+}
+
+Step "10. litert 原生库可加载（向量检索运行时；没装就跳过）" {
+  if (-not (Test-Path $PyExe)) { throw "没有内置 python3.exe：$PyExe" }
+  $script = Join-Path $TmpHome "litert_test.py"
+  Set-Content -Path $script -Encoding utf8 -Value @'
+try:
+    import litert_lm._ffi as ffi
+except ImportError:
+    print("LITERT-SKIP")
+else:
+    print("LITERT-OK", ffi._get_lib())
+'@
+  $out = & $PyExe $script 2>&1 | Out-String
+  if ($out -match "LITERT-SKIP") {
+    Write-Host "SKIP: 没装 litert-lm（这个平台没有 wheel）——只有关键词检索可用"
+    return
+  }
+  if ($out -notmatch "LITERT-OK") { throw "litert 原生库加载失败：$out" }
+  Write-Host $out.Trim()
 }
 
 # 收尾

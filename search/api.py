@@ -78,6 +78,13 @@ _index_state: Dict[str, Any] = {
     "error": "",        # 最近一次失败的原因
     "started_at": 0.0,
     "finished_at": 0.0,
+    # 进度（建索引过程中实时刷新，给前端「第 N 个 / 共 M 个」用）
+    "total": 0,         # 本轮参与的文件总数
+    "current": 0,       # 已处理 / 正在处理的文件序号（1-based，收尾 = total）
+    "current_path": "", # 正在处理的文件路径
+    "current_name": "", # 正在处理的文件名（current_path 的 basename）
+    "stage": "",        # scanning / indexing / done / pending
+    "pct": 0.0,         # 完成百分比（0~100）
 }
 
 #: 保护 _index_state 的读改写（前端在轮询它，后台任务在写它）。
@@ -232,21 +239,36 @@ def _index_status() -> Dict[str, Any]:
 def _run_index(roots: Optional[List[str]], force: bool, doc_type: Optional[str]) -> None:
     """后台建索引。**绝不抛到请求线程**——异常只记进状态里。"""
     from . import sync
+    from pathlib import Path
+
+    def on_progress(done: int, total: int, path: str, stage: str) -> None:
+        _set_index_state(
+            total=total,
+            current=done,
+            current_path=path,
+            current_name=Path(path).name if path else "",
+            stage=stage,
+            pct=(done / total * 100.0) if total else 0.0,
+        )
 
     svc = _service()
     try:
         _set_index_state(running=True, error="", started_at=time.time(),
-                         finished_at=0.0, stats=None)
+                         finished_at=0.0, stats=None,
+                         total=0, current=0, current_path="", current_name="",
+                         stage="pending", pct=0.0)
         # 走 sync 的全局锁：定时扫描、手动建索引、文件监听回调三选一，
         # 拿不到锁就跳过这一轮（不排队——迟到的旧索引没有价值）。
         stats = sync.try_run_index(
-            lambda: svc.index(roots=roots, force=force, doc_type=doc_type)
+            lambda: svc.index(roots=roots, force=force, doc_type=doc_type,
+                              on_progress=on_progress)
         )
         if stats is None:
             _set_index_state(running=False, finished_at=time.time(),
                              stats=None, error="已有索引任务在跑，本次跳过")
         else:
-            _set_index_state(running=False, stats=stats, finished_at=time.time())
+            _set_index_state(running=False, stats=stats, finished_at=time.time(),
+                             stage="done")
     except Exception as e:  # noqa: BLE001
         logger.exception("建索引失败")
         _set_index_state(running=False, error=str(e), finished_at=time.time())
@@ -258,20 +280,35 @@ def _run_index_paths(paths: List[str], force: bool,
                       doc_type: Optional[str]) -> None:
     """后台索引指定的一批文件（桌面端文件监听回调）。"""
     from . import sync
+    from pathlib import Path
+
+    def on_progress(done: int, total: int, path: str, stage: str) -> None:
+        _set_index_state(
+            total=total,
+            current=done,
+            current_path=path,
+            current_name=Path(path).name if path else "",
+            stage=stage,
+            pct=(done / total * 100.0) if total else 0.0,
+        )
 
     svc = _service()
     try:
         _set_index_state(running=True, error="", started_at=time.time(),
-                         finished_at=0.0, stats=None)
+                         finished_at=0.0, stats=None,
+                         total=0, current=0, current_path="", current_name="",
+                         stage="pending", pct=0.0)
         stats = sync.try_run_index(
-            lambda: svc.index_paths(paths=paths, force=force, doc_type=doc_type)
+            lambda: svc.index_paths(paths=paths, force=force, doc_type=doc_type,
+                                    on_progress=on_progress)
         )
         sync.note_watched(len(paths))
         if stats is None:
             _set_index_state(running=False, finished_at=time.time(),
                              stats=None, error="已有索引任务在跑，本次跳过")
         else:
-            _set_index_state(running=False, stats=stats, finished_at=time.time())
+            _set_index_state(running=False, stats=stats, finished_at=time.time(),
+                             stage="done")
     except Exception as e:  # noqa: BLE001
         logger.exception("按路径建索引失败")
         _set_index_state(running=False, error=str(e), finished_at=time.time())

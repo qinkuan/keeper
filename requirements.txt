@@ -58,10 +58,14 @@ numpy>=1.24
 # **不装也能用**——search 的关键词检索（mode="keyword"）不依赖它，只有向量召回
 # 需要；装不上时 search 会明确报错并提示改用关键词模式。
 # 之所以留在注释里而不是列进硬依赖：litert-lm 只有**平台相关**的 wheel
-# （win_amd64 / manylinux x86_64+aarch64 / macosx arm64），**Intel Mac 没有**——
-# 在那种机器上 pip install 会直接失败，把整个依赖安装流程（连带 keeper 起不来）
-# 堵死。start_keeper.sh 会按平台自动装（Intel Mac 跳过）；手动装：
-#   pip install litert-lm==0.18.0
+# （macosx arm64 / win_amd64 / manylinux x86_64+aarch64），**Intel Mac 没有**
+# ——在那种机器上 pip install 会直接失败，把整个依赖安装流程（连带 keeper 起不来）
+# 堵死。
+# 打包时由 packaging/install_optional_deps.py 按平台**尽力安装**（装不上就跳过，
+# 只少了语义检索）；PyInstaller 侧在 packaging/keeper-kernel.spec 里收集它的原生库
+# （mac 的 liblitert-lm.dylib / Windows 的 litert-lm.dll）——少了那个库，向量检索
+# 会直接报 "Could not find liblitert-lm.dylib"。
+# 手动装： pip install litert-lm==0.18.0
 # litert-lm==0.18.0
 
 # ---- Office AI 编辑工具（tools/builtin/office.py：excel_edit / pdf_edit）----

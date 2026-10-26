@@ -286,6 +286,12 @@ _env_backend = os.getenv("KEEPER_SEARCH_BACKEND", "").strip()
 if _env_backend:
     EMBED_BACKEND = _env_backend
 
+#: 模型下载源（HF 镜像 / 官方 HF）。想走官方源就设
+#: ``KEEPER_SEARCH_HF_ENDPOINT=https://huggingface.co``。
+_env_hf_endpoint = os.getenv("KEEPER_SEARCH_HF_ENDPOINT", "").strip()
+if _env_hf_endpoint:
+    HF_ENDPOINT = _env_hf_endpoint
+
 _env_sync_enabled = os.getenv("KEEPER_SEARCH_SYNC_ENABLED", "").strip()
 if _env_sync_enabled:
     SYNC_ENABLED = _env_sync_enabled.lower() not in ("0", "false", "no", "off")

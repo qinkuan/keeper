@@ -1,9 +1,23 @@
-"""模型下载与就绪检测：从 HuggingFace（镜像）下载 embeddinggemma-2-740m.litertlm。
+"""模型下载与就绪检测：把 embeddinggemma-2-740m.litertlm 拉到本地。
 
 下载在后台线程进行，状态通过模块级 _state 暴露，供 /model/status 轮询。
+
+为什么不用 huggingface_hub / modelscope
+---------------------------------------
+这两个包都**不在 keeper 的依赖清单里**（各自会带来一大串传递依赖），而模型
+下载本质就是「按 URL 拉一个大文件」—— httpx 已经在依赖里，自己下更可控：
+
+- 少两个重量级依赖，打包产物更小；
+- 能报下载进度（huggingface_hub 的进度条在后台线程里不好透出来）；
+- 镜像源可配（``KEEPER_SEARCH_HF_ENDPOINT``），国内默认走 hf-mirror。
+
+下载源：
+
+1. HuggingFace 镜像（默认 ``https://hf-mirror.com``）
+2. 魔搭 ModelScope（备源，主源失败时回退）
 """
-import os
 import threading
+import time
 from pathlib import Path
 
 from .. import config
@@ -35,31 +49,49 @@ def _set_state(status: str, message: str = "", source: str = "") -> None:
         _state["source"] = source
 
 
-def _download_hf(model_dir: Path) -> None:
-    from huggingface_hub import snapshot_download
-    if config.HF_ENDPOINT:
-        os.environ.setdefault("HF_ENDPOINT", config.HF_ENDPOINT)
-    snapshot_download(
-        repo_id=config.MODEL_REPO,
-        allow_patterns=[config.MODEL_FILE],
-        local_dir=str(model_dir),
-        local_dir_use_symlinks=False,
-    )
-
-
-def _download_modelscope(model_dir: Path) -> None:
-    if not config.MODELSCOPE_ID:
-        raise ValueError("未配置 MODELSCOPE_ID（litert 模型仅有 HuggingFace 源）")
-    from modelscope import snapshot_download as ms_download
-    try:
-        ms_download(
-            model_id=config.MODELSCOPE_ID,
-            local_dir=str(model_dir),
-            allow_patterns=[config.MODEL_FILE],
+def _model_url(source: str) -> str:
+    """模型文件的直链（source: hf | modelscope）。"""
+    if source == "modelscope":
+        # 魔搭的 resolve 形式：/models/<id>/resolve/master/<文件>
+        return (
+            f"https://www.modelscope.cn/models/{config.MODELSCOPE_ID}"
+            f"/resolve/master/{config.MODEL_FILE}"
         )
-    except TypeError:
-        # 旧版 modelscope 不支持 allow_patterns 参数，回退为全量拉取（保证可用）
-        ms_download(model_id=config.MODELSCOPE_ID, local_dir=str(model_dir))
+    endpoint = (config.HF_ENDPOINT or "https://huggingface.co").rstrip("/")
+    # HF 的 resolve 会 302 到 CDN（hf-mirror 也一样），httpx 跟着重定向即可
+    return f"{endpoint}/{config.MODEL_REPO}/resolve/main/{config.MODEL_FILE}"
+
+
+def _download_http(model_dir: Path, source: str) -> None:
+    """用 httpx 直连下载模型文件（带进度上报 + 原子落盘）。"""
+    import httpx
+
+    url = _model_url(source)
+    target = model_dir / config.MODEL_FILE
+    tmp = target.with_name(target.name + ".part")
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
+
+    with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("content-length") or 0)
+        done = 0
+        last_report = 0.0
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                f.write(chunk)
+                done += len(chunk)
+                now = time.time()
+                if now - last_report >= 1.0:
+                    last_report = now
+                    if total:
+                        pct = f"{done * 100 // total}%"
+                        size = f"{done // (1 << 20)}MB / {total // (1 << 20)}MB"
+                    else:
+                        pct, size = "", f"{done // (1 << 20)}MB"
+                    _set_state("downloading", f"下载中 {pct}（{size}）", source)
+
+    # 原子替换：下到一半断线不会留下半个模型文件冒充「已就绪」
+    tmp.replace(target)
 
 
 def download_model(source: str = "auto") -> None:
@@ -76,15 +108,15 @@ def download_model(source: str = "auto") -> None:
         if source in ("auto", "hf"):
             try:
                 _set_state("downloading", "从 HuggingFace 镜像下载中…", "hf")
-                _download_hf(model_dir)
+                _download_http(model_dir, "hf")
             except Exception as e:  # 主源失败，回退备源
                 if source == "hf":
                     raise
                 _set_state("downloading", f"HF 镜像失败，回退魔搭：{e}", "modelscope")
-                _download_modelscope(model_dir)
+                _download_http(model_dir, "modelscope")
         elif source == "modelscope":
             _set_state("downloading", "从魔搭下载中…", "modelscope")
-            _download_modelscope(model_dir)
+            _download_http(model_dir, "modelscope")
 
         if is_model_ready(model_dir):
             _set_state("done", "模型已就绪", source)

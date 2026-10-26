@@ -70,6 +70,10 @@ else
     "$PY" -m pip install -q "pyinstaller>=6.6"
   fi
 
+  # 可选运行时：litert-lm（本地向量检索的 embedding 引擎）。
+  # 它的 wheel 是平台相关的（Intel Mac 没有）→ 装不上就跳过，只少了语义检索。
+  "$PY" "$PKG_DIR/install_optional_deps.py" || true
+
   mkdir -p "$DIST_DIR"
   clean_dir "$PKG_DIR/build"
   clean_dir "$DIST_DIR/kernel"

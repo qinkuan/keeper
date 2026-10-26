@@ -49,6 +49,11 @@ else:
 if (ROOT / "config.yaml").is_file():
     datas.append((str(ROOT / "config.yaml"), "keeper"))
 
+# 原生库（.dylib / .dll / .so / .pyd）与数据文件分开收：原生库要走 binaries，
+# PyInstaller 才会对 mac 上的 .dylib 做 ad-hoc 签名（.app 整体签名要求
+# 嵌套的 dylib 也是签好的，否则 codesign 直接拒绝）。
+binaries = []
+
 hiddenimports = [
     # provider 集成：运行时按 PROVIDER_MAP 动态 import，静态分析看不见
     "langchain_openai",
@@ -85,10 +90,30 @@ excludes = [
     "pip",
 ]
 
+# ---- 可选：litert-lm（本地向量检索的 embedding 运行时）----
+# litert-lm 的 wheel 是**平台相关**的（mac arm64 / win x64 有，Intel Mac 没有），
+# 所以它不在 requirements.txt 里，而是由 packaging/install_optional_deps.py
+# 在打包时「尽力安装」——Intel Mac 上装不上就跳过，只少了语义检索，
+# 关键词检索（SQLite FTS5 + BM25 + jieba）照常可用。
+#
+# 装上了就**必须**把它的原生库一起收进产物：litert 用 ctypes 按名字加载
+#   mac: liblitert-lm.dylib      Windows: litert-lm.dll
+# 路径是 importlib.resources.files("litert_lm") / <库名>，也就是原生库必须
+# 落在 <产物>/litert_lm/ 目录下。少了它，向量检索会直接报
+# "Could not find liblitert-lm.dylib"（关键词检索不受影响）。
+try:
+    from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs
+
+    hiddenimports += collect_submodules("litert_lm")
+    binaries += collect_dynamic_libs("litert_lm")
+    print("[spec] 已收集 litert-lm（向量检索运行时）")
+except Exception as e:  # noqa: BLE001 没装 litert-lm 不该让构建失败
+    print(f"[spec] 没有 litert-lm，跳过向量检索运行时：{e}")
+
 a = Analysis(
     [str(ROOT / "packaging" / "launcher.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

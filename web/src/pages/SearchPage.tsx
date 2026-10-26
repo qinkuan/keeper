@@ -316,7 +316,38 @@ function IndexTab() {
         {idx?.running && (
           <div className="mt-3">
             <Hint tone="info" title="正在建立索引">
-              后台进行中，完成后这一页会自动刷新。
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[12.5px]">
+                  <span>
+                    {idx.stage === "scanning"
+                      ? "扫描文件（识别移动 / 算内容指纹）"
+                      : idx.stage === "indexing"
+                        ? "切片并嵌入（建索引）"
+                        : "准备中"}
+                    {idx.total > 0 && (
+                      <>：第 {idx.current} / 共 {idx.total} 个文件</>
+                    )}
+                  </span>
+                  {idx.total > 0 && (
+                    <span className="tabular-nums text-ink-faint">
+                      {idx.pct.toFixed(0)}%
+                    </span>
+                  )}
+                </div>
+                {idx.total > 0 && (
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-line-soft">
+                    <div
+                      className="h-full rounded-full bg-brand transition-[width] duration-200"
+                      style={{ width: `${Math.min(100, Math.max(0, idx.pct))}%` }}
+                    />
+                  </div>
+                )}
+                {idx.current_name && (
+                  <div className="truncate font-mono text-[11.5px] text-ink-faint">
+                    {idx.current_name}
+                  </div>
+                )}
+              </div>
             </Hint>
           </div>
         )}

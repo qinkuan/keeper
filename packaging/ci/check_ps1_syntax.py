@@ -27,10 +27,11 @@ def check(path: pathlib.Path) -> int:
         bad += 1
     lines = text.split("\r\n")
 
-    # 1) 剥掉块注释（<# ... #>）与 here-string（@" ... "@），保留行号
+    # 1) 剥掉块注释（<# ... #>）与 here-string（@"..."@ / @'...'@），保留行号
     stripped = []
     in_block = False
     in_here = False
+    here_end = ""
     for line in lines:
         if in_block:
             if "#>" in line:
@@ -40,7 +41,7 @@ def check(path: pathlib.Path) -> int:
                 stripped.append("")
                 continue
         if in_here:
-            if line.lstrip().startswith('"@'):
+            if line.lstrip().startswith(here_end):
                 in_here = False
             stripped.append("")
             continue
@@ -51,8 +52,10 @@ def check(path: pathlib.Path) -> int:
             else:
                 line = head
                 in_block = True
-        if re.search(r'@"$', line.rstrip()):
+        m = re.search(r'@(["\'])$', line.rstrip())
+        if m:
             in_here = True
+            here_end = m.group(1) + "@"
             stripped.append("")
             continue
         stripped.append(line)

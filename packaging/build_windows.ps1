@@ -59,6 +59,10 @@ if ($SkipKernel -and (Test-Path (Join-Path $Dist "kernel\keeper-kernel.exe"))) {
     Write-Host "    安装 PyInstaller ..."
     & $Py -m pip install -q "pyinstaller>=6.6"
   }
+  # 可选运行时：litert-lm（本地向量检索的 embedding 引擎，Windows x64 有 wheel）。
+  # 装不上就跳过 —— 只少了语义检索，关键词检索照常可用。
+  & $Py (Join-Path $PSScriptRoot "install_optional_deps.py")
+  if ($LASTEXITCODE -ne 0) { Write-Warning "可选依赖安装有告警，不影响构建" }
   New-Item -ItemType Directory -Force -Path $Dist | Out-Null
   & $Py -m PyInstaller --noconfirm --clean `
       --distpath $Dist --workpath (Join-Path $PSScriptRoot "build") `

@@ -1,15 +1,30 @@
 """索引编排：扫描目录 -> 变更检测 -> 结构化切片 -> 增量向量化 -> 写入 SQLite。
 
-增量策略：以 chunks.content_hash 为单位比对，只对新增/变化的叶子 chunk 重新嵌入；
-文件移动只更新 documents.file_path（并按新路径重算 chunk_id），不触发重新嵌入。
-force=True 时忽略一切复用：重新切片 + 全部叶子重新嵌入。
+进度回调
+--------
+``index_roots`` / ``index_paths`` 都接受一个 ``on_progress`` 回调，用于在后台
+建索引时把进度（已处理文件数 / 总文件数 / 当前文件路径 / 阶段）交给上层
+（``search/api.py`` 写进 ``_index_state``，前端轮询 ``GET /search/status`` 展示
+「第 N 个 / 共 M 个」）。回调签名::
+
+    on_progress(done: int, total: int, path: str, stage: str)
+
+- ``done``：1-based 当前文件序号（收尾时为 ``total``）；
+- ``total``：参与本轮的文件总数；
+- ``path``：正在处理的文件路径（收尾时为空串）；
+- ``stage``：``"scanning"``（移动识别 / 算 hash）/ ``"indexing"``（切片 + 嵌入）/
+  ``"done"``（收尾）。
+不传（``None``）则完全不回调——周期自动同步、测试等都走这个默认，零开销。
 """
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path
-
+from typing import Callable, Optional
 
 from . import config
+
 from .deps import require_numpy
 from .ingest import chunk, detect, pdf
 from .store import db as dbmod
@@ -162,10 +177,13 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
 
 
 def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
-                 prescreen=False):
+                 prescreen=False, on_progress=None):
     """索引多个根目录，并清理已不存在的文件对应的索引。
 
     ``prescreen=True`` 时按 stat（mtime + size）预筛：没变过的文件连内容都不读。
+
+    ``on_progress``：进度回调（见模块 docstring）。建索引是后台分钟级操作，
+    用它把「第 N 个 / 共 M 个」透出去；不传则零开销。
     """
     roots = roots or config.default_roots()
     doc_type = doc_type or config.DOC_TYPE
@@ -174,6 +192,8 @@ def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
     all_files = []
     for root in roots:
         all_files.extend(detect.list_indexable_files(Path(root)))
+
+    total = len(all_files)
 
     # 先处理文件移动：内容 hash 相同、路径不同 -> 只更新 file_path，不重新嵌入
     # （必须在删除同步之前，否则移动会被当成"删除+新建"）
@@ -184,7 +204,9 @@ def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
     # 要被读两遍（移动识别一次、切片前又一次），磁盘 IO 直接翻倍。
     hashes: dict = {}
     if not force:
-        for f in all_files:
+        for i, f in enumerate(all_files):
+            if on_progress:
+                on_progress(done=i + 1, total=total, path=str(f), stage="scanning")
             if dbmod.get_document_by_path(conn, str(f)) is not None:
                 continue
             chash = detect.compute_hash(f)
@@ -203,19 +225,27 @@ def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
             dbmod.delete_document(conn, doc["id"])
             stats["deleted"] += 1
 
-    for f in all_files:
+    for i, f in enumerate(all_files):
+        if on_progress:
+            on_progress(done=i + 1, total=total, path=str(f), stage="indexing")
         res = index_path(conn, embedder, f, force=force, doc_type=doc_type,
                          prescreen=prescreen, known_hash=hashes.get(str(f)))
         stats[res] = stats.get(res, 0) + 1
 
+    if on_progress:
+        on_progress(done=total, total=total, path="", stage="done")
     return stats
 
 
-def index_paths(conn, embedder, paths, force=False, doc_type=None):
+def index_paths(conn, embedder, paths, force=False, doc_type=None,
+                 on_progress=None):
     """索引**指定的一批文件**（文件监听用），返回统计。
 
     与 ``index_roots`` 的区别：不遍历目录、不做删除同步——只处理传进来的路径。
     文件已经不存在（用户删了）→ 把它的索引一并删掉。
+
+    ``on_progress``：进度回调（见模块 docstring）。桌面端文件监听触发的小批量
+    索引也会经过它，单个文件时 ``total`` 为 1。
     """
     doc_type = doc_type or config.DOC_TYPE
     stats = {"indexed": 0, "skipped": 0, "empty": 0, "deleted": 0, "moved": 0}
@@ -225,13 +255,16 @@ def index_paths(conn, embedder, paths, force=False, doc_type=None):
     for k in [k for k, t in _RECENT_INDEX.items() if now - t > _RECENT_TTL]:
         _RECENT_INDEX.pop(k, None)
 
-    for p in paths or []:
-        p = Path(p)
+    files = [Path(p) for p in (paths or [])]
+    total = len(files)
+    for i, p in enumerate(files):
         key = str(p)
 
         # 文件已经不存在（用户删了）→ 立刻把索引删掉。
         # 这一步**不受抑制**：删除必须马上生效。
         if not p.is_file():
+            if on_progress:
+                on_progress(done=i + 1, total=total, path=key, stage="indexing")
             doc = dbmod.get_document_by_path(conn, key)
             if doc:
                 dbmod.delete_document(conn, doc["id"])
@@ -245,13 +278,19 @@ def index_paths(conn, embedder, paths, force=False, doc_type=None):
         #    「索引 → 读 → atime 变 → 又触发事件 → 再索引」会自激成死循环。
         last = _RECENT_INDEX.get(key)
         if last is not None and (now - last) < _RECENT_TTL:
+            if on_progress:
+                on_progress(done=i + 1, total=total, path=key, stage="indexing")
             stats["skipped"] += 1
             continue
 
         if not detect.is_indexable(p):
             continue
+        if on_progress:
+            on_progress(done=i + 1, total=total, path=key, stage="indexing")
         res = index_path(conn, embedder, p, force=force, doc_type=doc_type)
         stats[res] = stats.get(res, 0) + 1
         _RECENT_INDEX[key] = time.time()
 
+    if on_progress:
+        on_progress(done=total, total=total, path="", stage="done")
     return stats

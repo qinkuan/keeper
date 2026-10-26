@@ -188,7 +188,40 @@ Defender 还常误报 PyInstaller 产物 → **没有证书基本等于发不出
 secrets：`CSC_LINK`（p12 的 base64）+ `CSC_KEY_PASSWORD` → electron-builder 自动
 签名。没证书也能出包（本地能装、能跑），只是用户第一次要点「更多信息 → 仍要运行」。
 
-### 5.5 Windows 还剩的坑
+### 5.5 检索（搜索）能力与它的运行时依赖
+
+keeper 的「搜索」是**本地检索**，没有联网搜索（不接 Tavily/Serper 之类）。
+分两层，依赖完全不同：
+
+| 能力 | 依赖 | 缺了会怎样 |
+|---|---|---|
+| 关键词检索（文件 / 文档 / 短期记忆） | SQLite FTS5 + jieba + numpy | 硬依赖，必装 |
+| 语义检索（向量召回） | litert-lm + `embeddinggemma-2-740m.litertlm` | **自动降级**为纯关键词 |
+
+**litert-lm 是可选依赖**：它的 wheel 是**平台相关**的（mac arm64 / win x64 有，
+Intel Mac 没有），所以不能进 `requirements.txt`（否则 Intel Mac 上
+`pip install -r requirements.txt` 直接失败，把整个安装流程堵死）。做法是：
+
+1. `packaging/install_optional_deps.py` 在打包时**按平台尽力安装**，装不上就跳过；
+2. `packaging/keeper-kernel.spec` 把它的**原生库**收进产物
+   （mac 的 `liblitert-lm.dylib` / Windows 的 `litert-lm.dll`，落在
+   `<产物>/litert_lm/` 下——litert 用 `importlib.resources` 按这个名字找它）。
+
+少了那个库，向量检索会直接报 `Could not find liblitert-lm.dylib`，
+**关键词检索完全不受影响**（`knowledge/tools.py` 会自动把 mode 降成 keyword）。
+
+**模型文件（484MB）不随包分发**：用户在「知识库」里点下载，走
+`search/ingest/model.py` —— 用 **httpx 直连** HuggingFace 镜像（默认 hf-mirror，
+可用 `KEEPER_SEARCH_HF_ENDPOINT` 换源），主源失败回退魔搭。
+为什么不用 `huggingface_hub` / `modelscope`：这两个包都不在依赖清单里，各自会带来
+一大串传递依赖；而下载本质就是「按 URL 拉一个大文件」，httpx 已在依赖里，
+还能报进度、下到一半断线不留半个文件冒充「已就绪」。
+
+Windows 冒烟里对应 4 项检查（`packaging/ci/smoke_windows.ps1` 第 7~10 项）：
+FTS5、jieba、`/search/query` 端点、litert 原生库可加载（没装则跳过）。
+
+
+### 5.6 Windows 还剩的坑
 
 1. **长路径**：Windows 默认 260 字符上限，`~/.keeper/agents/<id>/plugins/<name>`
    这类嵌套路径可能超 → 建议在注册表里开 `LongPathsEnabled`（或在打包时写进
@@ -199,6 +232,9 @@ secrets：`CSC_LINK`（p12 的 base64）+ `CSC_KEY_PASSWORD` → electron-builde
    Windows 机器很少）。
 4. **`npm` 的 `node_modules` 体积**：随包带 node 时只拷 `node.exe` + `npm`/`npx`
    （完整 node 包约 80MB，脚本里只挑需要的）。
+5. **litert 的 VC 运行库**：Windows 版带上向量检索后，`litert-lm.dll` 可能依赖
+   `vcruntime140.dll`（用户机器没装 VC++ 运行库就加载失败）→ 冒烟第 10 项会在 CI 上
+   先暴露；真遇到了就把 `vcruntime140.dll` 一起随包分发。
 
 ## 六、已知限制
 
