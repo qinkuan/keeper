@@ -42,16 +42,44 @@ def _format_result(r: dict) -> str:
     )
 
 
+def _shell_argv(command: str):
+    """跑命令的 argv：优先用内核选好的 shell。
+
+    内核起本插件时会把 KEEPER_SHELL / KEEPER_SHELL_FLAG 注进环境（见
+    keeper/framework/shell.py）：POSIX 是 `/bin/sh -c`，Windows 上是随包内置的
+    busybox `sh.exe -c`（真 POSIX 语义）—— 不用 cmd.exe /c，因为命令里常有
+    管道、&&、$VAR、glob，两种 shell 语义不一样会让 agent 的命令莫名其妙地挂。
+
+    拿不到环境变量（老内核 / 用户改过插件）就退回 create_subprocess_shell，
+    行为与从前完全一致。
+    """
+    exe = (os.environ.get("KEEPER_SHELL") or "").strip()
+    flag = (os.environ.get("KEEPER_SHELL_FLAG") or "-c").strip()
+    if exe and os.path.exists(exe):
+        return [exe, flag, command]
+    return None
+
+
 async def _run(command: str, cwd: str, timeout: int) -> dict:
-    # create_subprocess_shell 等价于 `sh -c <command>`，支持管道 / 重定向 / &&
-    # 不暴露给 keeper 主进程，崩了只影响这一次调用（见 subprocess_tool 的设计说明）
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "PWD": cwd},
-    )
+    # 用哪个 shell 由内核决定（跨平台保持 POSIX 语义）；插件不暴露给 keeper
+    # 主进程，崩了只影响这一次调用（见 subprocess_tool 的设计说明）
+    argv = _shell_argv(command)
+    if argv is None:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PWD": cwd},
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PWD": cwd},
+        )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:

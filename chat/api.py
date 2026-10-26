@@ -32,6 +32,7 @@ from ..agent.keeper import (
     resolve_core_agent,
     resolve_for_chat,
 )
+from ..framework.linkutil import make_dir_link
 from ..store import SessionMessage, get_session_factory, new_id
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, ArtifactSource, resolve_artifact_uri
@@ -1545,7 +1546,8 @@ async def create_user_space(data: UserSpaceIn) -> Dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"无法创建目标目录: {e}")
         try:
-            os.symlink(target, entry)
+            # Windows 上用 junction（不需要开发者模式/管理员），POSIX 上是软链
+            make_dir_link(target, entry, relative=False)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"创建软链接失败: {e}")
         final_path = entry
@@ -1633,7 +1635,7 @@ async def update_user_space(us_id: str, data: UserSpacePatch) -> Dict[str, Any]:
                             status_code=409, detail=f"user/ 下已存在同名条目: {row.name}"
                         )
                     try:
-                        os.symlink(target, entry)
+                        make_dir_link(target, entry, relative=False)
                     except Exception as e:  # noqa: BLE001
                         raise HTTPException(status_code=400, detail=f"创建软链接失败: {e}")
                     row.path = str(entry)

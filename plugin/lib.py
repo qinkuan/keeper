@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .formats import PLUGIN_MANIFEST, any_marker_present, detect_format
+from ..framework.linkutil import make_dir_link, remove_link
 
 logger = logging.getLogger(__name__)
 
@@ -421,8 +422,9 @@ def link_plugin(agent_id: str, plugin: LibraryPlugin) -> Path:
             raise ValueError(
                 f"{link} 已存在且不是符号链接，请先手动移除"
             )
-        link.unlink()
-    link.symlink_to(rel, target_is_directory=True)
+        remove_link(link)
+    # Windows 上用 junction（不需要开发者模式/管理员），POSIX 上是相对软链
+    make_dir_link(target, link, relative=True)
     logger.info(
         "绑定插件：agent=%s 插件=%s 链接=%s -> %s（库目录 %s）",
         agent_id, link.name, link, rel, target,
@@ -439,7 +441,7 @@ def unlink_plugin(agent_id: str, name: str) -> bool:
     link = agent_plugins_dir(agent_id) / name
     if link.is_symlink():
         logger.info("解绑插件：agent=%s 插件=%s 链接=%s", agent_id, name, link)
-        link.unlink()
+        remove_link(link)
         return True
     logger.info(
         "解绑插件：agent=%s 插件=%s 跳过（%s 不是符号链接，可能已是下载的固定副本，"

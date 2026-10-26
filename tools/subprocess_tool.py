@@ -81,9 +81,18 @@ def build_argv(command: str, args: Optional[List[str]]) -> List[str]:
 
     只有它既不是已存在的文件、也不在 PATH 里、却含空格时，才按
     ``"python x.py"`` 这种整串写法拆开——兼顾两种习惯又不误伤带空格的路径。
+
+    **Windows 上没有 shebang**：插件的 ``bin/xxx`` 是 ``#!/usr/bin/env python3``
+    的文本脚本，直接 CreateProcess 会失败（不是 PE 文件）。所以 Windows 上遇到
+    脚本要显式用解释器启动（``[python3.exe, 脚本]``）——解释器取 KEEPER_PYTHON
+    指向的那个（打包形态下是内核自带的副本，带全部依赖）。
     """
     extra = [str(a) for a in (args or [])]
     p = Path(command)
+    if os.name == "nt" and p.suffix.lower() in (".py", ".pyw"):
+        interp = (os.environ.get("KEEPER_PYTHON") or "").strip()
+        if interp and os.path.exists(interp):
+            return [interp, str(p), *extra]
     if p.is_file() or p.is_absolute() or shutil.which(command):
         return [command, *extra]
     parts = shlex.split(command)
@@ -157,6 +166,15 @@ async def call_subprocess_tool(
         env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
         if sys.prefix != sys.base_prefix:
             env["VIRTUAL_ENV"] = sys.prefix
+    # 告诉插件用哪个 shell 跑用户命令（Windows 上是内置 busybox sh，
+    # 保持 POSIX 语义；见 keeper/framework/shell.py）。插件拿不到就退回
+    # create_subprocess_shell，行为与从前一致。
+    try:
+        from ..framework.shell import shell_env
+
+        env.update(shell_env())
+    except Exception:  # noqa: BLE001 选 shell 失败不该让插件起不来
+        pass
 
     try:
         proc = await asyncio.create_subprocess_exec(

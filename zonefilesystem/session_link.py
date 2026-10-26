@@ -28,6 +28,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from ..framework.linkutil import make_dir_link, remove_link
 
 logger = logging.getLogger(__name__)
 
@@ -113,13 +114,14 @@ def ensure_my_space_link(agent_space: Path) -> Optional[Path]:
                     return link
             except OSError:
                 pass
-            link.unlink()
+            remove_link(link)
         elif link.exists():
             # 同名真实文件/目录：不动它（可能是用户的文件），跳过
             logger.warning("%s 已存在且不是软链接，跳过建「我的空间」链接", link)
             return None
 
-        os.symlink(str(target), str(link))
+        # Windows 上用 junction（不需要开发者模式/管理员），POSIX 上是软链
+        make_dir_link(target, link, relative=False)
         logger.debug("已在会话空间建「我的空间」软链接：%s -> %s", link, target)
         return link
     except OSError as e:

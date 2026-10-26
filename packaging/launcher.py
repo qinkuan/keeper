@@ -95,9 +95,28 @@ def _run_as_python(argv: list) -> int:
     return 0
 
 
+# 复制成这些名字时，本体就当「python 解释器」用（而不是内核）。
+# 为什么靠文件名而不是只靠 --py 开关：Windows 上要把它暴露成 PATH 里的
+# `python3`，而 Windows 的 PATH 查找认的是 .exe/.cmd —— .cmd 又没法被
+# busybox 的 sh 执行。同目录放一份 `python3.exe` 副本（副本和内核挨着，
+# PyInstaller 的 _internal 目录照样找得到），就得到一个任何 shell 都能调的
+# 解释器。macOS 上同理（复制成 `python3`）。
+_PYTHON_ALIASES = {"python", "python3", "pythonw", "python3.exe", "python.exe", "pythonw.exe"}
+
+
+def _is_python_alias() -> bool:
+    """当前可执行文件是不是被当作 python 解释器用（靠自身文件名判断）。"""
+    import os
+
+    return os.path.basename(sys.executable).lower() in _PYTHON_ALIASES
+
+
 def main() -> None:
+    # 两种进入解释器模式的途径：显式 --py，或自身被复制成 python3 之类
     if len(sys.argv) > 1 and sys.argv[1] == "--py":
         raise SystemExit(_run_as_python(sys.argv[2:]))
+    if _is_python_alias():
+        raise SystemExit(_run_as_python(sys.argv[1:]))
 
     from keeper.main import main as keeper_main
 

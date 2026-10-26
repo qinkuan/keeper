@@ -49,7 +49,7 @@ echo "==> [1/3] 前端产物 web/dist"
 if [ "$SKIP_WEB" = "1" ] && [ -f "$WEB_DIR/dist/index.html" ]; then
   echo "    跳过（复用已有产物）"
 else
-  ( cd "$WEB_DIR" && npm install --silent && npm run build )
+  ( cd "$WEB_DIR" && npm install --silent --include=dev && npm run build )
 fi
 [ -f "$WEB_DIR/dist/index.html" ] || { echo "前端产物缺失：$WEB_DIR/dist/index.html"; exit 1; }
 echo "==> [2/3] 冻结 Python 内核（PyInstaller）"
@@ -81,13 +81,16 @@ else
 fi
 [ -x "$DIST_DIR/kernel/keeper-kernel" ] || { echo "内核产物缺失：$DIST_DIR/kernel/keeper-kernel"; exit 1; }
 
+# 额外的运行时目录（Windows 上放真 node 与 busybox；mac 上是空的）
+mkdir -p "$DIST_DIR/runtime"
+
 # 配置模板：首次运行时复制到 ~/.keeper/config.yaml（用户数据留在 home，不进包）
 cp "$ROOT/config.yaml" "$DIST_DIR/config.default.yaml"
 
 echo "==> [3/3] electron-builder 出 .app / .dmg"
 cd "$DESKTOP_DIR"
 if [ ! -d node_modules/electron-builder ]; then
-  npm install --silent
+  npm install --silent --include=dev
 fi
 # 没有签名证书时别去找签名身份（否则 electron-builder 会去问 keychain）
 export CSC_IDENTITY_AUTO_DISCOVERY=false

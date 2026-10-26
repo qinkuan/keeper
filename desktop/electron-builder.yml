@@ -43,6 +43,13 @@ extraResources:
     to: plugins
     filter:
       - "**/*"
+  # 额外的运行时（Windows 用）：真 node（node.exe + npm/npx）与 busybox 的
+  # POSIX shell（sh.exe）。mac/Linux 上这个目录是空的 —— 那边的 node 用
+  # Electron 自带的、shell 用 /bin/sh 就够。
+  - from: ../packaging/dist/runtime
+    to: runtime
+    filter:
+      - "**/*"
 
 asar: true
 
@@ -61,6 +68,23 @@ mac:
   gatekeeperAssess: false
   extendInfo:
     NSHumanReadableCopyright: Keeper
+
+win:
+  # 不设 category：electron-builder 26 对 Windows 的分类枚举校验很严，
+  # 写错了会直接报 "Invalid configuration object"。
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 没证书时不签名（本地能跑；给别人用要配 CSC_LINK —— 见 packaging/README.md）
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  artifactName: ${productName}-${version}-setup.${ext}
 
 dmg:
   title: Keeper ${version}

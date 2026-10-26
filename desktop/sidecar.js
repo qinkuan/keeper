@@ -89,6 +89,7 @@ function seedPlugins() {
  * 所以这里把常见的几个目录补回去。
  */
 function prepareRuntimeBin(kernel) {
+  const isWin = process.platform === 'win32';
   const dir = path.join(os.homedir(), '.keeper', 'runtime', 'bin');
   fs.mkdirSync(dir, { recursive: true });
 
@@ -101,48 +102,115 @@ function prepareRuntimeBin(kernel) {
     return p;
   };
 
-  // python3 → 冻结内核的 --py 模式（打包形态）；开发形态就是 .venv 的 python3
+  /* --- python3 -------------------------------------------------------
+   *
+   * 打包形态：把冻结内核**复制**一份成同目录下的 python3（Windows 是
+   * python3.exe）。复制件和内核挨着 → PyInstaller 的 _internal 照样找得到；
+   * 冻结入口靠**自身文件名**切成解释器模式（packaging/launcher.py）。
+   *
+   * 为什么用「exe 副本」而不是 shell 脚本 shim：Windows 上 PATH 查找认的是
+   * .exe/.cmd，而 .cmd **没法被 busybox 的 sh 执行** —— 复制成 exe 才是任何
+   * shell（cmd / PowerShell / sh）都能调的。
+   *
+   * 开发形态：直接用仓库 .venv 的解释器（.venv/bin 里本来就有 python3）。
+   */
   let python3;
+  const pathEntries = [];
   if (kernel.pythonRunner) {
-    const runner = kernel.pythonRunner;
-    python3 = write(
-      'python3',
-      `#!/bin/sh\n# keeper 内置的 Python（冻结内核兼当解释器：解释器与依赖都在 app 里）\nexec ${JSON.stringify(runner)} --py "$@"\n`
+    // 复制件必须和内核**同目录**：PyInstaller 的 bootloader 按 exe 所在目录找
+    // _internal（依赖都在那儿）。试过符号链接——不行，bootloader 会把它解析回
+    // 真实路径，于是「文件名切换解释器模式」就失效了。
+    const copy = path.join(kernel.dir, isWin ? 'python3.exe' : 'python3');
+    try {
+      fs.copyFileSync(kernel.pythonRunner, copy);
+      fs.chmodSync(copy, 0o755);
+      python3 = copy;
+      // 内核目录（含副本）进 PATH：python3 在任何 shell 下都能解析到
+      pathEntries.push(kernel.dir);
+    } catch (e) {
+      // app 包只读（MDM 装的那种 /Applications/Keeper.app）→ 退回 shim 脚本。
+      // 注意：Windows 上 .cmd 只有 cmd 能执行，busybox 的 sh 不行 → 所以这
+      // 种情况下别用 busybox 当 shell（见下面 bundledSh 的判断）。
+      console.error('[desktop] app 包只读，内置 python3 改用 shim：' + (e && e.message ? e.message : e));
+      if (isWin) {
+        python3 = write(
+          'python3.cmd',
+          `@echo off\r\n"${kernel.pythonRunner}" --py %*\r\n`
+        );
+      } else {
+        python3 = write(
+          'python3',
+          `#!/bin/sh\n# keeper 内置的 Python（冻结内核兼当解释器）\nexec ${JSON.stringify(kernel.pythonRunner)} --py "$@"\n`
+        );
+      }
+    }
+  } else {
+    const venvBin = path.dirname(kernel.command);
+    python3 = path.join(venvBin, isWin ? 'python.exe' : 'python3');
+    pathEntries.push(venvBin);
+  }
+  if (!python3) python3 = kernel.command;
+
+  /* --- node ----------------------------------------------------------
+   *
+   * 优先用随包带的**真 node**（Windows 上带：node.exe 能被任何 shell 执行，
+   * 还顺带把 npm/npx 补上）；没有就用 Electron 自带的那个
+   * （ELECTRON_RUN_AS_NODE=1 跑 Electron 可执行文件就是一个完整 node）。
+   */
+  const bundledNode = isWin
+    ? path.join(process.resourcesPath, 'runtime', 'node', 'node.exe')
+    : path.join(process.resourcesPath, 'runtime', 'node', 'bin', 'node');
+  let node;
+  if (fs.existsSync(bundledNode)) {
+    node = bundledNode;
+    pathEntries.push(path.dirname(bundledNode));
+  } else if (isWin) {
+    // Windows 没有 /bin/sh，写 .cmd（cmd 能执行；busybox sh 不行，所以
+    // Windows 上更推荐随包带真 node —— 见上）
+    node = write(
+      'node.cmd',
+      `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" %*\r\n`
     );
   } else {
-    // 开发形态：.venv 的 python3（也做成 shim，runtime 目录内容保持一致）
-    python3 = write(
-      'python3',
-      `#!/bin/sh\nexec ${JSON.stringify(kernel.command)} "$@"\n`
+    node = write(
+      'node',
+      `#!/bin/sh\n# keeper 内置的 Node（Electron 自带的运行时）\nexport ELECTRON_RUN_AS_NODE=1\nexec ${JSON.stringify(process.execPath)} "$@"\n`
     );
   }
-  write(
-    'python',
-    `#!/bin/sh\nexec ${JSON.stringify(python3)} "$@"\n`
-  );
 
-  // node → Electron 自带的 node（ELECTRON_RUN_AS_NODE=1）
-  const node = write(
-    'node',
-    `#!/bin/sh\n# keeper 内置的 Node（Electron 自带的运行时）\nexport ELECTRON_RUN_AS_NODE=1\nexec ${JSON.stringify(process.execPath)} "$@"\n`
-  );
+  /* --- 内置 POSIX shell（Windows 用 busybox 的 sh.exe）---------------- */
+  let bundledSh = null;
+  const shCandidates = isWin
+    ? [path.join(process.resourcesPath, 'runtime', 'sh', 'sh.exe')]
+    : [];
+  // 只有当 python3 是**真 exe**时才用 busybox 当 shell：busybox 的 sh 只能
+  // 直接执行二进制，执行不了 .cmd shim（app 包只读时的退路）
+  const pythonIsExe = !/\.cmd$/i.test(python3);
+  if (pythonIsExe) {
+    for (const c of shCandidates) {
+      if (fs.existsSync(c)) {
+        bundledSh = c;
+        pathEntries.push(path.dirname(c));
+        break;
+      }
+    }
+  }
 
-  return { dir, python3, node };
+  return { dir, python3, node, bundledSh, pathEntries };
 }
 
 /**
  * 内核进程的 PATH：内置运行时目录 + 用户的常见路径 + 原有 PATH。
  */
-function runtimePath(runtimeDir) {
-  const extra = [
-    runtimeDir,
+function runtimePath(entries) {
+  const extra = entries.concat([
     '/usr/local/bin',
     '/opt/homebrew/bin',
     '/usr/bin',
     '/bin',
     '/usr/sbin',
     '/sbin',
-  ];
+  ]);
   const seen = new Set();
   const parts = [];
   for (const p of extra.concat((process.env.PATH || '').split(path.delimiter))) {
@@ -175,6 +243,9 @@ function resolveKernel() {
       command: exe,
       args: [],
       cwd: dir,
+      // 内核所在目录：内置 python3 的副本要放在这儿（PyInstaller 的 bootloader
+      // 按 exe 所在目录找 _internal，副本必须挨着它）
+      dir,
       webDist: fs.existsSync(webDist) ? webDist : null,
       // 同一个冻结产物兼当 Python 解释器（--py 模式）
       pythonRunner: exe,
@@ -185,6 +256,7 @@ function resolveKernel() {
     command: python,
     args: ['-m', 'keeper.main'],
     cwd: PROJECT_ROOT,
+    dir: path.dirname(python),
     webDist: null,
     pythonRunner: null,
   };
@@ -295,9 +367,12 @@ async function startSidecar({ onLog } = {}) {
           ...process.env,
           // 内置运行时目录提到最前：插件 bin 的 #!/usr/bin/env python3、
           // 模型写的 python3 x.py / node x.js 都靠它解析
-          PATH: runtimePath(runtime.dir),
+          PATH: runtimePath([...runtime.pathEntries, runtime.dir]),
           KEEPER_PYTHON: runtime.python3,
           KEEPER_NODE: runtime.node,
+          // Windows 上跑用户命令用的 POSIX shell（busybox 的 sh.exe）；
+          // 内核据此选 shell（见 keeper/framework/shell.py）
+          ...(runtime.bundledSh ? { KEEPER_BUNDLED_SH: runtime.bundledSh } : {}),
           PORT: String(port),
           // 配置指路：内核里那些不带参数的 load_config()（核心 agent 装配等）
           // 也要拿到同一份配置，否则会用错、甚至去写只读的 app 包。

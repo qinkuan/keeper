@@ -1,0 +1,65 @@
+# 在 GitHub 的 Windows runner 上打包 keeper（nsis 安装包）。
+#
+# 为什么需要它：PyInstaller **不能交叉编译**（Mac 上打不出能跑的 win exe），
+# nsis 工具链也建议在 Windows 上跑。所以「没有 Windows 电脑」时，CI 里的
+# windows-latest runner 就是那台 Windows 机器 —— 构建 + 冒烟测试都在上面做。
+#
+# 私有库免费额度：2000 分钟/月（Windows runner 按 2 倍算 → 1000 分钟），
+# 一次完整构建约 15-25 分钟。
+#
+# 触发方式：Actions 页面手动 "Run workflow"，或推 v* tag（会自动挂 Release）。
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: 装 Python 依赖
+        run: pip install -r requirements.txt "pyinstaller>=6.6"
+
+      - name: 构建前端 + 冻结内核 + 打包 nsis
+        run: powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
+
+      - name: Windows 冒烟测试（没有 Python/Node 也能干活）
+        run: powershell -ExecutionPolicy Bypass -File packaging/ci/smoke_windows.ps1
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: keeper-win
+          path: desktop/release/*.exe
+          retention-days: 30
+
+      - name: 上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keeper-win-logs
+          path: |
+            desktop/release/*.blockmap
+            packaging/build/
+          retention-days: 7
