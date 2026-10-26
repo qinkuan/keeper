@@ -257,7 +257,12 @@ NEVER_EXTERNALIZE_DEFAULT = ""
 
 
 def _never_externalize(tool: str) -> bool:
-    """工具是否在豁免名单里（支持 ``task.*`` 这类前缀）；名单为空则一律不豁免。"""
+    """工具是否在豁免名单里（支持 ``task.*`` 这类前缀）；名单为空则一律不豁免。
+
+    名单用**逗号或空白**分隔都行（``"kb.search, kb.read_pdf"`` 与
+    ``"kb.search kb.read_pdf"`` 等价）——避免「明明配了却没生效」的坑：
+    之前只按逗号切，用空格写的一串会被当成一个整体，谁都匹配不上。
+    """
     cfg = ctx_cfg()
     raw = (
         getattr(cfg, "never_externalize", None)
@@ -265,7 +270,7 @@ def _never_externalize(tool: str) -> bool:
         else None
     ) or NEVER_EXTERNALIZE_DEFAULT
     name = (tool or "").strip()
-    for item in str(raw).split(","):
+    for item in re.split(r"[,\s]+", str(raw).strip()):
         item = item.strip()
         if not item:
             continue

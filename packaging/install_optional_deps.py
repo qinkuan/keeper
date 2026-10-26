@@ -31,6 +31,13 @@ import importlib.util
 import subprocess
 import sys
 
+# Windows 控制台默认 cp1252：print 中文会 UnicodeEncodeError，把构建搞挂。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 #: (发行名, 版本约束, import 名)
 OPTIONAL_DEPS = [
     ("litert-lm", "0.18.0", "litert_lm"),

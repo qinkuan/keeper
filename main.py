@@ -268,6 +268,12 @@ async def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
 
 
 def main() -> None:
+    # Windows 上控制台/重定向的默认编码不是 UTF-8，内核日志里的中文会抛
+    # UnicodeEncodeError（桌面壳把 stdout/stderr 收进日志文件时必现）。
+    # 先把标准流切成 UTF-8，再让日志往里写。
+    from keeper.framework.stdio import force_utf8_stdio
+
+    force_utf8_stdio()
     _setup_logging()
     logger = logging.getLogger("keeper")
     args = sys.argv[1:]

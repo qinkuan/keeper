@@ -112,6 +112,16 @@ def _is_python_alias() -> bool:
 
 
 def main() -> None:
+    # Windows 控制台/重定向的默认编码是 cp1252 / cp936，不是 UTF-8 ——
+    # 任何一句 print("中文") 都会抛 UnicodeEncodeError（CI 上就是这么炸的）。
+    # 冻结态的 pathex 已经能解析 keeper.*；开发态 import 失败也无妨（下面 main 里还会再兜一次）。
+    try:
+        from keeper.framework.stdio import force_utf8_stdio
+
+        force_utf8_stdio()
+    except Exception:  # noqa: BLE001 兜底失败不该拦住启动
+        pass
+
     # 两种进入解释器模式的途径：显式 --py，或自身被复制成 python3 之类
     if len(sys.argv) > 1 and sys.argv[1] == "--py":
         raise SystemExit(_run_as_python(sys.argv[2:]))

@@ -6,6 +6,14 @@ import pathlib
 import re
 import sys
 
+# Windows 控制台默认 cp1252：print 中文会 UnicodeEncodeError，整个步骤直接失败。
+# 切成 UTF-8（Actions 日志本来就是 UTF-8）；切不了就退到 errors="replace"。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TARGETS = [
     ROOT / "packaging" / "build_windows.ps1",

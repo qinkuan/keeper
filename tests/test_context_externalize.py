@@ -73,6 +73,13 @@ def main() -> int:
     )
     CFG.never_externalize = ""
 
+    # 4b) 空格分隔的豁免名单也要生效（曾只按逗号切，空格写的一串被当成一个整体）
+    CFG.never_externalize = "kb.search kb.read_pdf kb.read_markdown"
+    results.append(case("空格分隔豁免名单生效", cs.externalize("kb.search", big) == big))
+    ext = cs.externalize("fs.read_file", mid, min_chars=CFG.observation_limit + 1)
+    results.append(case("空格分隔未列出的工具仍外部化", ext != mid and 'block_id="ctx:' in ext))
+    CFG.never_externalize = ""
+
     # 5) 截断保留头尾（结论/报错常在结尾，硬切会坑模型）
     t = "HEAD" + "y" * 5000 + "TAIL"
     c = cs.clip_observation(t, CFG.observation_limit)
