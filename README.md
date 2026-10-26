@@ -43,7 +43,7 @@ keeper 是一个**跑在自己机器上**的 agent 内核 + 桌面应用，围�
 ## 功能一览
 
 界面分三个主区（**对话** / **智能体** / **我的空间**），加侧栏底部的配置与运维入口
-（**设置** / **可观测** / **回收站** / **模型管理**）。
+（**设置** / **可观测** / **搜索** / **回收站** / **模型管理**）。
 
 其中「**我的空间**」是知识库的物理形态（你的文件），「**对话**」是 agent 用它工作的场所，
 「**智能体**」决定它有哪些能力与用哪个模型。
@@ -74,7 +74,7 @@ keeper 是一个**跑在自己机器上**的 agent 内核 + 桌面应用，围�
 
 | 控件 | 说明 |
 |---|---|
-| **模式** | 普通（完整 ReAct + 记忆 + 工具）/ 快捷（一次性任务）/ 程序化（写代码执行）；会话创建后即固定 |
+| **模式** | 普通（完整 ReAct + 记忆 + 工具）/ 快捷（一次性任务）；**会话创建后也能改**，下一轮即生效 |
 | **思考档位** | 关闭 / 低 / 高 / 最高 |
 | **模型** | 显示当前绑定（失效显示「模型已失效」）；改的是 **agent 级绑定**，可选「未绑定（纯索引模式）」，切换后自动重装配 |
 | **`+` 附件** | 选图片（png/jpg/gif/webp）；也可直接把文件**拖进面板**或**粘贴截图** |
@@ -168,7 +168,9 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 页面右侧常驻一个可拖宽、可收起的对话面板。
 
 - **未配置态**：引导卡片 +「选择文件夹」（原生目录对话框，**仅桌面端**）
-- **树操作**：展开/收起（子目录懒加载，外部新拷入的文件立即出现）、新建子文件夹、复制（同名自动改名）、在文件管理器中打开、重命名、删除（二次确认，递归）、右键菜单（打开/复制/重命名/删除/新建/粘贴）、`Ctrl/Cmd+V` 从系统剪贴板粘贴导入、工具栏「上传」多选拷入、刷新
+- **树操作**：展开/收起（子目录懒加载，外部新拷入的文件立即出现）、新建子文件夹、在文件管理器中打开、重命名、删除（二次确认，递归）、右键菜单（打开/复制/重命名/删除/新建/粘贴）、`Ctrl/Cmd+V` 从系统剪贴板粘贴导入、工具栏「上传」多选拷入、刷新
+- **文件类型图标**：目录树每行按类型给**色块 + 字母标记**（`PDF` / `XLS` / `IMG` / `DOC`…），不用点开就知道是什么
+- **预览头**：右侧有「预览 / 编辑」切换按钮（可编辑的类型才亮）
 - 树宽度可拖拽（180–640px），整栏可折叠成细条
 
 #### 文件预览支持哪些类型
@@ -182,6 +184,8 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 | **Excel / 表格**（xlsx / xls / csv / tsv） | SheetJS 表格预览 —— 详见下表 |
 | **PDF** | pdf.js 渲染到 canvas，纵向滚动翻页，最多预览前 200 页并提示下载 |
 | **图片**（png/jpg/gif/webp/svg） | 内联预览，滚轮/捏合缩放、拖拽平移、双击放大/复位 |
+| **图表**（Vega / Mermaid，.vg.json / .mmd / .mermaid） | 渲染成图，可缩放平移、双击复位 |
+| **Office 文档**（docx / docm / pptx / pptm） | **不做页面内预览**，只给「用系统应用打开」（保真 100%，见 Roadmap ①） |
 | **HTML** | 不内嵌，给「在浏览器中打开」（可缩放/全屏/另存） |
 | **视频** | 浏览器原生播放器 |
 | **音频 / 其它二进制 / 超 2MB** | 降级为信息卡，提示下载后查看 |
@@ -205,6 +209,24 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 - **文本**：Markdown / 文本预览里选中文字 → 浮出「添加」→ 以 chip（`文件名 · 引用 N 字`）挂进输入框
 - **表格**：拖选单元格区域 → 选区右下角出现「添加到对话」，区域用 Excel 语法（`A1:C5`，多 sheet 时带 `Sheet2!A1:C5`）
 - 发送时拼成「绝对路径 + 内容」
+
+---
+
+### 🔎 搜索
+
+侧栏底部菜单（齿轮）里的**语义检索页**，两个 tab：
+
+| Tab | 能做什么 |
+|---|---|
+| **索引管理** | 嵌入模型状态（是否就绪 / 本地或 GPU 推理 / 预热情况，可手动下载模型）；一键建索引 / 清索引；索引配置（是否自动同步、同步间隔、周期全量校准间隔，保存即生效）；已索引文档清单（可单个移除） |
+| **搜索** | 自然语言查询，向量 + 关键词两路召回再融合排序；结果给标题路径、行号 / 页码、分数与命中摘要；点结果直接跳到「我的空间」里对应位置（文件 + 行号 / 页码） |
+
+要点：
+
+- **全在本机跑**：嵌入模型（LiteRT-LM `.litertlm`，权重在 `~/.keeper/search/models/`）本地推理，**文件内容不外传**；没装模型也不影响——关键词通道（FTS5/BM25）自动降级可用。
+- **自动跟上**：桌面端监听空间文件变化（`fs.watch`），外部改完秒级补索引；内核侧另有定时增量扫描兜底。
+- **索引的是派生数据**：删了能重建，不进版本库。
+- agent 侧另有 `kb.search` / `kb.read_pdf` / `kb.read_markdown` 工具（见 [`doc/kb-pdf-pages.md`](doc/kb-pdf-pages.md)）：召回只定位，阅读才给内容。
 
 ---
 
@@ -283,15 +305,25 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 
 给空间里的文件建索引，让 agent 能按**语义**找到它们，而不只是按文件名。
 
+**已经落地的一层**（`search/`，详见 [`doc/indexing.md`](doc/indexing.md)）：
+
+| 能力 | 现状 |
+|---|---|
+| **索引器**（监听变更 → 分块 → 嵌入） | ✅ 增量索引，Markdown 结构化切片 + PDF 按页切片；文件移动不重嵌 |
+| **混合检索**（向量 + 关键词） | ✅ 向量召回 + 自算 BM25F 融合排序，0~1 分数与下限可配 |
+| **本地嵌入** | ✅ LiteRT-LM（`.litertlm`），本地推理；**没装模型自动降级为纯关键词检索** |
+| **检索界面** | ✅ 独立的「搜索」页（索引管理 + 查询），结果可跳回文件位置 |
+| **agent 工具** | ✅ `kb.search` / `kb.read_pdf` / `kb.read_markdown`（见 [`doc/kb-pdf-pages.md`](doc/kb-pdf-pages.md)） |
+
+**还在做的**：
+
 | 要做的 | 现状 |
 |---|---|
-| **索引器**（监听变更 → 分块 → 嵌入） | 空间**没有任何索引** |
-| **跨模态嵌入**（文本 / 图片 / 表格 / PDF / 音视频） | — |
-| **混合检索**（向量 + 关键词 + 结构化过滤，RRF 融合） | 只有 `ls` + `grep` |
-| **`search` 工具** | 没有 |
+| **跨模态嵌入**（图片 / 音视频 / 代码 / 表格） | 只有文本类（Markdown / PDF）进了索引 |
+| **结构化过滤**（路径前缀 / 类型 / 大小 / 修改时间） | 只支持路径前缀与文档类型 |
 | **`@我的空间` 候选变成语义匹配结果** | 固定两项（我的空间 / 当前会话目录） |
 
-技术倾向**纯本地**（`sqlite-vec` + 本地嵌入模型）：文件内容不外传，不多一个服务。
+技术倾向**纯本地**（本地嵌入模型 + SQLite）：文件内容不外传，不多一个服务。
 
 → 详细设计：[`doc/user-space.md`](doc/user-space.md) 第四节
 
@@ -301,7 +333,7 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 
 | 要做的 | 现状 |
 |---|---|
-| **L2 长期事实**（跨会话复用，带来源与置信度） | 记忆是**按天**作用域的，换天即换记忆 |
+| **L2 长期事实**（跨会话复用，带来源与置信度） | 记忆是**按会话隔离**的，换会话即换记忆 |
 | **L3 用户画像** | 没有 |
 | **巩固与衰减**（间隔重复 + 时间衰减） | 没有 |
 | **混合检索**（向量 + 关键词 + 权重） | 只有 FTS5 关键词 |
@@ -361,6 +393,12 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 
 **Python 依赖**全部列在 [`requirements.txt`](requirements.txt)，`start_keeper.sh` 会自动建
 `.venv` 并安装（仅首次或 `requirements.txt` 变化时）。
+
+> **一个可选依赖**：`litert-lm`（本地 embedding 运行时，检索层的向量通道）**不在**
+> `requirements.txt` 里——它只有平台相关的 wheel，**Intel Mac 没有**，写进硬依赖会
+> 让整条安装流程直接失败。`start_keeper.sh` 会按平台自动装（Intel Mac 跳过）。
+> 装不上也不影响启动：检索自动降级为**纯关键词**（SQLite FTS5 + BM25）。
+> 手动装：`pip install litert-lm==0.18.0`。
 
 **Node 依赖**分两处，互不干扰：
 
@@ -553,6 +591,10 @@ cd keeper/desktop
 4. 拉起 Electron → 主进程占一个空闲端口 → spawn Python 内核 → 轮询 `/health`
    直到就绪 → 开窗加载 `http://127.0.0.1:<动态端口>`
 
+**macOS 上没有系统标题栏**：窗口是「隐藏标题栏」形态，红绿灯浮在页面左上角，
+前端自绘一条贯穿整窗的拖拽条（`kp-dragbar`）来拖动窗口，双击它最大化/还原。
+Windows / Linux 保留系统标题栏（那些页面右上角有控件，不能被系统按钮压住）。
+
 不用脚本的等价命令：
 
 ```bash
@@ -619,7 +661,7 @@ KEEPER_PORT=9090 npm run dev
 `llm` / `workspace` / `agent_overrides` / `plugins` / `observability` / `a2a` / `context`。
 
 `settings.yaml` 只放「用的时候调」的五段：`observability` / `a2a` / `context` /
-`user_space`。
+`user_space` / `search`（检索索引的自动同步参数，在「搜索」页改）。
 读取时与代码默认值合并，**缺项也能跑**。
 
 ---
@@ -635,7 +677,10 @@ KEEPER_PORT=9090 npm run dev
 │   ├── user/<space>/      用户空间（含 default）
 │   ├── agent/<agent_id>/  agent 级私有产物（插件索引 / 缓存）
 │   └── session/<sid>/     会话空间（这一轮的工作目录）
-├── memory/days/<日期>/    记忆：turns.jsonl + FTS5 索引
+├── memory/                记忆：L1 短期记忆（按**会话**隔离）
+│   ├── sessions/<sid>/    会话记忆（turns.jsonl + FTS5 索引）
+│   └── days/<日期>/       旧的按天作用域目录（历史数据，仍可读）
+├── search/                检索层：索引库 search.db + 本地嵌入模型 models/
 ├── evals/                 评测产物（基线 / 运行记录）
 ├── prompt-dump/           prompt 落盘（调试，默认关）
 ├── context-store/         上下文外部化的块
@@ -660,6 +705,7 @@ KEEPER_PORT=9090 npm run dev
 | `/manage/sessions/trash` | 会话回收站（软删除会话的列表与恢复） |
 | `/agents/{agent_id}/*` | 会话：对话、能力开关、我的空间文件、时间线、附件 |
 | `/user-spaces/*` | 我的空间：浏览 / 读写 / 重命名 / 删除 / 导入导出 |
+| `/search/*` | 检索层：索引管理（模型 / 建索引 / 清索引 / 配置）+ 混合检索 + 文档与切片维护 |
 | `/metrics/*` | 可观测：用量、耗时、错误、提问率、重复调用 |
 | `/framework/*` | 本机运行时（python / node）检测 |
 | `/evals/*` | 评测 |
@@ -704,6 +750,11 @@ python tests/test_guard.py           # 安全守卫：白名单放行、绕过�
 python tests/test_planner_parse.py   # ReAct 文本协议解析
 python tests/test_hallucination_guard.py
 python tests/test_protocol.py        # ReAct 标签协议
+python tests/test_search.py          # 检索层：切片 / 索引 / 混合检索
+python tests/test_kb_pdf.py          # 知识库工具：PDF 页码 / 渲染 / 召回
+python tests/test_session_link.py    # 会话空间里「我的空间」软链接
+python tests/test_session_link_guard.py  # 链接的越界 / 成环防护
+python tests/test_workspace_note.py  # 注入 system prompt 的环境说明
 ```
 
 ---
@@ -746,6 +797,7 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 | 插件库与绑定 | [`plugin-design.md`](doc/plugin-design.md) |
 | **我的空间**（展示编辑 + 向量搜索） | [`user-space.md`](doc/user-space.md) |
 | **检索层**（切片 / 索引 / 混合检索） | [`indexing.md`](doc/indexing.md) |
+| **知识库读取**（PDF 页面截图 / `kb.*` 工具） | [`kb-pdf-pages.md`](doc/kb-pdf-pages.md) |
 | 跨端协作 | [`collaboration-contract.md`](doc/collaboration-contract.md) |
 | 可观测 | [`observability-design.md`](doc/observability-design.md) |
 | 评测 | [`evals.md`](doc/evals.md) |

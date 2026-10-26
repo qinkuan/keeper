@@ -47,6 +47,24 @@ npm start                       # 3) 启动
 路径安全由 `spaceFs.js` 的 `resolveSpacePath` 兜住：所有路径都必须在
 「我的空间」根之下，越界直接拒绝。
 
+## 窗口：macOS 隐藏标题栏，其他平台保留
+
+| 平台 | 窗口形态 |
+|---|---|
+| **macOS** | `titleBarStyle: 'hidden'`——**没有系统标题栏**，红绿灯浮在页面左上角（`trafficLightPosition: {x:12, y:12}`） |
+| **Windows / Linux** | 保留系统标题栏，标题文字缩短为 `Keeper` |
+
+前端配套（`web/src/App.tsx`）：
+
+- macOS 下渲染一条横跨整窗的**自绘拖拽条**（`.kp-dragbar`，`-webkit-app-region: drag`），
+  侧栏与内容区都从它下面开始；纯 Web 版没有红绿灯，所以不渲染这条。
+- **双击标题栏最大化 / 还原**由主进程代劳（`keeper:toggle-maximize`）：
+  drag 区域的指针事件不会派发给渲染进程，前端收不到 `dblclick`。
+
+为什么 Windows / Linux 不动原生标题栏：Electron 30 的 `titleBarOverlay` 能把系统按钮
+浮在右上角，但那是**盖在内容上**的——知识库、设置、我的空间这些页面右上角都有控件，
+会被压住。为这点观感去改一堆页面的布局不划算。
+
 ## 为什么是 sidecar 而不是搬进 Node
 
 keeper 的不可替代资产都在 Python 侧：jieba 中文分词（FTS5 检索依赖它）、ReAct

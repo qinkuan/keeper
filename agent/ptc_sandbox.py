@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -68,18 +69,45 @@ def sandbox_root() -> Path:
     return Path(base) if base else (Path.home() / ".keeper" / "ptc-sandbox")
 
 
-def ensure_venv() -> Path:
-    """确保隔离 venv 存在并返回其 python 路径。
+def _python_for_venv() -> str:
+    """能用来建 venv 的解释器路径。
 
-    测试时可被 monkeypatch（例如 ``ptc_sandbox.ensure_venv = lambda: sys.executable``）
-    以避免真正建 venv。
+    冻结形态（PyInstaller，见 packaging/keeper-kernel.spec）下 sys.executable
+    是**内核可执行文件**本身，它不支持 ``-m venv``（那等于把内核再跑一遍）。
+    这时退回系统 python3：macOS 自带 /usr/bin/python3（装了 Command Line Tools 就有），
+    其余平台按 PATH 找。都没有就明确报错，别让沙箱建到一半才崩。
     """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for cand in ("/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"):
+        if os.path.exists(cand):
+            return cand
+    found = shutil.which("python3")
+    if found:
+        return found
+    raise RuntimeError(
+        "当前形态下没有可用的 python3（沙箱需要它来建隔离 venv）；"
+        "装一下 Xcode Command Line Tools 即可：xcode-select --install"
+    )
+
+
+def _bundled_python() -> str:
+    """桌面壳注入的内置解释器（打包形态下用户机器上没有 python3 时用）。
+
+    KEEPER_PYTHON 指向 ``~/.keeper/runtime/bin/python3`` —— 一个 shim，转发到
+    冻结内核的 ``--py`` 模式：解释器本体和 numpy 之类的依赖都在 app 的 bundle 里。
+    """
+    return (os.environ.get("KEEPER_PYTHON") or "").strip()
+
+
+def _make_venv(python: str) -> Path:
+    """用给定解释器建隔离 venv，预装常用库，返回 venv 里的 python 路径。"""
     root = sandbox_root()
     venv = root / "venv"
     if venv.exists():
         return venv / "bin" / "python"
     root.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    subprocess.run([python, "-m", "venv", str(venv)], check=True)
     py = venv / "bin" / "python"
     # 预装常用库（按需扩展）；失败不致命（某些环境无网络）。
     subprocess.run(
@@ -88,6 +116,25 @@ def ensure_venv() -> Path:
         check=False,
     )
     return py
+
+
+def ensure_venv() -> Path:
+    """确保能跑代码的解释器存在，返回它的路径。
+
+    测试时可被 monkeypatch（例如 ``ptc_sandbox.ensure_venv = lambda: sys.executable``）
+    以避免真正建 venv。
+
+    冻结形态（打包 app）下**优先用内置解释器、也不建 venv**：内置解释器就是内核
+    自己（没法 ``-m venv``，那等于把内核再跑一遍），而它自带依赖，直接用即可。
+    代价是沙箱里没有独立 site-packages —— numpy 这类 bundle 里有的库能用，
+    pandas（要 pip 装）就没有。
+    """
+    if getattr(sys, "frozen", False):
+        bundled = _bundled_python()
+        if bundled:
+            return Path(bundled)
+        # 桌面壳没注入内置解释器：退回系统 python3，能建 venv 就建
+    return _make_venv(_python_for_venv())
 
 
 def make_run_dir() -> Path:

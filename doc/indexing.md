@@ -1,6 +1,7 @@
-# Markdown 切片规则与数据库设计
+# 文档切片规则与数据库设计
 
-本文档描述 keeper 检索层（`search/`）当前的 Markdown 切片策略、索引流程与查询策略。
+本文档描述 keeper 检索层（`search/`）当前的切片策略（Markdown 结构化切片 + PDF
+按页切片）、索引流程与查询策略。
 
 > **出处**：这一层最初是独立项目 k-search，2026-10 整体迁入 `keeper/search/`。
 > 迁入时按 keeper 的约定改了三处：**运行时数据落到 `~/.keeper/search/`**、
@@ -9,12 +10,15 @@
 
 实现位置：
 
-- 切片：`search/ingest/chunk.py`
+- 切片：`search/ingest/chunk.py`（Markdown）、`search/ingest/pdf.py`（PDF）
 - 索引编排：`search/indexer.py`
 - 向量化：`search/ingest/embed.py`
 - 存储：`search/store/db.py`
 - 查询：`search/query.py` + `search/store/db.py:search_similar`
 - 装配（连接 + 模型 + 索引 + 检索的组合入口）：`search/service.py`
+
+> **谁在用它**：界面侧的「搜索」页（索引管理 + 查询）与 agent 侧的 `kb.*` 工具
+> （见 [`kb-pdf-pages.md`](kb-pdf-pages.md)）都走这一层。
 
 ---
 

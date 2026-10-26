@@ -144,7 +144,14 @@ async def call_subprocess_tool(
     # 让子进程用上 keeper 自己的虚拟环境：bin 脚本普遍写 `#!/usr/bin/env python3`，
     # 而 keeper 跑在 .venv 里（openpyxl 等依赖装在那）。不把 venv 的 bin 提到 PATH
     # 最前，子进程的 python3 会解析到系统 python3——缺依赖，插件「装了却跑不了」。
+    #
+    # 冻结形态（打包 app）：sys.executable 是内核自己，它不是解释器；真正的解释器
+    # 由桌面壳放在 KEEPER_PYTHON 指向（内置 python3 shim → 冻结内核的 --py 模式，
+    # 依赖同样在 bundle 里）。取它的目录来提 PATH，插件的 shebang 就命中它。
     venv_bin = os.path.dirname(sys.executable)
+    bundled_python = (os.environ.get("KEEPER_PYTHON") or "").strip()
+    if bundled_python:
+        venv_bin = os.path.dirname(bundled_python)
     env = dict(os.environ)
     if venv_bin:
         env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")

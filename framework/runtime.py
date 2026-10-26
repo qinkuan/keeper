@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -128,6 +129,13 @@ def _candidate_paths(kind: str) -> List[str]:
     explicit = cfg.get("python") if kind == "python" else cfg.get("node")
     if explicit:
         out.append(explicit)
+
+    # 桌面壳注入的内置运行时（打包形态下用户机器上可能什么都没装）：
+    # KEEPER_PYTHON / KEEPER_NODE 指向 ~/.keeper/runtime/bin 里的 shim。
+    # 排在 extra_paths 与 PATH 之前 —— 内置的那份一定可用。
+    bundled = (os.environ.get("KEEPER_PYTHON" if kind == "python" else "KEEPER_NODE") or "").strip()
+    if bundled:
+        out.append(bundled)
 
     for p in cfg.get("extra_paths") or []:
         pp = Path(p)

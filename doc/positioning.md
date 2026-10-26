@@ -100,11 +100,12 @@
 
 - **读**：把「我的空间」里的文件按类型渲染出来（md / 代码 / 表格 / PDF / 图片 /
   HTML / 视频），用户与 agent 看到的是同一份内容。
-- **找**：目录树浏览 + 关键词；**语义检索**（向量 + 跨模态）**在建**。
+- **找**：目录树浏览 + 关键词；**语义检索**（本地向量 + 关键词混合）**已可用**，
+  跨模态（图片 / 音视频）**在建**。
 - **改**：在预览里直接编辑并保存回原文件（md / 代码 / 表格已支持；更多格式在建）。
 - **交**：agent 产出带类型的交付块（图表 / 流程图 / 表格 / 地图 / 音频 / 文件），
   直接嵌在回答里，正文用 `[[art:ref]]` 定位。
-- **记**：按天的短期记忆已可用；**长期事实库**（跨会话、跨天）**在建**。
+- **记**：按会话的短期记忆已可用；**长期事实库**（跨会话、跨天）**在建**。
 
 协作示例：用户问「我们上次定的缓存方案是什么」→ 本端经 A2A 派 Task 给对端 →
 对端 `INPUT_REQUIRED` 反问「哪份文档？」→ 本端答 → 对端从知识库检索并回 Artifact →
@@ -145,8 +146,10 @@
 | **改**：编辑并保存回原文件（md / 代码 / 表格保公式格式） | ✅ | `UserSpacePage.tsx` + `SheetViewer` |
 | **交**：带类型的交付块（file / chart / mermaid / table / map / audio） | ✅ | `viewer/block.py` + `tools/builtin/` |
 | **找**：目录树浏览 + 关键词（`grep` / `find`） | ✅ | `zonefilesystem/browse.py` + `bash` 插件 |
-| **找**：语义 / 跨模态向量检索 | 🚧 在建 | 见 [`roadmap.md`](roadmap.md) 方向 ② |
-| **记**：按天短期记忆 + FTS5 检索 | ✅ | `memory/` |
+| **找**：本地语义检索（向量 + 关键词混合，Markdown / PDF） | ✅ | `search/` + 「搜索」页；见 [`indexing.md`](indexing.md) |
+| **找**：agent 侧读本地资料（`kb.*` 工具） | ✅ | `knowledge/`；见 [`kb-pdf-pages.md`](kb-pdf-pages.md) |
+| **找**：跨模态向量检索（图片 / 代码 / 表格 / 音视频） | 🚧 在建 | 见 [`roadmap.md`](roadmap.md) 方向 ② |
+| **记**：按会话短期记忆 + FTS5 检索 | ✅ | `memory/` |
 | **记**：长期事实库（跨会话 + 画像 + 衰减） | 🚧 在建 | 见 [`roadmap.md`](roadmap.md) 方向 ③ |
 | **本地创建 agent** | ✅ | `agent/api.py` → `POST /manage/agents` |
 | 启动 / 停止 agent | ✅ | `agent/api.py` → `POST /manage/agents/{id}/start` / `unload` |

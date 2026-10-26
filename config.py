@@ -482,7 +482,19 @@ def _overlay(target: Any, patch: Dict[str, Any]) -> None:
 
 
 def default_config_path() -> Path:
-    """框架配置默认位置：config.yaml。"""
+    """框架配置默认位置：config.yaml。
+
+    **KEEPER_CONFIG 优先**（打包形态下必须有）：
+    桌面壳把配置放在 ``~/.keeper/config.yaml``（用户数据目录），并用这个环境变量
+    指给内核。内核里那些**不带参数**的 load_config() 调用（核心 agent 装配、
+    save_agent_env 写回 agent_overrides 等）必须与命令行 ``--config`` 指向同一份，
+    否则会用错配置、还会把 agent_overrides 写进只读的 app 包里。
+    """
+    env = (os.environ.get("KEEPER_CONFIG") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if p.exists():
+            return p
     return Path(__file__).parent / "config.yaml"
 
 

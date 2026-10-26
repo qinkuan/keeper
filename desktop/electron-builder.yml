@@ -1,0 +1,75 @@
+# electron-builder 配置：把桌面壳打成可安装的 macOS 应用。
+#
+# 产物结构（安装后）：
+#   Keeper.app/Contents/Resources/
+#     app.asar              # Electron 主进程（窗口 / IPC / sidecar）
+#     kernel/               # PyInstaller 冻出来的内核：自带 Python 运行时
+#       keeper-kernel       #   可执行文件
+#       _internal/          #   依赖 + 前端产物（web/dist）
+#     config.default.yaml   # 首次运行时复制到 ~/.keeper/config.yaml
+#
+# 为什么要带 kernel/：目标机**不装 Python**也要能跑内核。Electron 自己带了
+# Node 运行时（Chromium 内嵌），所以「打包 node 环境」这件事不需要额外做什么。
+
+appId: dev.keeper.desktop
+productName: Keeper
+copyright: Keeper
+
+directories:
+  output: release
+  buildResources: build
+
+# 只装主进程那几个 js + package.json。node_modules 里只有 electron（开发用），
+# 运行时不需要，不进包。
+files:
+  - main.js
+  - preload.js
+  - sidecar.js
+  - spaceFs.js
+  - spaceWatch.js
+  - package.json
+
+extraResources:
+  - from: ../packaging/dist/kernel
+    to: kernel
+    filter:
+      - "**/*"
+  - from: ../packaging/dist/config.default.yaml
+    to: config.default.yaml
+  # 内置插件库（bash / pdf / excel / plugin-installer…）。首次运行时复制到
+  # ~/.keeper/plugins —— 那才是内核真正读的位置（config.yaml 的 plugins.root）。
+  # 不带上的话，agent 连一条 shell 命令都跑不了（bash 插件是唯一的执行入口）。
+  - from: ../plugins
+    to: plugins
+    filter:
+      - "**/*"
+
+asar: true
+
+mac:
+  category: public.app-category.productivity
+  darkModeSupport: true
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  # 没有开发者证书时**不要**去找签名身份：有证书就配 CSC_LINK / CSC_KEY_PASSWORD，
+  # electron-builder 会自动签名 + 公证；没有就本地能跑（别人机器上首次打开需要
+  # 右键→打开，或 xattr -dr com.apple.quarantine）。
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSHumanReadableCopyright: Keeper
+
+dmg:
+  title: Keeper ${version}
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  contents:
+    - x: 140
+      y: 190
+      type: file
+    - x: 400
+      y: 190
+      type: link
+      path: /Applications

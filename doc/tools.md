@@ -26,6 +26,21 @@
 不设内置的文件工具。理由：内置工具每加一种文件格式就要写一套解析与预览，
 而插件（`bash` + `excel` + `pdf`）能覆盖得更宽。
 
+### 记忆与知识库工具（随内置注册）
+
+`tools/collect.py` 除内置工具外，还注册两组**内核自带**的工具：
+
+| 工具 | 作用 | 落点 |
+|---|---|---|
+| `recall` / `read` | agentic retrieval：召回本会话的记忆块 / 惰性展开原文 | `memory/tools.py` |
+| `kb.search` | 在「我的空间」里检索，召回并定位（Markdown 给行号、PDF 给页码） | `knowledge/tools.py` |
+| `kb.read_pdf` | 按路径 + 页范围读 PDF，返回那几页的**截图** | `knowledge/tools.py` |
+| `kb.read_markdown` | 按路径 + 起始行读 Markdown 原文 | `knowledge/tools.py` |
+
+`kb.*` 的设计见 [`kb-pdf-pages.md`](kb-pdf-pages.md)：**召回只定位，阅读才给内容**。
+它也是目前唯一能返回**多模态块**的工具——`tools/base.py` 的 `ToolResult` 让工具结果
+带 `text` + `blocks`，图片走厂商 Files API 进上下文（不进文本预算、不被外部化）。
+
 ---
 
 ## 二、注册表与容错

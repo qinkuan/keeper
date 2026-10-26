@@ -28,10 +28,20 @@ from pathlib import Path
 # 支持直接运行本文件（IDE 右键 Run/Debug、python keeper/main.py）。
 # 坑：直接运行时 sys.path 里会有脚本所在目录 keeper/，它与 keeper 包同名，
 # 若其中存在 keeper.py 就会遮蔽真正的包。所以先摘掉该目录，再把项目根插到最前。
-_HERE = str(Path(__file__).resolve().parent)         # .../keeper/keeper
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])  # .../keeper
-sys.path[:] = [p for p in sys.path if p != _HERE]
-if _PROJECT_ROOT not in sys.path:
+#
+# 冻结形态（PyInstaller，见 packaging/keeper-kernel.spec）：模块被塞进 bundle，
+# __file__ 指向的是 bundle 内的虚拟路径；取不到时退回 sys._MEIPASS。
+# 这段路径计算在冻结形态下**只用于兜底**：真正的包由 PyInstaller 直接收集，
+# 不依赖 sys.path。
+try:
+    _HERE = str(Path(__file__).resolve().parent)         # .../keeper/keeper
+    _PROJECT_ROOT = str(Path(__file__).resolve().parents[1])  # .../keeper
+except (NameError, TypeError):  # 冻结形态：__file__ 可能不可用
+    _HERE = getattr(sys, "_MEIPASS", "") or ""
+    _PROJECT_ROOT = _HERE
+if _HERE:
+    sys.path[:] = [p for p in sys.path if p != _HERE]
+if _PROJECT_ROOT and _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from keeper.config import load_config
@@ -217,7 +227,13 @@ def make_app():
 
     # 生产托管：把构建好的前端（web/dist）作为站点根，单进程同时提供 API + 页面。
     # 放在最后，确保 /agents、/health 等业务路由优先于通配的静态挂载匹配。
-    web_dist = Path(_HERE) / "web" / "dist"
+    #
+    # KEEPER_WEB_DIST：打包形态下前端可以是**外挂资源**（不冻进内核），
+    # 由桌面壳指路；开发形态留空，仍按包目录找 web/dist。
+    web_dist = Path(
+        (os.getenv("KEEPER_WEB_DIST") or "").strip()
+        or (Path(_HERE) / "web" / "dist")
+    )
     if web_dist.is_dir():
         from fastapi.staticfiles import StaticFiles
 

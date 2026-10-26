@@ -59,6 +59,7 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 │           observability/api.py  可观测查询（/metrics）          │
 │           evals/api.py          评测                            │
 │           framework/api.py      本机运行时检测                  │
+│           search/api.py         检索（索引管理 + 查询）         │
 ├─────────────────────────────────────────────────────────────┤
 │ 内核层    agent/    装配（keeper.py/core.py）+ 执行（executor/  │
 │                     process/planner/protocol）+ 子 agent      │
@@ -70,6 +71,8 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 │           mcp/      MCP 多 server 连接                         │
 │           memory/   记忆存储 / 检索 / 摘要 / 召回工具            │
 │           search/   文档切片 / 索引 / 向量+关键词混合检索        │
+│           knowledge/ 知识库工具（kb.search / kb.read_*）        │
+│           pdfpage/  PDF 页面渲染（给 agent 看的那张图）          │
 │           peer/ a2a/  对外协作（我→对端 / 对端→我）             │
 ├─────────────────────────────────────────────────────────────┤
 │ 支撑层    store/    数据库与 ORM 模型                          │
@@ -159,7 +162,8 @@ MCP 组件或 bin 组件）。
 - `config.yaml` —— **元配置**，只由人手动改：server / agent / core_agent /
   framework / llm / workspace / agent_overrides / plugins / observability / a2a / context
 - `~/.keeper/settings.yaml` —— **用户设置**，设置页写入、**立即生效**不需重启：
-  observability / a2a / context / user_space
+  observability / a2a / context / user_space / search（检索索引的自动同步参数，
+  在「搜索」页改）
 
 读取时按段覆盖，所以 settings.yaml 缺项也能跑（与代码默认值合并）。
 
@@ -167,14 +171,18 @@ MCP 组件或 bin 组件）。
 
 - `zonefilesystem/`：「我的空间」的文件操作（浏览、读写、重命名、删除、导入导出），
   从 `chat/api.py` 里收归到独立包，Web 层只负责解析请求
+- `zonefilesystem/session_link.py`：在**会话空间**里建 `my-space/` 软链接指向「我的空间」，
+  agent 用相对路径就能读写用户文件；配套在 system prompt 里注入「当前环境」一节
+  （`agent/process.py::_workspace_note`），说明那是用户的地盘、改动前要先确认。
+  详见 [`user-space.md`](user-space.md)
 - `viewer/block.py`：交付块的模型（`file` / `chart` / `mermaid` / `table` / `map` / `audio`），
   前端按 kind 渲染（`web/src/components/BlockView.tsx`）
 
 ### `memory/` —— 记忆
 
 - `retriever.py`：jieba 预分词 + SQLite FTS5 检索
-- `store.py`：**按天作用域**的短期记忆（`~/.keeper/memory/days/<日期>/turns.jsonl` + 索引）
-  ——同一天开的多个会话共享记忆
+- `store.py`：**按会话作用域**的短期记忆（`~/.keeper/memory/sessions/<session_id>/turns.jsonl`
+  + 索引）——2026-10 从「按天共享」改为「按会话隔离」，见 [`memory.md`](memory.md)
 - `extractor.py`：异步记忆块摘要（LLM 解耦）
 - `tools.py`：agentic retrieval 工具（`recall` / `read`）
 
@@ -196,6 +204,28 @@ MCP 组件或 bin 组件）。
 
 数据落在 `~/.keeper/search/`（索引库 `search.db` + 模型权重 `models/`）；
 被索引的目录默认是「我的空间」。
+
+### `knowledge/` 与 `pdfpage/` —— 把本地资料交给 agent
+
+检索层负责「找到哪一页」，`knowledge/` 负责「把这一页给模型看」。详见
+[`kb-pdf-pages.md`](kb-pdf-pages.md)。
+
+- `knowledge/tools.py`：三个工具 —— `kb.search`（召回并定位）、`kb.read_pdf`（按页读，
+  返回那几页的**截图**）、`kb.read_markdown`（按行读原文）。在 `tools/collect.py` 里
+  与记忆工具一起注册
+- `knowledge/__init__.py`：对外暴露 `build_knowledge_tools` / `resolve_in_space` /
+  `expand_pages` / `MAX_PAGES`
+- `pdfpage/render.py`：PDF 页面 → PNG（pypdfium2 渲染，PNG 编码自己写），
+  不引 Pillow / PyMuPDF
+
+**为什么是截图而不是文字**：PDF 的版面信息（表格、多栏、示意图）都在像素里，
+抽文字会丢；截图通过厂商 Files API 进上下文，模型能直接"看见"那一页。
+代价是**只能定位、不能摘录**——所以设计成「召回只定位，阅读才给内容」。
+
+配套改动：`tools/base.py` 的 `ToolResult`（文本 + 可选多模态块）让工具结果能带图；
+`agent/process.py` 把带块的 tool 消息构造成数组形态的 content（厂商侧与「用户上传附件」
+同构），并给这类消息打 `_media` 标记，让上下文压缩器跳过它们（图一旦被外部化成
+block_id 就永远到不了模型眼前）。
 
 ### `evals/` —— 评测闭环
 
@@ -360,7 +390,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 │   ├── user/<space>/           用户空间（含 default）
 │   ├── agent/<agent_id>/       agent 级私有产物（插件索引 / 缓存）
 │   └── session/<session_id>/   会话空间（这一轮的工作目录）
-├── memory/days/<日期>/         记忆：turns.jsonl + FTS5 索引
+├── memory/sessions/<sid>/     记忆（按会话）：turns.jsonl + FTS5 索引
 ├── search/                     检索：索引库 search.db + models/（embedding 权重）
 ├── evals/                      评测产物（基线 / 运行记录）
 ├── prompt-dump/                prompt 落盘（调试，默认关）
@@ -386,6 +416,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 | `/manage/sessions/trash` | 会话回收站（软删除会话的列表与恢复） |
 | `/agents/{agent_id}/*` | 会话：对话、能力开关、我的空间文件、时间线、附件 |
 | `/user-spaces/*` | 我的空间：浏览 / 读写 / 重命名 / 删除 / 导入导出 |
+| `/search/*` | 检索层：索引管理（模型 / 建索引 / 清索引 / 配置）+ 混合检索 + 文档与切片维护 |
 | `/metrics/*` | 可观测：用量、耗时、错误、提问率、重复调用 |
 | `/framework/*` | 本机运行时（python / node）检测 |
 | `/evals/*` | 评测 |
@@ -442,6 +473,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 | `agent/context_store.py` | [`context.md`](context.md) | 外部化、压缩、水位 |
 | `zonefilesystem/` | [`user-space.md`](user-space.md) | 我的空间、文件展示与编辑、**向量跨模态搜索规划** |
 | `search/` | [`indexing.md`](indexing.md) | 文档切片、索引、向量 + 关键词混合检索 |
+| `knowledge/` + `pdfpage/` | [`kb-pdf-pages.md`](kb-pdf-pages.md) | `kb.*` 工具、PDF 页面渲染、把资料交给 agent |
 | `viewer/` | [`artifact-design.md`](artifact-design.md) | 交付块模型与渲染 |
 | `observability/` | [`observability-design.md`](observability-design.md) | 事实表、指标、定价 |
 | `evals/` | [`evals.md`](evals.md) | 用例集、基线、报告 |
@@ -469,6 +501,8 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 | `llm.md` | 模型预设、显式绑定、计价、调用链技术债 |
 | `plugin-design.md` | 插件库、清单格式、绑定机制 |
 | `user-space.md` | **我的空间**：文件展示与编辑、**向量跨模态搜索** |
+| `indexing.md` | **检索层**：Markdown/PDF 切片、索引库、向量 + 关键词混合检索 |
+| `kb-pdf-pages.md` | **知识库读取**：`kb.search` / `kb.read_pdf` / `kb.read_markdown` |
 | — 外部与质量 — | |
 | `collaboration-contract.md` | 跨端协作契约（thread / message、超时熔断、降级） |
 | `observability-design.md` | 可观测（一次 LLM 调用一行的选型依据） |

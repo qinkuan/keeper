@@ -6,9 +6,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "postinstall": "echo 提示：本壳不打包 Python，内核沿用 keeper 目录里的 .venv"
+    "pack:mac": "bash ../packaging/build_macos.sh",
+    "postinstall": "echo 提示：本壳不打包 Python，内核沿用 keeper 目录里的 .venv（要打成 app 用 npm run pack:mac）"
   },
   "devDependencies": {
-    "electron": "^30.5.1"
+    "electron": "30.5.1",
+    "electron-builder": "^26.0.0"
   }
 }

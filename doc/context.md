@@ -203,7 +203,7 @@ max_tokens 只有 4096**——"什么都不配"其实已经在被截了。16384 
 | | 上下文治理 | 记忆 |
 |---|---|---|
 | 方向 | 把**当前轮**的内容挪出去 | 把**历史轮**的内容取回来 |
-| 存储 | `~/.keeper/context-store` | `~/.keeper/memory/days/<日期>/turns.jsonl` + FTS5 |
+| 存储 | `~/.keeper/context-store` | `~/.keeper/memory/sessions/<session_id>/turns.jsonl` + FTS5 |
 | 触发 | 系统侧自动（水位 / 窗口） | 模型主动 `recall` / `read` |
 
 两者共用 `read(block_id)` 的取回方式，但**块来自不同目录**。

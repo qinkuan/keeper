@@ -38,3 +38,7 @@ dist/
 data/keeper.db-shm
 data/keeper.db-wal
 data
+
+# 打包产物（安装包与构建中间物，不进版本库）
+desktop/release/
+packaging/build/

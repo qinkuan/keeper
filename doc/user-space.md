@@ -82,6 +82,8 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 | **Excel**（xlsx/xls/csv/tsv） | SheetJS 表格，多 sheet | ✅ 单元格可改，公式格式保留 | `SheetViewer` + `SheetGrid` |
 | PDF | pdf.js 渲染 canvas，纵向翻页 | ❌ | `PdfViewer` |
 | 图片 | 内联，缩放平移、双击复位 | ❌ | `ImageViewer` + `PanZoomStage` |
+| 图表（Vega / Mermaid） | 渲染成图，缩放平移、双击复位 | ❌ | `DiagramView` + `PanZoomStage` |
+| Office（docx / docm / pptx / pptm） | **不做页面内预览**，「用系统应用打开」 | ❌ | `officeTypes.ts` |
 | HTML | 不内嵌，「在浏览器中打开」 | ❌ | — |
 | 视频 | 浏览器原生播放器 | ❌ | — |
 | 音频 / 其它二进制 / 超 2MB | 信息卡 + 下载 | ❌ | `viewers.ts` |
@@ -280,6 +282,13 @@ PDF 不是块模型，是「页面 + 批注」：
 「那个讲缓存穿透的文档在哪」——标题叫「缓存那些事」的 md 找不到；
 「去年那个 Excel 里画了折线图的」更无从下手。
 
+> **已落地部分**（2026-10）：本节的设计已经实现了第一层——
+> `search/` 提供 Markdown / PDF 切片 + 向量与关键词混合检索，界面在侧栏底部菜单的
+> 「搜索」页（索引管理 + 查询），agent 侧通过 `kb.search` / `kb.read_pdf` /
+> `kb.read_markdown` 读取（见 [`indexing.md`](indexing.md) 与
+> [`kb-pdf-pages.md`](kb-pdf-pages.md)）。
+> 下面写的是**原设计**——跨模态嵌入、结构化过滤、`@我的空间` 语义候选仍未做。
+
 ### 设计
 
 #### 4.1 整体链路
@@ -410,7 +419,7 @@ API 嵌入作为可选项，且要在界面上说清「启用后文件内容会�
 | **大文件分级降级** | ❌ 未做 | 见 3.6；现在超 2MB 直接只给元数据 |
 | **版本与撤销** | ❌ 未做 | 见 3.7 |
 | **任意文件 diff** | ❌ 未做 | 见 3.8；现在只有 git 仓库内的文件有 |
-| **索引器 / 向量检索** | ❌ 未做 | 见第四节 |
+| **索引器 / 向量检索** | 🟡 部分 | 检索层已落地（`search/`，见 [`indexing.md`](indexing.md)）：Markdown + PDF 切片、向量 + 关键词混合检索、「搜索」页、agent 侧 `kb.*` 工具（见 [`kb-pdf-pages.md`](kb-pdf-pages.md)）。跨模态（图片 / 代码 / 表格 / 音视频）与结构化过滤仍未做 |
 | **工作区不可编辑** | ⚠️ 设计如此 | 工作区是**会话级属性**（`~/.keeper/workspace/session/<sid>/`），不存在 agent 级开关可改；要换的是「我的空间」的目录设置 |
 | 危险工具（bash）执行前二次确认 | ❌ 未做 | 见 [`tools.md`](tools.md) |
 | prompt 落盘脱敏 | ❌ 未做 | 见 [`security.md`](security.md) |
