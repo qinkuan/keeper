@@ -16,7 +16,7 @@
   Python/Node —— 所以每一步都用**绝对路径**指向内置的运行时，不靠 PATH 猜。
 #>
 param(
-  [string]$AppDir = "$PSScriptRoot\..\..\desktop\release\mac-win-unpacked",
+  [string]$AppDir = "$PSScriptRoot\..\..\desktop\release\win-unpacked",
   [string]$DistDir = "$PSScriptRoot\..\dist"
 )
 

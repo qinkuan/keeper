@@ -54,6 +54,13 @@ jobs:
           path: desktop/release/*.exe
           retention-days: 30
 
+      - name: 挂到 Release（仅 tag 构建）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/release/*.exe
+          generate_release_notes: true
+
       - name: 上传日志
         if: failure()
         uses: actions/upload-artifact@v4
