@@ -57,6 +57,35 @@ import { Stat } from "./components/ui/Stat";
  * 低频配置（设置 / 可观测 / 回收站 / 模型管理）收在底部 Keeper 菜单；
  * 「我的空间」是高频入口，提升为顶部主导航项。
  */
+/**
+ * macOS 桌面壳：窗口**没有系统标题栏**（main.js 设了 titleBarStyle: 'hidden'），
+ * 只留三个红绿灯浮在窗口左上角。
+ *
+ * 顶上因此要自己补一条能抓住窗口的地方：横跨整窗的拖拽条（TopDragBar）。
+ * 它盖在**侧栏和内容区上面**，侧栏与内容区都从它下面开始 ——
+ * 这样"侧栏 / 顶条 / 内容区"三者的交点就在一个点上，
+ * 内容面板的左上圆角正好画在这个交点上（VS Code 的编辑器区就是这么衔接的）。
+ *
+ * 只在 macOS 桌面壳下出现：Windows / Linux 仍是系统标题栏（那里不需要），
+ * 纯 Web 版也没有红绿灯 —— 否则顶部会平白多出一条。
+ */
+function isMacDesktopShell(): boolean {
+  if (typeof window === "undefined") return false;
+  const host = (window as unknown as { keeperHost?: { platform?: string } }).keeperHost;
+  return host?.platform === "darwin";
+}
+
+/**
+ * 顶条：横跨整窗的一条（红绿灯在最左），可以拖着它移动窗口。
+ *
+ * 外观与内容区一致（同一块底色），不放标题：每个页面都有自己的大标题，
+ * 这里再写一遍是重复。
+ */
+function TopDragBar() {
+  if (!isMacDesktopShell()) return null;
+  return <div className="kp-dragbar" />;
+}
+
 /** 可拖拽竖分隔条：拖动时按水平位移回调，父级据此调整右栏宽度。 */
 function HResizer({ onResize }: { onResize: (dx: number) => void }) {
   const dragging = useRef(false);
@@ -300,7 +329,15 @@ export default function App() {
   );
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-panel text-ink">
+    /* 根容器用**侧栏的底色**：内容面板左上角切了圆角后，圆角里透出来的就是根容器，
+       于是侧栏的颜色自然地绕进内容面板的角上（VS Code 的编辑器区就是这么衔接的）。
+       侧栏和内容列各自铺满自己的位置，根底色只在圆角那一小块露出来。 */
+    <div className="relative flex h-screen w-full flex-col overflow-hidden bg-sidebar text-ink">
+      {/* 顶条：横跨整窗的一条（红绿灯在最左），侧栏与内容区都从它下面开始。
+          这样"侧栏 / 顶条 / 内容区"三面交在同一个点上，内容面板的左上圆角
+          正好画在这个交点上。 */}
+      <TopDragBar />
+      <div className="flex min-h-0 flex-1">
       {/* ============ 侧栏 ============ */}
       {/*
         截图里的侧栏结构（自上而下）：
@@ -314,13 +351,22 @@ export default function App() {
       */}
       <aside
         className={cn(
-          /* 菜单栏底色是主题里的浅蓝（--kp-sidebar）；分隔线用浅蓝本身而非
-             中性灰线，否则一条灰线会横穿在蓝底和蓝底之间很突兀。 */
+          /* 菜单栏底色是主题里的浅蓝（--kp-sidebar）。 */
           "flex shrink-0 flex-col bg-sidebar",
           "transition-[width] duration-200 ease-apple",
+          /* box-border：项目关了 preflight，box-sizing 默认 content-box，
+             边框/内边距会额外加在宽度外面。 */
+          "box-border",
+          /* 收起态就是 52px（图标窄轨）。红绿灯那组按钮宽约 52px，
+             侧栏比它窄时按钮会探出一点、压到顶条上 —— 顶条是空的（只有拖拽区），
+             所以压不到任何东西。不必为了"把红绿灯包进侧栏"而把侧栏撑宽。 */
           collapsed ? "w-[52px]" : "w-[168px]"
         )}
-        style={{ borderRight: "1px solid var(--kp-sidebar-line)" }}
+        style={{
+          /* 侧栏从顶条下面开始（不再自己留红绿灯的位置）：顶条已经横跨整窗，
+             红绿灯浮在顶条上。侧栏与内容区的分界就是内容面板的圆角那条线，
+             所以这里不画右边框 —— 画了会是直线，圆角接不上。 */
+        }}
       >
         {/* 1. **开始对话**
 
@@ -334,6 +380,8 @@ export default function App() {
             - 「开始对话」变成下面 nav 里的**「对话」导航项**——它是侧栏里的主动作，
               但形式上和「智能体」一样是导航项（两者回答同一个问题："我要干什么"），
               不该一个用按钮形态、一个用菜单项形态。点击时仍然先建会话再进去。*/}
+        {/* 侧栏顶部留出的 38px（aside 的 padding-top）是给红绿灯的位置：
+            侧栏底色一直铺到窗口上沿，但内容要压到红绿灯下面。*/}
         <nav className="shrink-0 px-2.5 pt-3.5">
           {NAV_MAIN.map((item) =>
             item.key === "chat" ? (
@@ -485,7 +533,20 @@ export default function App() {
       </aside>
 
       {/* ============ 主区 ============ */}
-      <div className="flex min-w-0 flex-1 flex-col bg-panel">
+      {/* kp-canvas（带光晕的画布底色）挂在**这一列**上，而不是 main：
+          顶上那条可拖动的边要和内容区是同一块底色，底色画在列上，
+          两边才是连续的（画在 main 上，中间隔着拖拽边就会有一道接缝）。
+
+          rounded-tl + 左边框：内容面板的左上角切一个圆角，侧栏的底色从圆角里透出来，
+          视觉上像"内容面板搭在侧栏上"（VS Code 的编辑器区就是这么衔接的）。
+          分隔线画在**这一列的左边**而不是侧栏的右边 —— 前者会跟着圆角走，
+          后者是一条直线，圆角就接不上。
+          overflow-hidden：让子元素（页面内容）也跟着圆角裁切，
+          否则内容的直角会戳出圆角。 */}
+      <div
+        className="kp-canvas flex min-w-0 flex-1 flex-col box-border overflow-hidden rounded-tl-[14px]"
+        style={{ borderLeft: "1px solid var(--kp-sidebar-line)" }}
+      >
         {/*
           这里原来有一条 44px 的顶栏（左「返回 / 页名」，右「智能体 / 设置」）。
           已整体移除：每个页面自己就有 h1 标题，顶栏那份是重复信息；右侧两个
@@ -495,7 +556,7 @@ export default function App() {
           唯一的例外是「返回」——它只在对话页有意义（对话页没有 h1，
           也没有别的回去的路），所以改由 ChatPage 自己负责退出。
         */}
-        <main className="kp-canvas min-h-0 flex-1 overflow-hidden">
+        <main className="min-h-0 flex-1 overflow-hidden">
           {/* 「概览」页已撤下：它的全部职能是"列出 agent 让用户挑一个来聊"，
               而这正是本次要消灭的决策成本（侧栏「开始对话」直接落核心 agent）。
               「智能体」页继续承担"装载 / 配置 / 管理"的职能。 */}
@@ -600,6 +661,7 @@ export default function App() {
             <ChatPage agentId={route.agentId!} />
           )}
         </main>
+      </div>
       </div>
 
       {/* 设置弹窗：从侧栏底部齿轮 → 向上弹出的菜单 → 选一段开一个弹窗。

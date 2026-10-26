@@ -87,12 +87,31 @@ function createWindow(url) {
     return;
   }
 
+  // macOS：隐藏原生标题栏。桌面上那条系统标题栏（写着页面标题）既占高度，
+  // 又和应用自己的侧栏重复 —— 侧栏顶部本来是空的，正好让红绿灯浮在那里
+  // （trafficLightPosition 把它们移到左上角、压在侧栏底色上）。
+  // 「hidden」保留红绿灯（与 'hiddenInset' 不同，后者把红绿灯内缩成小圆点）。
+  //
+  // Windows / Linux：**不动**原生标题栏。Electron 30 的 titleBarOverlay 能把
+  // 系统按钮浮在右上角，但那是**盖在内容上**的 —— 知识库、设置、我的空间这些
+  // 页面右上角都有控件，会被压住。为这点观感去改一堆页面的布局不划算，
+  // 那边只把标题文字缩短（见 title 选项）。
+  const isMac = process.platform === 'darwin';
+
   win = new BrowserWindow({
     width: 1340,
     height: 860,
     minWidth: 900,
     minHeight: 600,
-    title: 'keeper',
+    title: 'Keeper',
+    ...(isMac
+      ? {
+          titleBarStyle: 'hidden',
+          // 红绿灯浮在自绘标题栏上（前端那条 38px 的毛玻璃带），
+          // y=12 让三个按钮在 38px 里大致居中（按钮高 14px）。
+          trafficLightPosition: { x: 12, y: 12 },
+        }
+      : {}),
     backgroundColor: '#0b0f17',
     show: false, // 等首屏渲染完再 show，避免白闪
     webPreferences: {
@@ -226,6 +245,15 @@ if (!app.requestSingleInstanceLock()) {
   // IPC 注册放在 ready 之前：ipcMain.handle 只允许注册一次，早注册省得建窗时序出问题
   // 「我的空间」粘贴：读系统剪贴板里复制的文件路径
   ipcMain.handle('keeper:clipboard-files', () => readClipboardFiles());
+
+  // 双击标题栏 → 最大化 / 还原。标题栏那条带是 -webkit-app-region: drag，
+  // drag 区域的指针事件不会派发给渲染进程（被主进程拿去拖窗口了），
+  // 所以前端收不到 dblclick，只能由主进程代劳（macOS 的肌肉记忆）。
+  ipcMain.on('keeper:toggle-maximize', () => {
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
 
   // 「我的空间」文件操作（桌面原生）：人肉操作走这里，内核端点保留给会话/系统用
   ipcMain.handle('space:list', (_e, root, dir) => spaceFs.list(root, dir));

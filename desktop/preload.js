@@ -14,6 +14,26 @@ contextBridge.exposeInMainWorld('keeperHost', {
    * 主进程实现见 main.js 的 readClipboardFiles。
    */
   readClipboardFiles: () => ipcRenderer.invoke('keeper:clipboard-files'),
+
+  /**
+   * 宿主平台（'darwin' / 'win32' / 'linux'）。
+   *
+   * 前端要靠它决定「要不要给 macOS 的红绿灯按钮让位」：macOS 上窗口是
+   * 无标题栏的（main.js 设了 titleBarStyle: 'hidden'），红绿灯浮在页面左上角，
+   * 前端得在侧栏顶部留出一条空位，否则按钮会压住导航项。
+   * 纯 Web 版没有这个对象 → 前端按「不是桌面壳」处理，不留空位。
+   */
+  platform: process.platform,
+
+  /**
+   * 双击标题栏 → 最大化 / 还原。
+   *
+   * 为什么需要单独做：标题栏那条带是 ``-webkit-app-region: drag``，
+   * 而 **drag 区域里的指针事件不会派发给渲染进程**（它们被主进程拿去
+   * 拖窗口了）—— 所以前端收不到 dblclick，只能由主进程代劳。
+   * macOS 上双击标题栏最大化是肌肉记忆，少了这个会很突兀。
+   */
+  toggleMaximize: () => ipcRenderer.send('keeper:toggle-maximize'),
 });
 
 /**
