@@ -122,7 +122,7 @@ ReAct 每步把 `<THOUGHT>` / `<ACTION>` / 回执 **全量累加**进 messages�
 |---|---|---|
 | `enabled` | `True` | 总开关 |
 | `externalize_min_chars` | 5000 | **滚动**外部化阈值（0 = 不做滚动外部化） |
-| `never_externalize` | 空 | 豁免名单（填了的工具永不外部化，两条路径都不生效） |
+| `never_externalize` | 空 | 额外豁免名单（填了的工具永不外部化，两条路径都不生效） |
 | `retain_days` | 7 | 外部化块保留天数（0 = 不清理） |
 | `observation_limit` | 3500 | **内联上限**：超过就外部化成引用，也是外部化不可用时硬截断的兜底上限 |
 | `max_steps` | 30 | 一轮最多步数 |
@@ -146,6 +146,25 @@ ReAct 每步把 `<THOUGHT>` / `<ACTION>` / 回执 **全量累加**进 messages�
 | `tool_parallel` | 0 | 工具并行：0 关 / 1 只读工具 / 2 只读 + 声明 `mutating: false` 的插件工具 |
 | `tool_parallel_max` | 5 | 单轮最多并发几个 |
 | `max_output_tokens` | 16384 | 单次 LLM 输出上限（0 = 不限制） |
+
+### 5.1 豁免名单的两种来源与写法
+
+豁免名单有**两层**，互不冲突：
+
+1. **内置兜底（代码写死，配置空也生效）**：`load_capabilities`、`recall`、
+   `read` 这三个工具的输出**永远不外部化**——它们是「照着做」的说明书，或模型
+   刚追回 / 读回、还要反复引用的内容，换成引用只会增加无谓的 `read` 往返、甚至
+   自激抖动。这条对**单条超长**与**滚动外部化**两条路径都生效，且不受
+   `never_externalize` 配置影响。
+2. **`never_externalize`（可配，额外豁免）**：除上面三个外，你还想豁免的其它工具
+   写在这里（比如 `kb.search kb.read_pdf`）。
+
+写法：名单支持**逗号或空白**分隔，二者等价——
+`"kb.search, kb.read_pdf"` 与 `"kb.search kb.read_pdf"` 一样；也支持前缀通配，
+如 `kb.*` 豁免所有 `kb.` 开头的工具。名字要**精确匹配**工具注册名（不带 `*` 时）。
+
+> 注意：内置兜底只覆盖 `load_capabilities` / `recall` / `read` 这三个系统级工具，
+> 其它工具（含 `kb.*`）仍须靠 `never_externalize` 配置 + 上面的分隔符规则来豁免。
 
 ### 5.1 `max_output_tokens` 为什么要显式设
 

@@ -24,6 +24,17 @@ llm/config.py 的 PROVIDER_MAP 在运行时才决定 import 哪个包，PyInstal
 import sys
 from pathlib import Path
 
+# ---- 构建期日志的编码兜底 ----------------------------------------------
+# Windows 上 stdout 默认是 cp1252（控制台/重定向都是），print 中文会抛
+# UnicodeEncodeError，直接把冻内核这一步搞挂。spec 是被 exec 的，走不到内核
+# 入口那层 reconfigure，所以这里自己兜一份。
+# 注意：本文件里所有 print 都用 ASCII（见下），reconfigure 只是双保险。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 # SPECPATH = 本 spec 所在目录（packaging/）
 # 本 spec 所在目录（packaging/）。spec 是被 exec 的，没有 __file__，
 # 用 PyInstaller 注入的 SPECPATH（= spec 所在目录）。
@@ -33,7 +44,7 @@ PROJECT_ROOT = ROOT.parent                          # import 根：包目录的*
 WEB_DIST = ROOT / "web" / "dist"
 
 if not (ROOT / "main.py").is_file():
-    raise SystemExit(f"spec 路径不对：{ROOT} 下没有 main.py")
+    raise SystemExit(f"spec path is wrong: no main.py under {ROOT}")
 
 # 前端产物一起冻进去：内核自己把它挂成站点根（main.py 的 web/dist）。
 # 落点是 <MEIPASS>/keeper/web/dist —— 正好是 main.py 里
@@ -42,7 +53,7 @@ datas = []
 if WEB_DIST.is_dir():
     datas.append((str(WEB_DIST), "keeper/web/dist"))
 else:
-    print("[spec] 警告：没有 web/dist，冻出来的内核只提供 API（页面会 404）")
+    print("[spec] WARNING: web/dist not found - the frozen kernel will only serve the API")
 # 框架配置也放进包里：内核里不带参数的 load_config()（核心 agent 装配等）会
 # 找 <包目录>/config.yaml。桌面壳会用 KEEPER_CONFIG 指到用户那份（~/.keeper/），
 # 这份只是「单跑内核」时的兜底。
@@ -106,9 +117,9 @@ try:
 
     hiddenimports += collect_submodules("litert_lm")
     binaries += collect_dynamic_libs("litert_lm")
-    print("[spec] 已收集 litert-lm（向量检索运行时）")
+    print("[spec] litert-lm collected (vector-search runtime enabled)")
 except Exception as e:  # noqa: BLE001 没装 litert-lm 不该让构建失败
-    print(f"[spec] 没有 litert-lm，跳过向量检索运行时：{e}")
+    print(f"[spec] litert-lm not available, skipping vector-search runtime: {e}")
 
 a = Analysis(
     [str(ROOT / "packaging" / "launcher.py")],

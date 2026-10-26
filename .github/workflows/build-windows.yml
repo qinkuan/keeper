@@ -21,6 +21,11 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    # Windows 控制台/重定向的默认编码是 cp1252，不是 UTF-8 ——
+    # 任何 python 打印中文都会抛 UnicodeEncodeError（pip / PyInstaller / 打包脚本
+    # 都会中招）。job 级设一次，所有 step 生效。
+    env:
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 

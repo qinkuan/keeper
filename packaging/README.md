@@ -179,6 +179,24 @@ python3 packaging/ci/check_ps1_syntax.py
 
 （注意：某些编辑器保存时会顺手把 BOM 去掉 —— 存完记得再跑一次上面这条。）
 
+#### Python 侧的编码约定（同样踩过）
+
+Windows 上 **stdout/stderr 的默认编码是 cp1252**（控制台、重定向到文件都是），
+所以任何一句 `print("中文")` 都会抛：
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode characters ...
+```
+
+CI 上为此连炸两次（自检脚本、PyInstaller 的 spec）。现在的约定：
+
+- **进程入口**统一切 UTF-8：`keeper/framework/stdio.py` 的 `force_utf8_stdio()`，
+  由 `packaging/launcher.py`（冻结入口：内核 + 解释器两种姿态）和 `keeper/main.py`
+  （内核启动）各调一次；`errors="replace"` 保证编不出来的字符只被替换、不崩进程；
+- **构建期脚本**（`packaging/**/*.py`、`keeper-kernel.spec`）自己也切一份，
+  且 spec 里的 `print` 一律用 ASCII；
+- CI 的 job 级设了 `PYTHONIOENCODING=utf-8` 作为最后一道兜底。
+
 ### 5.4 签名（Windows 的硬门槛）
 
 mac 上不签名只是「右键→打开」；Windows 上未签名 = 双击就弹 SmartScreen，

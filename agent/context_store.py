@@ -255,6 +255,12 @@ def search_chunks(query: str, limit: int = 5) -> List[Tuple[str, str]]:
 # 想给某类输出开小灶（比如某工具的产物每一步都要回头引用）时再填。
 NEVER_EXTERNALIZE_DEFAULT = ""
 
+#: 内置豁免：这些工具的输出**永远不外部化**（与配置无关，两条路径都生效）。
+#: 与 ``agent/process._fit_observation`` 的硬编码豁免保持一致——它们是「照着做」
+#: 的说明书（load_capabilities）、或模型刚追回 / 读回、还要反复引用的内容
+#: （recall / read），换成引用反而增加无谓的 read 往返、甚至自激抖动。
+EXTERNALIZE_BUILTIN_EXEMPT = ("load_capabilities", "recall", "read")
+
 
 def _never_externalize(tool: str) -> bool:
     """工具是否在豁免名单里（支持 ``task.*`` 这类前缀）；名单为空则一律不豁免。
@@ -369,6 +375,9 @@ def externalize(tool: str, raw: str, min_chars: Optional[int] = None) -> str:
     """
     cfg = ctx_cfg()
     if cfg is None or not getattr(cfg, "enabled", True):
+        return raw
+    # 内置豁免：这些工具的输出永远不外部化（与配置无关），两条路径都生效。
+    if (tool or "").strip() in EXTERNALIZE_BUILTIN_EXEMPT:
         return raw
     try:
         threshold = (

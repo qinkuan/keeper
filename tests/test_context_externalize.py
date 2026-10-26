@@ -80,6 +80,15 @@ def main() -> int:
     results.append(case("空格分隔未列出的工具仍外部化", ext != mid and 'block_id="ctx:' in ext))
     CFG.never_externalize = ""
 
+    # 4c) 内置兜底豁免：recall / read / load_capabilities 即使配置为空也永不外部化
+    for tname in ("recall", "read", "load_capabilities"):
+        kept = cs.externalize(tname, mid, min_chars=CFG.observation_limit + 1)
+        results.append(case(f"内置兜底豁免 {tname}", kept == mid))
+    # 反例：没列进内置兜底的普通工具仍正常外部化
+    CFG.never_externalize = ""
+    ext2 = cs.externalize("fs.read_file", mid, min_chars=CFG.observation_limit + 1)
+    results.append(case("非兜底工具仍外部化", ext2 != mid and 'block_id="ctx:' in ext2))
+
     # 5) 截断保留头尾（结论/报错常在结尾，硬切会坑模型）
     t = "HEAD" + "y" * 5000 + "TAIL"
     c = cs.clip_observation(t, CFG.observation_limit)

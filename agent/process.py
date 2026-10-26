@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from . import protocol
-from .context_store import Compactor, clip_observation, ctx_cfg, externalize
+from .context_store import (
+    Compactor,
+    EXTERNALIZE_BUILTIN_EXEMPT,
+    clip_observation,
+    ctx_cfg,
+    externalize,
+)
 from .delegatee import Ctx, DelegateeRegistry, Requirement
 from .planner import ReActPlanner
 from ..tools.base import ToolResult
@@ -99,7 +105,9 @@ def _fit_observation(tool: str, raw: str, limit: int) -> tuple[str, int]:
 
     返回 ``(给模型的文本, 工具原始输出长度)``。
     """
-    if tool == "load_capabilities" or tool == "recall" or tool == "read":
+    # 内置豁免：这些工具的输出永远不外部化（与配置无关）。用 context_store 里的
+    # 同一份常量，避免在两处各写一份名单、日后漂移。
+    if (tool or "").strip() in EXTERNALIZE_BUILTIN_EXEMPT:
         return raw, len(raw)
 
     raw_len = len(raw)
