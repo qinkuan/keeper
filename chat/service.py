@@ -969,7 +969,7 @@ class ChatService:
         # 用上下文里已设好的日期锚（由 ask / _resume 与 set_session_id 成对设置）：
         # 读侧必须与写侧（_write_turn）落在同一天，否则 recall 读 A、写 B，
         # 表现为"明明存过了却检索不到"
-        sm = SessionMemory(session_id, day=current_memory_day())
+        sm = SessionMemory(session_id, day=None)
         try:
             recs = sm.load_recent_turns(limit=limit, exclude_message_id=exclude_message_id)
             recent_ids = {r.get("message_id") for r in recs}
@@ -1021,7 +1021,7 @@ class ChatService:
         from ..memory import SessionMemory, summarize_turn
 
         # 与读侧同一个日期锚（见 _build_recall_block 里的说明）
-        sm = SessionMemory(session_id, day=current_memory_day())
+        sm = SessionMemory(session_id, day=None)
         try:
             # 1) 以锚点消息为归属，从 DB 读整条步骤链（含追问），按 step 升序
             factory = get_session_factory()
