@@ -41,11 +41,20 @@ jobs:
       - name: 装 Python 依赖
         run: pip install -r requirements.txt "pyinstaller>=6.6"
 
+      - name: 校验 PowerShell 脚本（UTF-8 BOM + CRLF + 引号配对）
+        # 少了 BOM，Windows PowerShell 5.1 会按 ANSI 解码 .ps1，
+        # 中文里的 UTF-8 字节被解成 0x92 之类的“弯引号”→ 解析器报
+        # "The string is missing the terminator: '"。这里提前拦住，给出可读报错。
+        run: python packaging/ci/check_ps1_syntax.py
+
       - name: 构建前端 + 冻结内核 + 打包 nsis
-        run: powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
+        # 用 PowerShell 7（pwsh）：它原生按 UTF-8 读 .ps1，不受 ANSI 编码影响
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 
       - name: Windows 冒烟测试（没有 Python/Node 也能干活）
-        run: powershell -ExecutionPolicy Bypass -File packaging/ci/smoke_windows.ps1
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File packaging/ci/smoke_windows.ps1
 
       - name: 上传安装包
         uses: actions/upload-artifact@v4

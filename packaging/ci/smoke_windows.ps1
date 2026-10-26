@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Windows 冒烟测试：在 CI 的 Windows runner 上验「打包产物在没有 Python/Node 的机器上能干活」。
 

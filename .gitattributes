@@ -1,0 +1,21 @@
+# Windows 打包相关：.ps1 必须保持 CRLF + UTF-8 BOM
+#
+# 为什么：
+#   1) 换行符 —— Windows PowerShell 5.1 的行续接符（`）在 CRLF 下最稳；
+#   2) BOM —— 5.1 见到 BOM 才按 UTF-8 解码 .ps1。没有 BOM 时它按 ANSI/CP1252
+#      解码，UTF-8 中文会被解成 0x92 之类的“弯引号”，解析器直接报
+#      "The string is missing the terminator: '"。
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与配置统一 LF
+*.py    text eol=lf
+*.js    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf

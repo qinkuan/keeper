@@ -157,6 +157,28 @@ node/busybox → electron-builder 出 nsis 安装包 → **跑一遍 Windows 冒
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
+#### `.ps1` 的编码约定（踩过的坑）
+
+Windows 上 **Windows PowerShell 5.1** 只有看到 **UTF-8 BOM** 才按 UTF-8 解码
+`.ps1`；没有 BOM 就按 ANSI/CP1252 解码，中文注释里的 UTF-8 字节会被解成
+`0x92` 之类的「弯引号」，解析器把它当字符串定界符 → 报
+`The string is missing the terminator: '`（且日志里中文全是乱码）。
+
+所以本仓库约定：
+
+- `.ps1` 一律 **UTF-8 with BOM + CRLF**（`.gitattributes` 里 `*.ps1 text eol=crlf` 已经兜住换行符）
+- CI 里用 **PowerShell 7（`pwsh`）** 跑脚本（它原生按 UTF-8 读）
+- CI 第一步跑 `packaging/ci/check_ps1_syntax.py`：检查 BOM / CRLF / 引号花括号配对，
+  掉编码就**在这一步给出可读报错**，而不是等到 build 时报一句天书
+
+改完 `.ps1` 后本地可以先自检一遍：
+
+```bash
+python3 packaging/ci/check_ps1_syntax.py
+```
+
+（注意：某些编辑器保存时会顺手把 BOM 去掉 —— 存完记得再跑一次上面这条。）
+
 ### 5.4 签名（Windows 的硬门槛）
 
 mac 上不签名只是「右键→打开」；Windows 上未签名 = 双击就弹 SmartScreen，
