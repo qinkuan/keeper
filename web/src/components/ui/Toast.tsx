@@ -50,7 +50,7 @@ export function ToastHost() {
   if (!items.length) return null;
 
   return (
-    <div className="pointer-events-none fixed bottom-6 left-1/2 z-[2000] flex -translate-x-1/2 flex-col items-center gap-2">
+    <div className="pointer-events-none fixed bottom-6 left-1/2 z-[3000] flex -translate-x-1/2 flex-col items-center gap-2">
       {items.map((i) => (
         /* 统一的深色玻璃 + 一枚状态图标，比三条纯色横幅安静：
            提示是"插话"，不该比正文更抢眼；颜色只留给那枚图标 */

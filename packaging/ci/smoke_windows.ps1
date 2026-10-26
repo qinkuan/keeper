@@ -101,18 +101,42 @@ Step "3. 随包的真 node 能跑（没有就跳过）" {
   Write-Host $out.Trim()
 }
 
-Step "4. bash 插件能执行命令" {
+Step "4. bash 插件能执行命令（Windows 上用内置 POSIX shell）" {
   $plugin = Join-Path $PSScriptRoot "..\..\plugins\bash\bin\bash_server"
   if (-not (Test-Path $plugin)) { throw "找不到 bash 插件：$plugin" }
   $ws = Join-Path $TmpHome "ws"; New-Item -ItemType Directory -Force -Path $ws | Out-Null
   $env:PATH = (Split-Path $KernelExe) + ";" + $env:PATH
-  $payload = '{"tool":"run","args":{"command":"echo SHELL-OK","timeout":30},"context":{"workspace":"' + $ws + '","read_only":false,"agent_space":"' + $ws + '"}}'
+  # 让插件用**随包的内置 POSIX shell**（busybox 的 sh.exe）—— 这才是这一步要验的
+  # 东西：agent 写的命令在 Windows 上得是 POSIX 语法，不能退到 cmd.exe。
+  # 内核平时就是通过 KEEPER_SHELL / KEEPER_SHELL_FLAG 注入给插件的
+  # （见 framework/shell.py 与 plugins/bash/bin/bash_server）。
+  $sh = Join-Path $DistDir "runtime\sh\sh.exe"
+  $posix = $false
+  if (Test-Path $sh) {
+    $env:KEEPER_SHELL = $sh
+    $env:KEEPER_SHELL_FLAG = "-c"
+    $posix = $true
+  } else {
+    Write-Host "    （没装上内置 busybox sh，退回系统 shell；只要求命令能跑通）"
+  }
+  # payload 必须用 ConvertTo-Json 生成：**不能手拼字符串**。Windows 路径里全是
+  # 反斜杠（``C:\Users\...\ws``），在 JSON 字符串里 ``\U`` 是非法转义 → 插件会报
+  # "Invalid \escape"。mac 上路径是 ``/tmp/...`` 没这问题，只有 Windows 才炸。
+  # uname 是 POSIX 专属命令：cmd.exe 没有它 → 用来确认真的落在 POSIX shell 上。
+  $payload = @{
+    tool    = "run"
+    args    = @{ command = "echo SHELL-OK; uname -s"; timeout = 30 }
+    context = @{ workspace = $ws; read_only = $false; agent_space = $ws }
+  } | ConvertTo-Json -Depth 5 -Compress
   # Windows 没有 shebang：插件的 bin 是文本脚本，得用解释器启动（内核里也是
   # 这么干的，见 tools/subprocess_tool.py 的 build_argv）
   $py = Join-Path (Split-Path $KernelExe) "python3.exe"
   if (-not (Test-Path $py)) { Copy-Item $KernelExe $py -Force }
   $out = $payload | & $py $plugin 2>$null | Select-Object -Last 1 | Out-String
   if ($out -notmatch "SHELL-OK") { throw "bash 插件没跑通：$out" }
+  if ($posix -and $out -notmatch "Linux|Windows|MINGW|MSYS|CYGWIN|Darwin") {
+    throw "用的不是 POSIX shell（uname 没输出，cmd.exe 会把整句当 echo）：$out"
+  }
   Write-Host $out.Trim()
 }
 
