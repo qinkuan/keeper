@@ -321,6 +321,62 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 表单控件的 UA 复位（input / textarea）。
+ *
+ * button 那条复位已经有先例：项目关了 preflight，UA 样式就没人接手。
+ * input / textarea 的 UA 默认带一圈 **2px inset、黑色、直角**的边框 ——
+ * 在对话输入区里就表现为"一个黑色方框"：聚焦时 focus 光环把它盖住，
+ * 所以不点它的时候才看得见（用户反馈的那一眼）。
+ *
+ * 用 :where() 把特异性压到 0：组件里显式写了 border-* / bg-* 的工具类
+ * 永远压得住这条基线，只有"忘记写"的元素才吃到复位。 */
+:where(input, textarea) {
+  border: 0;
+  background-color: transparent;
+}
+
+/* ===== 表单控件的 box-sizing 复位 =====
+ *
+ * 项目关了 preflight（见 tailwind.config.js），全站 box-sizing 就是 UA 的
+ * content-box：宽度只算**内容区**，内边距和边框是额外加在外面的。于是
+ *   <input class="w-full rounded-md border px-3">
+ * 的实际宽度 = 父容器宽 + 24px(px-3) + 2px(border)，比父容器宽出去一截 ——
+ * 在 360px 宽、p-4 的弹窗（AppModal）里，输入框两端直接顶到弹窗圆角外面去了
+ * （「新建文件夹」「重命名」弹的就是这个）。
+ *
+ * 这里把表单控件（input / textarea / select / button）单独拉回 border-box：
+ * 只动表单控件，**不动 div / span** —— 那些盒子刻意保持 content-box
+ * （h-full 当滚动容器高度时必须显式写 box-border，见本文件开头的说明）。
+ *
+ * 用 :where() 把特异性压到 0：组件里显式写了 box-border / box-content 的地方
+ * 永远压得住这条基线。 */
+:where(input, textarea, select, button) {
+  box-sizing: border-box;
+}
+
+/* ===== 边框基线（preflight 的替身）=====
+ *
+ * Tailwind 的 border 工具类**只设宽度**：产物里就是 `.border{border-width:1px}`，
+ * 不含 border-style。而项目关了 preflight，UA 的初始值是
+ * `border-style: none` + `border-width: medium(3px)` ——
+ * 于是：写 `border border-line` 的元素**一条线都渲染不出来**（宽度给了，样式是 none）。
+ * 全项目 301 处 border 类名都受影响：卡片描边、分隔线、输入框边框……统统隐形。
+ * 对话输入框"没点击时看不见线"就是这个问题（聚焦时那圈 focus 光环是 shadow，
+ * 不是 border，所以聚焦时反而有东西）。
+ *
+ * 这里补 preflight 里那两条基线：
+ *   border-width: 0 —— 没有 border 类名的元素不会顶起 3px 的默认框
+ *                      （span / 行容器会突然被黑框包住，就是这么来的）；
+ *   border-style: solid —— 让 border / border-b / border-l 这些"只给宽度"的
+ *                      工具类真的画出线。
+ *
+ * 用 :where() 把特异性压到 0：显式写了 border-solid / border-dashed / border-none
+ * 的地方永远压得住这条基线。 */
+:where(*, ::before, ::after) {
+  border-width: 0;
+  border-style: solid;
+}
+
 /* ===== 表格网格（「我的空间」Excel 预览：SheetGrid / SheetViewer）=====
  *
  * 本项目关了 Tailwind preflight（见 tailwind.config.js），UA 不管这三件事：

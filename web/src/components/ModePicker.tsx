@@ -1,15 +1,20 @@
 /**
  * 运行模式选择器（对话输入框下方，思考选择器的左边）。
  *
- * 与工作空间 / 思考选择器同形：图标 + 当前值，点它向上弹出。三个模式：
- *   普通   —— 完整 ReAct + 最近历史 + 长期记忆 + 全量工具（现状）
- *   快捷   —— 一次性任务（翻译 / OCR / 总结），无循环、无记忆、无 planner
- *   程序化 —— 让 agent 写代码来解决问题 / 执行 tool
- * 每次选中即带出 mode，由调用方决定写不写后台（已有会话写库，新会话存 pending）。
+ * 与工作空间 / 思考选择器同形：图标 + 当前值，点它向上弹出。两个模式：
+ *   普通 —— 完整 ReAct + 最近历史 + 长期记忆 + 全量工具（现状）
+ *   快捷 —— 一次性任务（翻译 / OCR / 总结），无循环、无记忆、无 planner
+ *
+ * 「程序化（ptc）」原来是个预留项：后端并没有真的实现这套执行器
+ * （agent/keeper.py 的 mode→Process 映射里没有 ptc，落回普通流程），
+ * 所以这里不再给用户一个「选了也没区别」的选项。
+ *
+ * 每次选中即带出 mode：新会话存本地 pending（发第一条消息时落库），
+ * 已有会话直接写库（后端每轮都从会话行现读，下一轮起生效）。
  */
 import { useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronUp, Cpu, Zap, Workflow } from "lucide-react";
+import { Check, ChevronUp, Workflow, Zap } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { RunMode } from "../api/types";
 
@@ -17,22 +22,18 @@ const OPTIONS: {
   value: RunMode;
   label: string;
   desc: string;
-  icon: typeof Cpu;
+  icon: typeof Workflow;
 }[] = [
   { value: "normal", label: "普通", desc: "完整 ReAct + 记忆 + 工具", icon: Workflow },
   { value: "simple", label: "快捷", desc: "一次性任务，无循环无记忆", icon: Zap },
-  { value: "ptc", label: "程序化", desc: "写代码解决问题 / 执行 tool", icon: Cpu },
 ];
 
 export function ModePicker({
   value,
   onChange,
-  disabled = false,
 }: {
   value: RunMode;
   onChange: (value: RunMode) => void;
-  /** 会话创建后运行模式即固定：禁用的选择器不可点开（悬停说明原因） */
-  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const cur = OPTIONS.find((o) => o.value === value) ?? OPTIONS[0];
@@ -43,19 +44,12 @@ export function ModePicker({
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
-          disabled={disabled}
-          title={
-            disabled
-              ? "运行模式在会话创建后即固定，不可更改"
-              : `运行模式：${cur.label}（${cur.desc}）`
-          }
+          title={`运行模式：${cur.label}（${cur.desc}）`}
           className={cn(
             "flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 text-[12px] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors duration-150",
-            disabled && "cursor-not-allowed opacity-60",
-            !disabled &&
-              (cur.value === "normal"
-                ? "text-ink-muted hover:text-ink"
-                : "text-brand hover:border-brand/40")
+            cur.value === "normal"
+              ? "text-ink-muted hover:text-ink"
+              : "text-brand hover:border-brand/40"
           )}
         >
           <Icon className="h-3.5 w-3.5 shrink-0" />

@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type MutableRefObject, type ReactNode } from "react";
 import {
   ChevronRight,
-  Copy,
   ExternalLink,
   Eye,
   Plus,
@@ -333,7 +332,6 @@ function TreeNav({
   onRename,
   onDelete,
   onMkdirHere,
-  onCopy,
   onContextMenu,
 }: {
   nodes: TNode[];
@@ -347,7 +345,6 @@ function TreeNav({
   onRename: (key: string) => void;
   onDelete: (key: string) => void;
   onMkdirHere: (key: string) => void;
-  onCopy: (key: string) => void;
   onContextMenu?: (key: string, isDir: boolean, e: MouseEvent) => void;
 }) {
   return (
@@ -410,12 +407,6 @@ function TreeNav({
                   </RowBtn>
                 )}
                 <RowBtn
-                  title="复制（在当前目录生成副本）"
-                  onClick={() => onCopy(n.key)}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </RowBtn>
-                <RowBtn
                   title="在文件管理器中打开"
                   onClick={() => onOpen(n.key, n.isDir)}
                 >
@@ -442,7 +433,6 @@ function TreeNav({
                 onRename={onRename}
                 onDelete={onDelete}
                 onMkdirHere={onMkdirHere}
-                onCopy={onCopy}
                 onContextMenu={onContextMenu}
               />
             )}
@@ -504,8 +494,11 @@ function BinaryFileCard({ file, note }: { file: MySpaceFile; note?: string }) {
  * 「是哪类问题」以及「下一步做什么」——所以按 code 给针对性文案，并把
  * 「用系统应用打开」作为主出口。
  */
-/** 图文件的画布高度：比 Markdown 内联的 360 高，文件预览面板本来就更大。 */
-const DIAGRAM_H = 520;
+/**
+ * 图文件的画布：填满预览区（height="100%"），不再用固定像素。
+ * 固定 520 时，预览区比它矮就会把图挤到下面去（还要滚动才看全），
+ * 而"图落在可见区域正中"才符合预览的直觉。
+ */
 
 /**
  * 只读 Monaco 源码视图。图渲染失败时的降级形态，以及编辑态的「预览」也用不到它
@@ -532,11 +525,24 @@ function SourceOnly({ name, text }: { name: string; text: string }) {
   );
 }
 
+/**
+ * 标题栏 → 文件视图的命令句柄。
+ *
+ * 「预览 / 编辑」按钮放在右侧标题栏（文件名右边），但**编辑态与保存逻辑仍归
+ * FileViewer 所有**：切文件丢弃草稿、退回预览前落盘这些规则不能散到父组件。
+ * 父组件拿这个句柄去触发切换，FileViewer 通过 onModeChange 把状态报回去。
+ */
+export interface FileViewerCtl {
+  toggleEdit?: () => void;
+}
+
 function FileViewer({
   space,
   root,
   path,
   jump,
+  ctl,
+  onModeChange,
 }: {
   space: SpaceApi;
   root: string;
@@ -549,6 +555,10 @@ function FileViewer({
    *   seq  —— 递增序号：同一位置连点两次也要重新跳
    */
   jump?: { line?: number; page?: number; terms?: string[]; seq?: number } | null;
+  /** 标题栏用它触发「预览 ↔ 编辑」切换（见 FileViewerCtl） */
+  ctl?: MutableRefObject<FileViewerCtl>;
+  /** 把编辑态报给标题栏：按钮文案 / 图标 / 禁用态都在那边渲染 */
+  onModeChange?: (m: { editing: boolean; saving: boolean; editable: boolean }) => void;
 }) {
   const qc = useQueryClient();
   const fq = useQuery({
@@ -591,6 +601,50 @@ function FileViewer({
   useEffect(() => {
     setDiagramErr(null);
   }, [path, fq.data?.text]);
+
+  /* 能不能编辑：只看「是不是能当文本读的文件」。
+   *
+   * 必须放在提前 return 之前算：标题栏（文件名右边）要靠它决定
+   * 「预览/编辑」按钮要不要出现——而标题栏在父组件里，得由这里报上去。 */
+  const editable = !!fq.data?.is_text && !fq.data?.too_large;
+
+  // 把编辑态报给标题栏：按钮文案（编辑/预览）、图标、禁用态都在那边渲染。
+  useEffect(() => {
+    onModeChange?.({ editing, saving, editable });
+  }, [editing, saving, editable, onModeChange]);
+
+  /* 预览 ↔ 编辑切换：进编辑先拿当前内容当草稿；退回预览前把草稿落盘。
+   *
+   * 放在提前 return 之前：标题栏按钮通过 ctl 调它，钩子顺序不能变。 */
+  const toggleEdit = async () => {
+    if (editing) {
+      setSaving(true);
+      try {
+        await space.write(path, draft);
+        qc.invalidateQueries({ queryKey: ["my-space-file", path] });
+        toast.success("已保存");
+        setEditing(false);
+      } catch (e: any) {
+        toast.error(e?.message || "保存失败");
+      } finally {
+        setSaving(false);
+      }
+    } else {
+      setDraft(fq.data?.text ?? "");
+      setEditing(true);
+    }
+  };
+  // 句柄里放的是**最新**的 toggleEdit：用 ref 转发，避免每次渲染都重挂句柄。
+  const toggleEditRef = useRef(toggleEdit);
+  toggleEditRef.current = toggleEdit;
+  useEffect(() => {
+    if (!ctl) return;
+    ctl.current.toggleEdit = () => void toggleEditRef.current();
+    return () => {
+      ctl.current.toggleEdit = undefined;
+    };
+  }, [ctl]);
+
   if (fq.isLoading)
     return (
       <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
@@ -782,7 +836,6 @@ function FileViewer({
   // 以下为可编辑文本类（Markdown / 代码 / 数据 / 纯文本）：预览 ↔ 编辑 切换。
   // 预览按类型选查看组件（Markdown 渲染、其余 Monaco 只读高亮）；编辑态为可写 Monaco，
   // 切回预览时把改动写回磁盘（space.write）。HTML 不在此列（预览走浏览器新窗口）。
-  const editable = f.is_text && !f.too_large;
   const onSelMouseUp = () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.toString().trim()) {
@@ -800,26 +853,6 @@ function FileViewer({
     if (quoteBtn) addQuoteToChat({ path, text: quoteBtn.text });
     setQuoteBtn(null);
     window.getSelection()?.removeAllRanges();
-  };
-  const toggleEdit = async () => {
-    if (!editing) {
-      setDraft(f.text ?? "");
-      setEditing(true);
-      return;
-    }
-    // 由编辑切回预览：落盘保存
-    try {
-      setSaving(true);
-      await space.write(path, draft);
-      qc.invalidateQueries({ queryKey: ["my-space-file", path] });
-      toast.success("已保存");
-    } catch (e: any) {
-      toast.error(e?.message || "保存失败");
-      return;
-    } finally {
-      setSaving(false);
-    }
-    setEditing(false);
   };
 
   /* 图类文件（.vg.json → Vega，.mmd/.mermaid → Mermaid）：渲染成图来看。
@@ -843,16 +876,14 @@ function FileViewer({
           </div>
         </div>
       ) : diagram === "vega" ? (
+        /* height="100%"：画布填满预览区，图落在**可见区域**的正中间。
+           固定 520px 时，若预览区比它矮，图就会偏在下面（还要滚动才看全）。 */
         <div className="h-full min-h-0">
-          <ChartView
-            src={f.text}
-            height={DIAGRAM_H}
-            onError={setDiagramErr}
-          />
+          <ChartView src={f.text} height="100%" onError={setDiagramErr} />
         </div>
       ) : (
         <div className="h-full min-h-0">
-          <MermaidView src={f.text} height={DIAGRAM_H} onError={setDiagramErr} />
+          <MermaidView src={f.text} height="100%" onError={setDiagramErr} />
         </div>
       )
     ) : kind === "markdown" ? (
@@ -880,37 +911,7 @@ function FileViewer({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {editable && (
-        <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px]">
-          {editing ? (
-            <span className="flex items-center gap-1.5 font-medium text-brand">
-              <span className="h-1.5 w-1.5 rounded-full bg-brand" />
-              编辑中
-            </span>
-          ) : (
-            <span className="truncate font-mono text-ink-muted">预览</span>
-          )}
-          <button
-            type="button"
-            onClick={toggleEdit}
-            disabled={saving}
-            className={
-              editing
-                ? "ml-auto flex h-7 shrink-0 items-center gap-1 rounded-md border border-brand/50 bg-brand/[0.08] px-2.5 text-[12px] font-medium text-brand transition-all duration-150 hover:bg-brand/[0.14] disabled:opacity-50"
-                : "ml-auto flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50"
-            }
-          >
-            {saving ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : editing ? (
-              <Eye className="h-3.5 w-3.5" />
-            ) : (
-              <Pencil className="h-3.5 w-3.5" />
-            )}
-            {editing ? "预览" : "编辑"}
-          </button>
-        </div>
-      )}
+      {/* 「预览 / 编辑」切换搬到了右侧标题栏（文件名右边），这里不再重复一条状态栏 */}
       <div className="min-h-0 flex-1 overflow-auto">
         {editing ? (
           <div className="h-full min-h-0">
@@ -963,7 +964,9 @@ function FileViewer({
 function HResizeBar({ onResize }: { onResize: (dx: number) => void }) {
   const dragging = useRef(false);
   useEffect(() => {
-    const move = (e: MouseEvent) => {
+    // 注意：这里的 MouseEvent 必须是 DOM 版（本文件顶部 import 的是 React 的
+    // MouseEvent<Element, ...>），原生事件监听器只认 DOM 事件。
+    const move = (e: globalThis.MouseEvent) => {
       if (dragging.current) onResize(e.movementX);
     };
     const up = () => {
@@ -1009,6 +1012,12 @@ export default function UserSpacePage() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  /* 「预览 / 编辑」按钮放在右侧标题栏（文件名右边）：
+   *   fileMode —— FileViewer 报上来的编辑态（editing/saving/editable）；
+   *   fileCtl  —— 反向句柄，标题栏点按钮时用它让 FileViewer 切换。
+   * 编辑逻辑仍在 FileViewer 内部，这里只负责渲染按钮。 */
+  const fileCtl = useRef<FileViewerCtl>({});
+  const [fileMode, setFileMode] = useState({ editing: false, saving: false, editable: false });
   // 跳转目标：从搜索结果点进来时带上（行号 / 页码 / 命中词）。
   // seq 每次 +1 —— 同一个文件同一处连点两次也要重新跳（否则第二次没反应）。
   const [jump, setJump] = useState<{
@@ -1184,12 +1193,6 @@ export default function UserSpacePage() {
     } finally {
       setTreeLoadingKey(null);
     }
-  };
-
-  /** 刷新当前打开的文件内容（外面改了、点一下立刻看到最新）。 */
-  const refreshFile = () => {
-    if (selectedFile)
-      qc.invalidateQueries({ queryKey: ["my-space-file", selectedFile] });
   };
 
   // 上传 / 导入目标目录 = 当前选中文件所在目录（没选中则空间根）
@@ -1502,7 +1505,7 @@ export default function UserSpacePage() {
           <div className="flex min-h-0 flex-1">
           {/* 左侧目录树：收起时退化为细条 + 展开按钮 */}
           {treeCollapsed ? (
-            <div className="flex w-9 shrink-0 flex-col items-center rounded-xl border border-line bg-panel py-2">
+            <div className="flex w-9 shrink-0 flex-col items-center rounded-xl bg-panel py-2">
               <button
                 type="button"
                 onClick={() => setTreeCollapsed(false)}
@@ -1515,10 +1518,10 @@ export default function UserSpacePage() {
           ) : (
             <>
               <div
-                className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel"
+                className="flex shrink-0 flex-col overflow-hidden rounded-xl bg-panel"
                 style={{ width: treeWidth }}
               >
-            <div className="flex items-center gap-1 border-b border-line-soft px-2 py-1.5 text-[12px] font-medium text-ink-muted">
+            <div className="flex items-center gap-1 px-2 py-1.5 text-[12px] font-medium text-ink-muted">
               <FolderOpen className="h-3.5 w-3.5 shrink-0 text-brand" />
               <span className="truncate" title={path}>{basename(path)}</span>
               <div className="ml-auto flex items-center gap-0.5">
@@ -1581,12 +1584,11 @@ export default function UserSpacePage() {
                 onRename={doRename}
                 onDelete={doDelete}
                 onMkdirHere={doMkdir}
-                onCopy={doCopy}
                 onContextMenu={(key, isDir, e) => handleContextMenu(key, isDir, e)}
               />
               <div className="px-3 py-2 text-[11px] leading-5 text-ink-faint">
                 <div className="text-ink-muted">仅桌面端支持本地空间展示</div>
-                点「上传」按钮从电脑选文件拷入「我的空间」；hover 每行可复制 / 在文件管理器中打开 / 重命名 / 删除。
+                点「上传」按钮从电脑选文件拷入「我的空间」；hover 每行可在文件管理器中打开 / 重命名 / 删除，右键菜单里还有复制 / 粘贴。
               </div>
             </div>
           </div>
@@ -1594,8 +1596,8 @@ export default function UserSpacePage() {
           </>)}
 
           {/* 右侧内容预览 / 搜索结果 */}
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-panel">
-            <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-[12px] text-ink-muted">
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-panel">
+            <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-muted">
               {view === "results" ? (
                 <span className="flex min-w-0 items-center gap-1.5 truncate">
                   <SearchIcon className="h-3.5 w-3.5 shrink-0 text-brand" />
@@ -1625,24 +1627,28 @@ export default function UserSpacePage() {
                     搜索结果
                   </button>
                 )}
-                {view === "browse" && selectedFile && (
+                {view === "browse" && selectedFile && fileMode.editable && (
+                  /* 「预览 / 编辑」：可编辑的文本类文件才出现。
+                     点「编辑」进 Monaco，改完点「预览」会先落盘再切回预览态。 */
                   <button
                     type="button"
-                    onClick={() => doOpen(selectedFile, false)}
-                    title="在文件管理器中打开"
-                    className="rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                    onClick={() => fileCtl.current.toggleEdit?.()}
+                    disabled={fileMode.saving}
+                    title={fileMode.editing ? "保存并回到预览" : "编辑这个文件"}
+                    className={
+                      fileMode.editing
+                        ? "flex h-7 shrink-0 items-center gap-1 rounded-md border border-brand/50 bg-brand/[0.08] px-2.5 text-[12px] font-medium text-brand transition-all duration-150 hover:bg-brand/[0.14] disabled:opacity-50"
+                        : "flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong disabled:opacity-50"
+                    }
                   >
-                    打开
-                  </button>
-                )}
-                {view === "browse" && (
-                  <button
-                    type="button"
-                    onClick={refreshFile}
-                    title="刷新文件（读取外部修改后的最新内容）"
-                    className="rounded-md border border-line px-2 py-1 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
-                  >
-                    刷新
+                    {fileMode.saving ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : fileMode.editing ? (
+                      <Eye className="h-3.5 w-3.5" />
+                    ) : (
+                      <Pencil className="h-3.5 w-3.5" />
+                    )}
+                    {fileMode.editing ? "预览" : "编辑"}
                   </button>
                 )}
               </div>
@@ -1675,6 +1681,8 @@ export default function UserSpacePage() {
                   root={path}
                   path={selectedFile}
                   jump={jump && jump.path === selectedFile ? jump : null}
+                  ctl={fileCtl}
+                  onModeChange={setFileMode}
                 />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">

@@ -9,7 +9,8 @@ const ZOOM_SENSITIVITY = 0.0009;
 
 interface PanZoomStageProps {
   children: React.ReactNode;
-  height?: number;
+  /** 画布高度：数字 = 固定像素；"100%" = 填满父容器（父容器需要有确定高度） */
+  height?: number | "100%";
   hint?: React.ReactNode;
 }
 
@@ -19,6 +20,11 @@ interface PanZoomStageProps {
  *
  * 首次量到内容尺寸后自动按容器 fit，使整张默认可见；之后靠 ResizeObserver
  * 捕捉异步内容（vega 渲染、图片加载、mermaid 注入）的尺寸变化重算。
+ *
+ * **两个尺寸都要盯**：
+ * - 内容（wrap）：vega 异步渲染、图片加载完成 → 内容尺寸变了，要重新 fit；
+ * - 容器：面板被拖宽、窗口缩放 → 内容虽然没变，但"居中"是相对容器的算的，
+ *   不重新居中的话，图会停在旧的位置上（表现为偏到一边）。
  */
 export default function PanZoomStage({ children, height = 360, hint }: PanZoomStageProps) {
   const [zoom, setZoom] = useState(1);
@@ -29,6 +35,12 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
   const contentRef = useRef<HTMLDivElement>(null);
   const didFitRef = useRef(false);
   const dragState = useRef({ active: false, sx: 0, sy: 0, px: 0, py: 0 });
+  /** 用户手动缩放/平移过：之后内容或容器再变，也不再自动重新 fit（别把人正在看的视角抢走） */
+  const userAdjustedRef = useRef(false);
+  /** 上一次量到的容器宽度/高度，用来判断"容器有没有变" */
+  const lastBoxRef = useRef<{ w: number; h: number } | null>(null);
+
+  const fillHeight = typeof height === "string";
 
   // 供原生事件闭包读取最新值（事件在 effect 里绑定，闭包捕获不到最新 state）
   const zoomRef = useRef(zoom);
@@ -38,6 +50,13 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
   const naturalRef = useRef(natural);
   naturalRef.current = natural;
   const fitZoomRef = useRef(1);
+
+  /** 画布的实际高度：固定像素时就是 height；填满时取容器的 clientHeight */
+  const stageHeight = useCallback(() => {
+    const ch = containerRef.current?.clientHeight ?? 0;
+    if (ch) return ch;
+    return typeof height === "number" ? height : 0;
+  }, [height]);
 
   // 平移限制在「内容不拖出容器」的范围；内容比容器小则居中
   const clampPan = useCallback(
@@ -49,12 +68,12 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
       const stageW = nw * z;
       const stageH = nh * z;
       const cw = containerRef.current?.clientWidth ?? stageW;
-      const ch = height;
+      const ch = stageHeight();
       const nx = stageW <= cw ? (cw - stageW) / 2 : Math.min(0, Math.max(cw - stageW, x));
       const ny = stageH <= ch ? (ch - stageH) / 2 : Math.min(0, Math.max(ch - stageH, y));
       return { x: nx, y: ny };
     },
-    [height],
+    [stageHeight],
   );
 
   // 以容器内某点（cx,cy）为锚点缩放，保持该点下的内容不动
@@ -79,40 +98,74 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
     const nw = naturalRef.current?.w ?? 0;
     const nh = naturalRef.current?.h ?? 0;
     const cw = containerRef.current?.clientWidth ?? 0;
-    setPan(clampPan((cw - nw * fz) / 2, (height - nh * fz) / 2, fz));
-  }, [clampPan, height]);
+    const ch = stageHeight();
+    userAdjustedRef.current = false;
+    setPan(clampPan((cw - nw * fz) / 2, (ch - nh * fz) / 2, fz));
+  }, [clampPan, stageHeight]);
 
-  // 量内容自然尺寸：优先取 svg/img/canvas 本身，回退到包裹层。
-  // 注意：SVG 元素没有可靠的 offsetWidth，必须用 getBoundingClientRect，
+  // 量内容自然尺寸：**只认真正的画布元素**（svg/img/canvas）。
+  //
+  // 为什么不能回退到包裹层（老代码是 `?? wrap`）：
+  //   内容还没渲染出来时，包裹层是一个空的 inline-block，行盒（strut）会撑出
+  //   ~18px 的「假高度」。一旦把这个假尺寸当成自然尺寸写进 state，
+  //   包裹层就会被固定成 18px 高 → 内容（svg）到达时包裹层尺寸**不再变化** →
+  //   ResizeObserver 不再触发 → 首次 fit 的错误结果被永久锁死（表现就是图偏在右下角，
+  //   只有拖动面板让容器尺寸变化才会重新居中）。
+  // 所以：找不到画布元素就直接放弃这次量测，等 RO/MutationObserver 再叫。
+  //
+  // 另外 SVG 没有可靠的 offsetWidth，必须用 getBoundingClientRect，
   // 再除以当前 zoom 还原自然尺寸（rect 含祖先 transform 的缩放）。
   const measure = useCallback(() => {
     const wrap = contentRef.current;
     const cw = containerRef.current?.clientWidth ?? 0;
-    if (!wrap || !cw) return;
-    const el = (wrap.querySelector("svg, img, canvas") as HTMLElement | null) ?? wrap;
+    const ch = stageHeight();
+    if (!wrap || !cw || !ch) return;
+    const el = wrap.querySelector("svg, img, canvas") as HTMLElement | null;
+    if (!el) return; // 内容还没渲染出来：等下一次通知
     const rect = el.getBoundingClientRect();
     const z = zoomRef.current || 1;
     const w = rect.width / z;
     const h = rect.height / z;
     if (!w || !h || !isFinite(w) || !isFinite(h)) return;
-    setNatural({ w, h });
-    if (!didFitRef.current) {
-      const fit = Math.max(0.2, Math.min(1, cw / w, height / h));
+
+    // 内容尺寸变了吗？容器尺寸变了吗？
+    // 两者都会让"居中"失效 —— 居中是相对容器算的，容器一变就得重算，
+    // 否则图会停在旧位置（看起来就是"偏到一边/偏右下角"）。
+    const prevNat = naturalRef.current;
+    const prevBox = lastBoxRef.current;
+    const natChanged =
+      !prevNat || Math.abs(prevNat.w - w) > 0.5 || Math.abs(prevNat.h - h) > 0.5;
+    const boxChanged = !prevBox || Math.abs(prevBox.w - cw) > 0.5 || Math.abs(prevBox.h - ch) > 0.5;
+    lastBoxRef.current = { w: cw, h: ch };
+    naturalRef.current = { w, h };
+    if (!prevNat || prevNat.w !== w || prevNat.h !== h) setNatural({ w, h });
+
+    if (!didFitRef.current || ((natChanged || boxChanged) && !userAdjustedRef.current)) {
+      const fit = Math.max(0.2, Math.min(1, cw / w, ch / h));
       fitZoomRef.current = fit;
       setZoom(fit);
-      setPan({ x: (cw - w * fit) / 2, y: (height - h * fit) / 2 });
+      setPan({ x: (cw - w * fit) / 2, y: (ch - h * fit) / 2 });
       didFitRef.current = true;
     }
-  }, [height]);
+  }, [stageHeight]);
 
   // 挂载后量一次；之后内容尺寸变化由 ResizeObserver 捕捉
   useEffect(() => {
     const wrap = contentRef.current;
-    if (!wrap) return;
+    const cont = containerRef.current;
+    if (!wrap || !cont) return;
     measure();
     const ro = new ResizeObserver(() => measure());
-    ro.observe(wrap);
-    return () => ro.disconnect();
+    ro.observe(wrap); // 内容尺寸变了：vega 异步渲染、图片加载完成
+    ro.observe(cont); // 容器尺寸变了：面板拖宽、窗口缩放 → 要重新居中
+    // 兜底：vega/mermaid 是异步注入画布元素的，注入瞬间包裹层尺寸可能没变，
+    // 只靠 ResizeObserver 会漏掉这一帧 —— 用 MutationObserver 盯一下子节点变化。
+    const mo = new MutationObserver(() => measure());
+    mo.observe(wrap, { childList: true, subtree: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
   }, [measure]);
 
   // 缩放或内容尺寸变化时，重新把平移约束在可视范围内
@@ -128,6 +181,8 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // 用户开始自己控制视角了 → 之后内容/容器再变也不自动重新 fit
+      userAdjustedRef.current = true;
       // deltaMode 1=行、2=页，统一换算成像素量级，跨浏览器一致
       let dy = e.deltaY;
       if (e.deltaMode === 1) dy *= 16;
@@ -142,6 +197,7 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
   }, [zoomAt]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    userAdjustedRef.current = true;
     dragState.current = {
       active: true,
       sx: e.clientX,
@@ -182,7 +238,16 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        // height="100%" 时整块填满父容器（父容器需要有确定高度）：
+        // 画布高度跟着可用空间走，图才会落在**可见区域**的正中间，
+        // 而不是固定 520px 画布里居中、结果整体偏到下面去。
+        ...(fillHeight ? { height: "100%", minHeight: 0 } : {}),
+      }}
+    >
       <div
         style={{
           display: "flex",
@@ -190,9 +255,16 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
           gap: 6,
           padding: "4px 8px",
           borderBottom: "1px solid #eee",
+          flex: "0 0 auto",
         }}
       >
-        <button className={BTN} onClick={() => setZoom((z) => Math.max(0.2, z * 0.9))}>
+        <button
+          className={BTN}
+          onClick={() => {
+            userAdjustedRef.current = true;
+            setZoom((z) => Math.max(0.2, z * 0.9));
+          }}
+        >
           －
         </button>
         <span
@@ -205,7 +277,13 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
         >
           {Math.round(zoom * 100)}%
         </span>
-        <button className={BTN} onClick={() => setZoom((z) => Math.min(5, z * 1.1))}>
+        <button
+          className={BTN}
+          onClick={() => {
+            userAdjustedRef.current = true;
+            setZoom((z) => Math.min(5, z * 1.1));
+          }}
+        >
           ＋
         </button>
         <button className={BTN} onClick={resetView}>
@@ -230,7 +308,9 @@ export default function PanZoomStage({ children, height = 360, hint }: PanZoomSt
         onPointerCancel={endDrag}
         onDoubleClick={onDoubleClick}
         style={{
-          height,
+          ...(fillHeight
+            ? { flex: "1 1 auto", minHeight: 0 }
+            : { height: typeof height === "number" ? height : undefined }),
           overflow: "hidden",
           background: "#fff",
           cursor: "grab",

@@ -56,6 +56,7 @@ import {
   apiGetMySpace,
   apiSessionMessages,
   apiSessions,
+  apiSessionWorkspace,
   apiUpdateSessionWorkspace,
   apiSessionMetrics,
   apiBudget,
@@ -658,7 +659,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   // 思考模式（新会话待选值）：模型是否"先想再答"，及其强度。
   const [thinkingMode, setThinkingMode] = useState(true);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
-  // 运行模式（新会话待选值）：普通/快捷/程序化。
+  // 运行模式：新会话待选值 / 已有会话的当前值（普通 / 快捷）。
   const [runMode, setRunMode] = useState<RunMode>("normal");
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -1787,9 +1788,42 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     }
   };
 
-  // 运行模式：仅在「新会话」（无 sessionId）时可选——选中即存本地 pending，发第一条
-  // 消息时落库；会话一旦创建，模式即固定，选择器置灰不可改（见下方 ModePicker 的
-  // disabled={!!sessionId}）。后端 PUT 的 mode 能力保留，但前端不再暴露切换入口。
+  /* 运行模式：新会话存本地 pending（发第一条消息时落库）；已有会话直接写库——
+   *
+   * 后端每轮都从会话行现读 mode（chat/service.py 的 resolve_mode），所以改完
+   * 下一轮就生效，不必新建会话。选择器不再置灰：选中之后还能再选。
+   */
+  const applyRunMode = async (mode: RunMode) => {
+    if (!sessionId) {
+      setRunMode(mode);
+      return;
+    }
+    const prev = runMode;
+    setRunMode(mode); // 先切显示，后端失败再回滚
+    try {
+      await apiUpdateSessionWorkspace(agentId, sessionId, undefined, undefined, mode);
+    } catch (e: any) {
+      setRunMode(prev);
+      toast.error(e?.message || "运行模式切换失败");
+    }
+  };
+
+  /** 打开已有会话时回填它真实的运行模式（库里那行才是准的）。
+   *  不回填的话：界面显示「普通」、实际跑的是「快捷」，用户随手点一下就把模式改了。 */
+  const wsQ = useQuery({
+    queryKey: ["session-workspace", agentId, sessionId],
+    queryFn: () => apiSessionWorkspace(agentId, sessionId!),
+    enabled: !!sessionId,
+  });
+  const modeFilledRef = useRef<string | null>(null);
+  useEffect(() => {
+    const m = wsQ.data?.mode;
+    if (!m || !sessionId) return;
+    // 一个会话只回填一次：用户刚选完的模式不能被迟到的响应覆盖掉
+    if (modeFilledRef.current === sessionId) return;
+    modeFilledRef.current = sessionId;
+    if (m === "normal" || m === "simple") setRunMode(m);
+  }, [wsQ.data?.mode, sessionId]);
 
   /** 输入框高度（可拖把手放大，向上拖变大） */
   const [inputH, setInputH] = useState(64);
@@ -1834,7 +1868,10 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         所以内容页直接退回干净的白，让消息本身成为唯一的视觉主体。
       */}
       <div ref={listRef} className="relative min-h-0 flex-1 overflow-auto bg-panel px-4 py-5">
-        <div className="mx-auto w-full max-w-[46rem]">
+        {/* min-w：窄容器（「我的空间」右侧常驻对话面板最窄 300px）下不要把内容压扁 ——
+            内容保持自然宽度，容器自己横向滚动。压扁会让代码块、表格、长链接
+            挤成一团，反而更读不了。 */}
+        <div className="mx-auto w-full min-w-[26rem] max-w-[46rem]">
         {/*
           「加载更早的消息」：会话可能很长，接口单次只给最近一段。显式按钮而不是
           无限滚动——气泡里常带着一长串思考步骤，自动加载既容易让用户失去位置感，
@@ -1890,7 +1927,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       </div>
 
       {/* 配额 / 累计用量：跟输入框同列宽，不要贴着窗口边缘 */}
-      <div className="mx-auto w-full max-w-[46rem] px-4">
+      <div className="mx-auto w-full min-w-[26rem] max-w-[46rem] px-4">
         {budget && budget.limit > 0 && (
           <div className="mt-3">
             <AlertHint
@@ -1938,15 +1975,19 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       */}
       <div className="shrink-0 bg-panel px-4 pb-3.5 pt-2">
         <div className="mx-auto w-full max-w-[46rem]">
-          {/* 浮块投影给足两层（近处贴地一层、远处散开一层），并让它"浮"在内容
-              之上——输入区是整个页面唯一需要离开纸面感的东西，投影太弱就变成
-              一个贴着边的多行文本框。聚焦时再加一圈品牌色描边，光标落点一眼可见。 */}
+          {/* 浮块投影用主题里的 --kp-lift-shadow：它是**墨色**（23,34,51）而不是纯黑，
+              且深浅色主题各有各的浓度。之前这里写死 rgba(0,0,0,.16) —— 纯黑在浅底上
+              会洇出一圈灰黑的硬边，这就是"输入框像块黑板"的另一半原因。
+
+              边框：一直存在，但**细**、且是同一条品牌蓝（静止 25% / 聚焦 50%）。
+              之前用 border-line-soft（浅灰），在白底上几乎看不见；现在没点击时
+              也有线可循，聚焦时只是变深，而不是突然冒出一圈粗蓝。 */}
           <div
             className={cn(
-              "relative rounded-[18px] border border-line-soft bg-panel px-3.5 py-2.5",
-              "shadow-[0_8px_28px_-8px_rgba(0,0,0,0.16),0_2px_6px_-2px_rgba(0,0,0,0.06)]",
+              "relative rounded-[18px] border border-brand/25 bg-panel px-3.5 py-2.5",
+              "shadow-[var(--kp-lift-shadow)]",
               "transition-all duration-200 ease-apple",
-              "focus-within:border-brand/45 focus-within:shadow-[0_10px_32px_-8px_rgba(0,0,0,0.20),0_0_0_3px_rgba(66,133,244,0.4)]"
+              "focus-within:border-brand/50 focus-within:shadow-[var(--kp-lift-shadow),0_0_0_3px_rgba(66,133,244,0.26)]"
             )}
           >
             {/* 本会话动态启用的插件（`/` 激活，服务端持久化，仅本对话有效）：
@@ -2119,8 +2160,11 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               />
             </div>
 
-            {/* 工具行：左边低频动作、右边模型与发送。整行高度固定 30px */}
-            <div className="mt-1 flex items-center gap-1">
+            {/* 工具行：左边低频动作、右边模型与发送。整行高度固定 30px。
+                overflow-x-auto：窄面板（「我的空间」右侧的常驻对话）下这一行塞不下，
+                让它横向滚动，而不是把每个控件压扁到认不出。
+                子项都带 shrink-0 —— 不然它们会先被压缩，滚动条也就永远不会出现。 */}
+            <div className="mt-1 flex items-center gap-1 overflow-x-auto">
               {/* 附件 / 添加上下文 */}
               <button
                 type="button"
@@ -2153,14 +2197,14 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               />
 
               {/* 权限模式：显示当前模式，点击切换（这里简化为提示） */}
-              <span className="hidden items-center gap-1 rounded-full px-1.5 py-0.5 text-[11.5px] text-ink-muted sm:flex">
+              <span className="hidden shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11.5px] text-ink-muted sm:flex">
                 <ShieldCheck className="h-3 w-3" />
                 默认权限
               </span>
 
               {/* 模式标签：当前处于哪种工作视图。这是输入区里唯一的彩色元素，
                   给它品牌淡底，输入框就不会因为"全是灰控件"显得寡淡。 */}
-              <span className="flex items-center gap-1 rounded-full bg-brand/10 py-[3px] pl-1.5 pr-2 text-[11.5px] font-medium text-brand">
+              <span className="flex shrink-0 items-center gap-1 rounded-full bg-brand/10 py-[3px] pl-1.5 pr-2 text-[11.5px] font-medium text-brand">
                 <ListChecks className="h-3 w-3" />
                 {mode === "task" ? "任务" : "对话"}
               </span>
@@ -2168,9 +2212,8 @@ export default function ChatPage({ agentId }: { agentId: string }) {
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
                 {/* 模式 + 思考：移到模型选择左侧（不再放在输入框下方） */}
                 <ModePicker
-                  disabled={!!sessionId}
                   value={(runMode as RunMode) || "normal"}
-                  onChange={setRunMode}
+                  onChange={(m) => void applyRunMode(m)}
                 />
                 <ThinkingPicker
                   thinking={thinkingMode}

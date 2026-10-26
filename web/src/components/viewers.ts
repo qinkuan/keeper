@@ -94,10 +94,21 @@ const VEGA_SUFFIXES = [".vg.json"];
 
 const MERMAID_EXTS = new Set(["mmd", "mermaid"]);
 
-/** 是否 Vega / Vega-Lite 规范文件（.vg.json）。 */
+/**
+ * 是否 Vega / Vega-Lite 规范文件。
+ *
+ * 两档都算：
+ * 1. 标准后缀 `xxx.vg.json`；
+ * 2. 「含 `.vg` 且以 `.json` 结尾」—— 浏览器下载重名时系统会插一个副本标记，
+ *    `sales-line.vg.json` 被存成 `sales-line.vg (1).json`：扩展名变成了 `.json`，
+ *    但本质还是同一份 vega 规范，不能因为多了个 " (1)" 就退回源码视图。
+ *
+ * 只看 basename：目录名里带 ".vg" 不该把它里面的普通 .json 也当成图。
+ */
 export function isVegaName(name: string): boolean {
-  const base = (name ?? "").toLowerCase();
-  return VEGA_SUFFIXES.some((s) => base.endsWith(s));
+  const base = ((name ?? "").split("/").pop() ?? "").toLowerCase();
+  if (VEGA_SUFFIXES.some((s) => base.endsWith(s))) return true;
+  return base.includes(".vg") && base.endsWith(".json");
 }
 
 /** 是否 Mermaid 图文件（.mmd / .mermaid）。 */

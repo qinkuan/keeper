@@ -44,8 +44,8 @@ export function ChartView({
 }: {
   src: string;
   engine?: "vega-lite" | "echarts";
-  /** 画布高度；Markdown 内联用默认 360，文件预览传更高 */
-  height?: number;
+  /** 画布高度：数字 = 固定像素；"100%" = 填满父容器（父容器需要有确定高度） */
+  height?: number | "100%";
   /** 渲染失败时回调（消息已成人话）；不传则组件自己画错误浮层 */
   onError?: (message: string) => void;
 }) {
@@ -126,7 +126,7 @@ export function ChartView({
   );
 
   return (
-    <div style={{ position: "relative" }}>
+    <div style={{ position: "relative", ...(typeof height === "string" ? { height: "100%" } : {}) }}>
       <PanZoomStage height={height}>
         <div
           ref={chartRef}
@@ -134,7 +134,7 @@ export function ChartView({
             display: "inline-block",
             width: "100%",
             // echarts 需要显式高度；vega 按内容自适应，给 width 即可
-            ...(engine === "echarts" ? { height: height - 40 } : {}),
+            ...(engine === "echarts" && typeof height === "number" ? { height: height - 40 } : {}),
           }}
         />
       </PanZoomStage>
@@ -157,7 +157,8 @@ export function MermaidView({
 }: {
   src: string;
   refMark?: string;
-  height?: number;
+  /** 画布高度：数字 = 固定像素；"100%" = 填满父容器（父容器需要有确定高度） */
+  height?: number | "100%";
   onError?: (message: string) => void;
 }) {
   const [state, setState] = useState<{
