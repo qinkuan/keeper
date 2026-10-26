@@ -167,10 +167,10 @@ type Route = {
   page: string;
   agentId?: string;
   /**
-   * 「智能体」页当前停在哪个 tab（我的智能体 / 我的插件）。
+   * 「智能体 / 插件」这两个平级入口，当前显示哪一个。
    *
-   * 放路由里而不是组件内部 state：点侧栏「智能体」要能回到第一个 tab（而不是
-   * 记住上次那个），从「创建 Agent」返回也要能精确落回「我的智能体」。缺省即第一个。
+   * 放路由里而不是组件内部 state：菜单里两个入口各自明确指向一页（不再有页内
+   * tab 栏），刷新页面也要知道当前该显示哪一面。缺省即「智能体」。
    */
   agentTab?: AgentTab;
 };
@@ -261,9 +261,9 @@ export default function App() {
     setRoute({ page: "chat", agentId: coreAgentId });
   };
 
-  /* 「智能体」页的 tab：路由里可能缺省（点侧栏进来）或带着旧值，统一规范化成一个
-     合法 key。非法值（手改 URL、旧版本残留的路由状态）落到第一个 tab，而不是让
-     Tabs 一个都不选中。 */
+  /* 「智能体 / 插件」页当前显示哪一面：路由里可能缺省（点菜单进来）或带着旧值，
+     统一规范化成一个合法 key。非法值（手改 URL、旧版本残留的路由状态）落到
+     「智能体」，而不是让页面不知道该渲染什么。 */
   const agentTab: AgentTab = isAgentTab(route.agentTab) ? route.agentTab : "mine";
 
   const healthQ = useQuery({
@@ -670,10 +670,8 @@ export default function App() {
             <div className="h-full animate-fade-up box-border overflow-auto px-7 py-6">
               <AgentsHubPage
                 tab={agentTab}
-                onTabChange={(t) => setRoute({ page: "agents", agentTab: t })}
                 onCreate={() =>
-                  // 进创建页时记住来源 tab：创建完要落回它，而不是把用户丢回
-                  // 另一个 tab（现在来源固定是「我的智能体」）
+                  // 进创建页时记住来源页：创建完要落回它，而不是把用户丢到另一个入口
                   setRoute({ page: "agent-create", agentTab })
                 }
               />

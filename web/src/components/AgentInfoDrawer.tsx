@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
@@ -8,6 +8,7 @@ import { Tabs } from "./ui/Tabs";
 import { Hint } from "./ui/Page";
 import { SelectInput, TextInput, Toggle } from "./ui/Form";
 import { toast } from "./ui/Toast";
+import { useDebug } from "../hooks/useDebug";
 import {
   apiConfig,
   apiSkills,
@@ -36,6 +37,14 @@ const CAP_TABS: { key: string; label: string; kind: CapKind }[] = [
   { key: "builtin", label: "内置工具", kind: "builtin" },
   { key: "plugin", label: "插件", kind: "plugin" },
 ];
+
+/**
+ * 只有调试模式才展示的 tab：内置工具 / A2A 对端 / 生效工具。
+ *
+ * 这三个分区面向排查（这台 agent 到底装了什么、能调谁、最终生效的工具表），
+ * 日常使用用不到；关掉 debug 就只留「概览」和「插件」两个入口。
+ */
+const DEBUG_ONLY_TABS = new Set(["builtin", "peers", "effective"]);
 
 /** 状态 → 配色。antd 的 Tag 色板是写死的，深色下会糊，所以自己给语义色。 */
 const PILL_TONES = {
@@ -122,10 +131,10 @@ function EmptyHint({ text = "无" }: { text?: string }) {
 /**
  * Agent 配置面板。
  *
- * 分区：概览 / 内置工具 / 插件 / A2A 对端 / 生效工具。
+ * 分区：概览 / 插件 始终可见；内置工具 / A2A 对端 / 生效工具 **只在 debug
+ * 模式出现**（排查用：这台 agent 装了什么、能调谁、最终生效的工具表）。
  * 能力开关写本地 override，切换后服务端**重建实例**生效。
- * 内置工具归 keeper 本地，默认启用；插件从本机插件库里挑
- * MCP server、可执行工具（bin）与技能（skill），可按需开关。
+ * 插件从本机插件库里挑 MCP server、可执行工具（bin）与技能（skill），可按需开关。
  */
 export default function AgentInfoDrawer({
   open,
@@ -138,6 +147,15 @@ export default function AgentInfoDrawer({
 }) {
   const qc = useQueryClient();
   const [tab, setTab] = useState("overview");
+  const debug = useDebug();
+
+  /* debug 关掉后，如果正停在只在 debug 可见的 tab（内置工具 / A2A 对端 /
+     生效工具）上，就退回「概览」——否则会看到一个没有 tab 头、内容还挂着的
+     "幽灵页"。 */
+  useEffect(() => {
+    if (debug) return;
+    if (DEBUG_ONLY_TABS.has(tab)) setTab("overview");
+  }, [debug, tab]);
   const [peerName, setPeerName] = useState("");
   const [peerUrl, setPeerUrl] = useState("");
   const [peerSource, setPeerSource] = useState<"local" | "external">("local");
@@ -161,12 +179,14 @@ export default function AgentInfoDrawer({
   const peersQ = useQuery({
     queryKey: ["peers", agentId],
     queryFn: () => apiPeers(agentId),
-    enabled: open,
+    // 「A2A 对端」只在 debug 下展示 → 非 debug 模式不必去拉这份数据
+    enabled: open && debug,
   });
   const toolsQ = useQuery({
     queryKey: ["effective-tools", agentId],
     queryFn: () => apiEffectiveTools(agentId),
-    enabled: open,
+    // 同上：「生效工具」是排查用的视图
+    enabled: open && debug,
   });
   const capsQ = useQuery({
     queryKey: ["capabilities", agentId],
@@ -423,9 +443,16 @@ export default function AgentInfoDrawer({
         onChange={setTab}
         items={[
           { key: "overview", label: "概览" },
-          ...CAP_TABS.map((t) => ({ key: t.key, label: t.label })),
-          { key: "peers", label: "A2A 对端" },
-          { key: "effective", label: "生效工具" },
+          // 能力 tab：内置工具只在 debug 下出现，插件始终可见
+          ...CAP_TABS.filter(
+            (t) => debug || !DEBUG_ONLY_TABS.has(t.key)
+          ).map((t) => ({ key: t.key, label: t.label })),
+          ...(debug
+            ? [
+                { key: "peers", label: "A2A 对端" },
+                { key: "effective", label: "生效工具" },
+              ]
+            : []),
         ]}
       />
 

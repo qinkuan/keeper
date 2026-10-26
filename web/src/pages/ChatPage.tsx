@@ -27,6 +27,7 @@ import UsageDetailModal from "../components/UsageDetailModal";
 import { ModelPicker } from "../components/ModelPicker";
 import { ThinkingPicker } from "../components/ThinkingPicker";
 import { ModePicker } from "../components/ModePicker";
+import { useDebug } from "../hooks/useDebug";
 import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import MentionPicker from "../components/MentionPicker";
@@ -542,6 +543,15 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   );
   // 工作模式：会话视图 / 任务视图
   const [mode, setMode] = useState<"chat" | "task">("chat");
+  /** 调试模式：「任务」视图只在调试模式下出现（抽屉里的「会话 / 任务」切换）。
+   *  任务是内部编排用的东西，普通用户只看「会话」就够了。 */
+  const debug = useDebug();
+  /** 关掉调试模式时若正停在任务视图，退回会话视图 ——
+   *  否则「任务」这个选项从切换器里消失了，界面却还停在任务视图里
+   *  （左上角的列表入口也会一直写着「任务」），用户没法退回。 */
+  useEffect(() => {
+    if (!debug && mode === "task") setMode("chat");
+  }, [debug, mode]);
   const qc = useQueryClient();
   /** 可观测：当前会话的累计用量（消息列表里看单轮，这里看整会话总计）。
    *  会话视图用 chatSessionId（切走再切回要恢复它）；任务视图只认 sessionId
@@ -2429,14 +2439,19 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 <span className="text-[13px] font-semibold tracking-[-0.01em] text-ink-strong">
                   会话
                 </span>
-                {/* 类别切换：会话 / 任务。与「对话」页同款 SegmentedControl。 */}
+                {/* 类别切换：会话 / 任务。与「对话」页同款 SegmentedControl。
+                    「任务」只在调试模式下出现（见上面的 debug 判定）。 */}
                 <SegmentedControl
                   value={mode}
                   onChange={(v) => setMode(v as "chat" | "task")}
-                  options={[
-                    { label: "会话", value: "chat" },
-                    { label: "任务", value: "task" },
-                  ]}
+                  options={
+                    debug
+                      ? [
+                          { label: "会话", value: "chat" },
+                          { label: "任务", value: "task" },
+                        ]
+                      : [{ label: "会话", value: "chat" }]
+                  }
                 />
                 <button
                   type="button"
