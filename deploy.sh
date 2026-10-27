@@ -34,7 +34,21 @@ mkdir -p "$D/keeper"
 #   web/                         前端整个目录（dist 单独打包，src/node_modules 用不到）
 #   dist/                        本脚本与 web/deploy.sh 的产物目录（zip 会滚雪球）
 #   .venv/                       依赖（start_keeper.sh 到目标机上自己装）
+#   node_modules/                 前端 / Electron 的依赖目录
+#   desktop/                     **桌面壳整套**（Electron 源码 + node_modules + release 产物）
+#   packaging/build/             PyInstaller 构建中间物（冻内核用，服务端跑源码用不到）
+#   .git/ .idea/                 版本库 / IDE 配置
 #   temp.json  test_*.py         无代码引用的临时文件 / 本地回归脚本
+#
+# 为什么必须排除 desktop/ 和 packaging/build/
+# -------------------------------------------
+# 之前只排除了 'dist'（任意层级同名目录），漏掉了这两处，打出来的包 656M，
+# 而**真正的代码只有 2M**：
+#   desktop/release/ 594M  ← Electron 打包产物（Keeper.app，里面还冻了一份内核）
+#   desktop/node_modules/ 75M
+#   packaging/build/   86M  ← PyInstaller 的 .toc/.pyz 中间物
+# 服务端部署跑的是「源码 + 目标机自己装 .venv」，跟桌面壳、冻内核都没有关系，
+# 所以这两个目录整个不进包。
 rsync -a \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
   --exclude='data' --exclude='.workplace' --exclude='.venv' \
@@ -43,6 +57,10 @@ rsync -a \
   --exclude='.DS_Store' --exclude='temp.json' --exclude='test_*.py' \
   --exclude='evals/.runs' --exclude='evals/baselines' \
   --exclude='web' \
+  --exclude='node_modules' \
+  --exclude='desktop' \
+  --exclude='packaging/build' \
+  --exclude='.git' --exclude='.idea' \
   "$DIR/" "$D/keeper/"
 
 # requirements.txt 已随代码 rsync 进 keeper/，start_keeper.sh 就是从这里读的
@@ -70,6 +88,10 @@ if [ -n "$MISSING" ]; then
 fi
 
 mkdir -p "$OUT"
+# 体积自查：把 stage 里最大的几个目录列出来。以后再出现"包怎么这么胖"，
+# 一眼就能看出是哪个目录混进来了（不用再靠 du 一层层猜）。
+# `|| true`：du 对不存在的路径会返回非 0，而脚本开了 pipefail，不兜住会直接退出。
+( du -sh "$D"/keeper/* "$D"/keeper/.[a-z]* 2>/dev/null | sort -hr | head -6 ) || true
 ( cd "$D" && zip -qr "$OUT/$PKG.zip" . )
 # 打**绝对**路径：只打 dist/xxx.zip 的话，在哪个目录执行它就指哪
 echo "[deploy] 完成：${OUT}/${PKG}.zip（$(du -h "$OUT/$PKG.zip" | cut -f1)）"
