@@ -150,7 +150,6 @@ function MentionChips({
 function ChatBubble({
   msg,
   agentId,
-  agentName,
   sessionId,
   isLocal = true,
   onUsageDetail,
@@ -159,7 +158,8 @@ function ChatBubble({
 }: {
   msg: ChatMessage;
   agentId: string;
-  /** 消息头显示的 agent 名。多 agent 场景下不显示名字，读者分不清是谁答的 */
+  /** 消息头显示的 agent 名。**现在不展示了**（只留「已完成 · 用时」），
+   *  但类型留着：调用方还在传，直接删会让它们编译不过。 */
   agentName?: string;
   /** 这条消息所属会话：附件预览 URL 要用（附件缓存在会话私有临时区） */
   sessionId?: string;
@@ -254,9 +254,22 @@ function ChatBubble({
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
-      {/* 助手头像（左）：圆形品牌渐变 + 同色投影 + 顶部内高光。
-          内高光那一条是"看起来像玻璃/珐琅"的最小成本做法，纯色圆点会显得很平。 */}
-      {!isUser && (
+      {/* 头像：**两个角色都放在内容列前面**。
+          用户消息整行是 flex-row-reverse（气泡靠右），DOM 里靠前的元素会被排到
+          视觉右侧——所以头像必须写在前面，用户头像才会落在气泡右边；写在后面
+          就会跑到气泡左边、压进气泡上沿（那是之前"布局有问题"的成因）。
+          助手消息是正常行序，头像在前 = 在左，与用户侧刚好镜像。 */}
+      {isUser ? (
+        /* 用户头像（右）：**不画底**，就是一个裸的人形图标（品牌色描边）。
+           助手那边是实心的机器人圆标，用户这边如果再套一个底，两个头像就像
+           两枚按钮；去掉底之后，一个图标 + 一个机器人，各是各的。
+           容器尺寸保留（26px），只为和气泡顶部对齐。 */
+        <div className="mt-[2px] flex h-[26px] w-[26px] shrink-0 items-center justify-center text-brand">
+          <User className="h-[19px] w-[19px]" strokeWidth={2} />
+        </div>
+      ) : (
+        /* 助手头像（左）：圆形品牌渐变 + 同色投影 + 顶部内高光。
+            内高光那一条是"看起来像玻璃/珐琅"的最小成本做法，纯色圆点会显得很平。 */
         <div className="mt-[3px] flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white shadow-[0_2px_6px_-1px_rgba(66,133,244,0.5),inset_0_1px_0_rgba(255,255,255,0.3)]">
           <Bot className="h-[14px] w-[14px]" strokeWidth={2.2} />
         </div>
@@ -273,15 +286,12 @@ function ChatBubble({
         )}
       >
       {/*
-        消息头（仅助手）：头像右侧先来一行「名称 · 状态」。截图里这行是
-        「WorkBuddy X Alpha·Lite」+「已完成 23s >」，作用是**让每条回答都有
-        出处和耗时**——多 agent 场景下不写名字，读者分不清是谁答的。
+        消息头（仅助手）：只留状态（进行中 / 已完成 · 用时）。
+        原来这里还写着 agent 的名字，但对话区上方已经有 agent 身份了，
+        每条回答再顶一行名字纯属噪音——去掉后只留"这条答完了、用了多久"。
       */}
       {!isUser && (
         <div className="mb-1.5 flex items-center gap-2 text-[12px]">
-          <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-ink-strong">
-            {agentName || "Agent"}
-          </span>
           {msg.streaming ? (
             <span className="flex items-center gap-1.5 text-ink-muted">
               <span className="kp-pulse-dot h-1.5 w-1.5 rounded-full bg-brand" />
@@ -552,13 +562,6 @@ function ChatBubble({
           </div>
         )}
       </div>
-
-      {/* 用户头像（右） */}
-      {isUser && (
-        <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/12 text-brand">
-          <User className="h-3.5 w-3.5" />
-        </div>
-      )}
     </div>
   );
 }
