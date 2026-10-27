@@ -312,7 +312,6 @@ def main() -> None:
         await build_all_agents()
         # 3) 启动对外 HTTP API；Ctrl+C 时 serve() 的 finally 会优雅关闭
         await serve(host=host, port=port)
-
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

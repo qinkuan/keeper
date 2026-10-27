@@ -6,15 +6,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from . import build_model
 from .config import LLMConfig
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..store import (
     Agent,
@@ -91,8 +91,6 @@ async def _rebuild_agents_using(model_id: str) -> List[Dict[str, Any]]:
     已停用的 agent（本地停用 / 能力被关）跳过——它本来就不在跑，重载它没意义，
     还要重新检查一遍停用状态。``_rebuild_if_enabled`` 已经处理了这种情况。
     """
-    from ..agent.api import _rebuild_if_enabled
-
     async with get_session_factory()() as session:
         ids = (
             await session.execute(
@@ -101,6 +99,23 @@ async def _rebuild_agents_using(model_id: str) -> List[Dict[str, Any]]:
                 )
             )
         ).scalars().all()
+    return await _rebuild_agents(ids)
+
+
+async def _rebuild_agents(agent_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    """按 agent_id 列表重装配（不依赖绑定表）。
+
+    删除模型预设时用到：绑定已经先被删掉了，"谁绑着它"只能靠删除前记下的
+    id 列表——否则这些 agent 的内存里还留着**已经删掉的配置**在跑，界面却显示
+    未绑定。
+    """
+    from ..agent.api import _rebuild_if_enabled
+
+    ids = [a for a in agent_ids if a]
+    if not ids:
+        return []
+
+    async with get_session_factory()() as session:
         names = (
             {
                 r[0]: r[1]
@@ -122,11 +137,14 @@ async def _rebuild_agents_using(model_id: str) -> List[Dict[str, Any]]:
         )
         logger.info("模型预设变更，重装配 agent %s：%s", names.get(aid, aid), "成功" if ok else reason)
     if done:
-        logger.info("模型预设 %s 变更，共重装配 %s 个 agent", model_id, len(done))
+        logger.info("模型预设变更，共重装配 %s 个 agent", ", ".join(names.get(a, a) for a in ids))
     return done
 
 
-def _to_out(r: LLMProfile, reloaded_agents: Optional[List[Dict[str, Any]]] = None) -> LLMProfileOut:
+def _to_out(
+    r: LLMProfile,
+    reloaded_agents: Optional[List[Dict[str, Any]]] = None,
+) -> LLMProfileOut:
     return LLMProfileOut(
         id=r.id,
         name=r.name,
@@ -150,7 +168,257 @@ async def list_models() -> List[LLMProfileOut]:
         rows = (
             await session.execute(select(LLMProfile).order_by(LLMProfile.name))
         ).scalars().all()
-        return [_to_out(r) for r in rows]
+    return [_to_out(r) for r in rows]
+
+
+@models_router.get("/preset-prices")
+async def list_preset_prices(
+    provider: str, model_name: str = ""
+) -> Dict[str, Any]:
+    """查某个模型的**出厂预设价格**（模型管理页的「单价」弹窗用）。
+
+    匹配规则：预设包里 ``provider`` 相同、且 ``model_name`` 相同的那一条。
+    匹配上了就把它配好的价格段（含时段 / 星期错峰）原样给出去，用户点一下
+    就能加进自己的价段列表——不用照着官网再抄一遍数字。
+
+    匹配不上就说清楚"没匹配上"，并列出该服务商下有哪些模型有预设价格，
+    免得用户对着空白面板猜是不是坏了。
+    """
+    from .presets import load_presets
+
+    presets = load_presets()
+    same_provider = [p for p in presets if p.provider == provider]
+    hit = next(
+        (p for p in same_provider if p.model_name == model_name),
+        None,
+    )
+    others = [
+        {"model_name": p.model_name, "label": p.label, "has_price": p.has_price}
+        for p in same_provider
+        if p is not hit
+    ]
+    if hit is None:
+        return {
+            "matched": False,
+            "model_name": model_name,
+            "prices": [],
+            "others": others,
+        }
+    return {
+        "matched": True,
+        "model_name": hit.model_name,
+        "prices": [
+            {
+                "input_price_per_1m": s.input_per_1m,
+                "cached_price_per_1m": s.cached_per_1m,
+                "output_price_per_1m": s.output_per_1m,
+                "currency": s.currency,
+                "weekdays": s.weekdays,
+                "time_from_minute": s.time_from_minute,
+                "time_to_minute": s.time_to_minute,
+                "note": s.note,
+            }
+            for s in hit.prices
+        ],
+        "others": others,
+    }
+
+
+@models_router.get("/providers")
+async def list_providers() -> List[Dict[str, Any]]:
+    """列出预设包里的**服务商**及其支持的模型（新建模型向导用）。
+
+    一次返回两级选择所需的全部信息：服务商 → 它支持的模型（模型名、上下文、
+    价格段、默认参数）。前端不用再逐个请求。
+    """
+    from .presets import load_providers
+
+    out: List[Dict[str, Any]] = []
+    for p in load_providers():
+        out.append(
+            {
+                "provider": p.provider,
+                "label": p.label or p.provider,
+                "base_url": p.base_url,
+                "docs_url": p.docs_url,
+                "models": [
+                    {
+                        "model_name": m.model_name,
+                        "name": m.name,
+                        "label": m.label,
+                        "context_limit": m.context_limit,
+                        "temperature": m.temperature,
+                        "timeout": m.timeout,
+                        "max_retries": m.max_retries,
+                        "prices": [
+                            {
+                                "input_price_per_1m": s.input_per_1m,
+                                "cached_price_per_1m": s.cached_per_1m,
+                                "output_price_per_1m": s.output_per_1m,
+                                "currency": s.currency,
+                                "weekdays": s.weekdays,
+                                "time_from_minute": s.time_from_minute,
+                                "time_to_minute": s.time_to_minute,
+                                "note": s.note,
+                            }
+                            for s in m.prices
+                        ],
+                    }
+                    for m in p.models
+                ],
+            }
+        )
+    return out
+
+
+class PresetPriceSpec(BaseModel):
+    """一段价格（全天兜底，或某个星期/时段的错峰价）。
+
+    字段名与 ``model_prices`` 表、前端的 ``ModelPrice`` 保持一致，避免两套叫法。
+    """
+
+    input_price_per_1m: Optional[float] = None
+    cached_price_per_1m: Optional[float] = None
+    output_price_per_1m: Optional[float] = None
+    currency: str = "CNY"
+    #: 适用星期：逗号分隔的 ISO 星期号（1=周一 … 7=周日）；空 = 每天
+    weekdays: Optional[str] = None
+    #: 时段（本地时间口径，一天内分钟数 0–1439）；与 time_to 都为空 = 全天
+    time_from_minute: Optional[int] = None
+    time_to_minute: Optional[int] = None
+    note: Optional[str] = None
+    #: 这段价是出厂预设带来的（preset）还是用户自己写的（user）
+    source: Optional[str] = None
+
+
+class PresetModelSpec(BaseModel):
+    """一个模型的**完整配置**。
+
+    预设只是帮用户快速填信息（默认值 + 候选项），真正落到库里的一切**以这里
+    为准**——用户在向导里改过的每一项都原样写进去。
+    """
+
+    name: str
+    provider: str
+    model_name: str
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    context_limit: Optional[int] = None
+    temperature: float = 0.2
+    timeout: int = 120
+    max_retries: int = 3
+    prices: List[PresetPriceSpec] = Field(default_factory=list)
+
+
+class PresetModelsCreateIn(BaseModel):
+    """向导的最终提交：一个服务商 + 它下面每个模型的完整配置。"""
+
+    provider: str
+    #: 服务商级默认值（模型没单独填时的兜底）
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    models: List[PresetModelSpec] = Field(default_factory=list)
+
+
+class PresetModelsCreateOut(BaseModel):
+    """批量创建的结果：建了哪些、跳过了哪些、哪些撞名了。"""
+
+    created: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    conflicts: List[Dict[str, Any]] = []
+
+
+@models_router.post("/from-preset", response_model=PresetModelsCreateOut)
+async def create_models_from_preset(body: PresetModelsCreateIn) -> PresetModelsCreateOut:
+    """按服务商批量创建模型预设（每个选中的模型建一行 + 写入它的价格段）。
+
+    为什么走"批量"而不是一条条建：这个流程的语义是"我买了这个服务商的账号，
+    把它支持的模型都配上"——同一个 Key 一次填好，勾几个模型就建几个条目，
+    不用对每个模型重复填一遍地址、上下文、价格。
+    """
+    # 落库的值**一律取入参**：预设只是前端帮忙填表，服务端不记账、不合并。
+    if not body.models:
+        raise HTTPException(status_code=400, detail="没有选中任何模型")
+
+    created: List[Dict[str, Any]] = []
+    conflicts: List[Dict[str, Any]] = []
+
+    now = datetime.now(timezone.utc)
+    async with get_session_factory()() as session:
+        rows = (await session.execute(select(LLMProfile))).scalars().all()
+        taken = {r.name for r in rows}
+        for spec in body.models:
+            name = (spec.name or spec.model_name).strip()
+            if not name:
+                continue
+            if name in taken:
+                conflicts.append(
+                    {
+                        "name": name,
+                        "reason": f"名称已被占用：{name}",
+                    }
+                )
+                continue
+            row = LLMProfile(
+                id=new_id(),
+                name=name,
+                provider=spec.provider,
+                model_name=spec.model_name,
+                base_url=spec.base_url or None,
+                api_key=(spec.api_key or body.api_key or None),
+                context_limit=spec.context_limit,
+                temperature=spec.temperature,
+                timeout=spec.timeout,
+                max_retries=spec.max_retries,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            taken.add(name)
+            created.append(
+                {
+                    "id": row.id,
+                    "name": name,
+                    "model_name": spec.model_name,
+                    "provider": spec.provider,
+                    "has_api_key": bool((row.api_key or "").strip()),
+                }
+            )
+            # 价格段：按入参写（可能是多段错峰价，也可能是用户自己改的一段）
+            for seg in spec.prices:
+                if (
+                    seg.input_price_per_1m is None
+                    and seg.output_price_per_1m is None
+                ):
+                    continue
+                session.add(
+                    ModelPrice(
+                        id=new_id(),
+                        profile_id=row.id,
+                        model_name=spec.model_name,
+                        provider=spec.provider,
+                        effective_from=now,
+                        input_price_per_1m=float(seg.input_price_per_1m or 0.0),
+                        cached_price_per_1m=float(seg.cached_price_per_1m or 0.0),
+                        output_price_per_1m=float(seg.output_price_per_1m or 0.0),
+                        currency=seg.currency or "CNY",
+                        note=seg.note,
+                        weekdays=seg.weekdays,
+                        time_from_minute=seg.time_from_minute,
+                        time_to_minute=seg.time_to_minute,
+                        created_at=now,
+                    )
+                )
+        await session.commit()
+
+    logger.info(
+        "按向导创建模型预设：%s，建了 %d 个，跳过 %d 个（撞名）",
+        body.provider,
+        len(created),
+        len(conflicts),
+    )
+    return PresetModelsCreateOut(created=created, conflicts=conflicts)
 
 
 @models_router.post("", response_model=LLMProfileOut, status_code=201)
@@ -212,26 +480,58 @@ async def update_model(model_id: str, body: LLMProfileIn) -> LLMProfileOut:
     return _to_out(row, reloaded_agents=reloaded)
 
 
-@models_router.delete("/{model_id}", status_code=204)
-async def delete_model(model_id: str) -> Response:
-    """删除模型预设。
+@models_router.delete("/{model_id}")
+async def delete_model(model_id: str) -> Dict[str, Any]:
+    """删除模型预设，并**连带删除与 agent 的绑定**。
 
-    也会重装配绑着它的 agent：它们的绑定会变成「预设失效」，放任不管的话这些
-    agent 会继续用**已经删掉的配置**跑（内存里的实例还活着），界面却显示未绑定——
-    又是那种"界面与实际不一致"。删完就重载，让它们立刻落到无模型的纯索引模式，
-    并按未绑定提示用户去重新配一个。
+    绑定必须一起删：模型没了，绑定还留着就是"绑了个不存在的东西"——界面显示
+    未绑定，agent 却还在用内存里那份已经删掉的配置跑（LLM 实例是 build 期固化
+    的）。留着这种悬空绑定，界面与实际永远对不上。
 
-    接口仍是 204（无 body），重载结果只进日志。
+    所以这里先把绑定行删掉，再重装配这些 agent，让它们立刻落到无模型的纯
+    索引模式；返回值里带上解绑了几个，便于如实告诉用户。
+
+    价段也一起删：价段按 profile_id 关联，profile 没了这段价就成了悬空的
+    "孤儿"——而取价会退化到按 model_name+provider 匹配，把它捡走，于是新配
+    的价算出来是旧价。删预设就该连价一起删干净。
     """
     async with get_session_factory()() as session:
         row = await session.get(LLMProfile, model_id)
         if not row:
             raise HTTPException(status_code=404, detail="模型不存在")
+        bound = (
+            await session.execute(
+                select(AgentLLMBinding.agent_id).where(
+                    AgentLLMBinding.llm_profile_id == model_id
+                )
+            )
+        ).scalars().all()
+        bound = list(bound)
+        if bound:
+            await session.execute(
+                delete(AgentLLMBinding).where(
+                    AgentLLMBinding.llm_profile_id == model_id
+                )
+            )
+        await session.execute(
+            delete(ModelPrice).where(ModelPrice.profile_id == model_id)
+        )
         await session.delete(row)
         await session.commit()
-    reloaded = await _rebuild_agents_using(model_id)
-    logger.info("模型预设 %s 已删除，重装配 %s 个 agent", model_id, len(reloaded))
-    return Response(status_code=204)
+    # 绑定已删，"谁绑着它"只能靠上面记下的 id 列表
+    reloaded = await _rebuild_agents(bound)
+    logger.info(
+        "模型预设 %s 已删除（解绑 %s 个 agent），重装配 %s 个 agent",
+        model_id,
+        len(bound),
+        len(reloaded),
+    )
+    return {
+        "id": model_id,
+        "removed": True,
+        "unbound_agents": len(bound),
+        "reloaded_agents": reloaded,
+    }
 
 
 @models_router.post("/{model_id}/test")

@@ -45,12 +45,7 @@ export function ModePicker({
         <button
           type="button"
           title={`运行模式：${cur.label}（${cur.desc}）`}
-          className={cn(
-            "flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 text-[12px] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors duration-150",
-            cur.value === "normal"
-              ? "text-ink-muted hover:text-ink"
-              : "text-brand hover:border-brand/40"
-          )}
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] border border-line-soft bg-panel px-2 text-[12px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors duration-150 hover:text-ink"
         >
           <Icon className="h-3.5 w-3.5 shrink-0" />
           <span className="hidden lg:inline">模式</span>
@@ -69,32 +64,43 @@ export function ModePicker({
         >
           {OPTIONS.map((o) => {
             const OIcon = o.icon;
+            const selected = cur.value === o.value;
             return (
               <DropdownMenu.Item
                 key={o.value}
+                data-selected={selected}
                 onSelect={() => {
                   onChange(o.value);
                   setOpen(false);
                 }}
-                className="flex cursor-pointer items-center gap-2 rounded-[7px] px-2 py-1.5 outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12"
+                className={cn(
+                  "flex cursor-pointer items-center gap-2 rounded-[7px] px-2 py-1.5 outline-none transition-colors duration-100",
+                  "data-[highlighted]:bg-brand/15",
+                  selected
+                    ? "bg-brand/10 font-medium text-brand"
+                    : "text-ink hover:text-ink-strong"
+                )}
               >
                 <Check
                   className={cn(
                     "h-3 w-3 shrink-0",
-                    cur.value === o.value ? "opacity-100" : "opacity-0"
+                    selected ? "opacity-100" : "opacity-0"
                   )}
                 />
-                <OIcon className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+                <OIcon
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0",
+                    selected ? "text-brand" : "text-ink-faint"
+                  )}
+                />
                 <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-[12px]">{o.label}</span>
                   <span
                     className={cn(
-                      "truncate text-[12px]",
-                      cur.value === o.value && "font-medium text-ink-strong"
+                      "truncate text-[11px]",
+                      selected ? "text-brand/75" : "text-ink-faint"
                     )}
                   >
-                    {o.label}
-                  </span>
-                  <span className="truncate text-[11px] text-ink-faint">
                     {o.desc}
                   </span>
                 </span>

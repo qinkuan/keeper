@@ -1,3 +1,4 @@
+import { useState } from "react";
 /**
  * 表单基础件（替代 antd Form / Form.Item / Input / InputNumber / Switch / Select）。
  *
@@ -10,6 +11,7 @@
  * 改哪一段，保存时整体提交——比从表单实例里再捞一遍更直接。
  */
 import type { ReactNode } from "react";
+import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 /**
@@ -68,20 +70,42 @@ export function TextInput({
   onChange,
   placeholder,
   disabled,
+  list,
+  onClear,
 }: {
   value?: string | null;
   onChange: (v: string) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** 关联的 <datalist> id：给"可下拉也可手填"的字段用（原生建议列表） */
+  list?: string;
+  /** 传了就在输入框右侧给一个 ✕（清空）。用于"填错了要能立刻抹掉重来"的场合。 */
+  onClear?: () => void;
 }) {
-  return (
+  const input = (
     <input
       value={value ?? ""}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       disabled={disabled}
-      className={inputCls}
+      list={list}
+      className={cn(inputCls, onClear && "pr-7")}
     />
+  );
+  if (!onClear) return input;
+  return (
+    <div className="relative">
+      {input}
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={disabled}
+        title="清空"
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-ink-faint transition-colors hover:text-ink disabled:opacity-50"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
   );
 }
 
@@ -294,6 +318,38 @@ export function ToggleField({
         )}
       </div>
       <Toggle checked={checked} onChange={onChange} disabled={disabled} />
+    </div>
+  );
+}
+
+/** 密码输入：带「显示 / 隐藏」切换，避免长 Key 粘贴后无法核对 */
+export function PasswordInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value?: string | null;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <input
+        type={show ? "text" : "password"}
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="new-password"
+        className="w-full rounded-[7px] border border-line bg-panel px-2.5 py-2 pr-16 font-mono text-[12.5px] text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)] placeholder:font-sans placeholder:text-ink-faint"
+      />
+      <button
+        type="button"
+        onClick={() => setShow((s) => !s)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[12px] text-ink-faint transition-colors hover:text-brand"
+      >
+        {show ? "隐藏" : "显示"}
+      </button>
     </div>
   );
 }

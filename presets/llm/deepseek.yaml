@@ -1,0 +1,86 @@
+# 出厂模型预设：DeepSeek 官方
+#
+# 这个文件是**只读模板**：新建模型向导里选到 DeepSeek，就把这些参数预填进
+# 表单（地址、上下文、单价……）。用户改哪项都算数，提交后落库的一切以提交
+# 的数据为准——服务端不记账、不合并，预设包跟数据库再无关系。
+#
+# 写法约定：
+# - `key` 是预设内的标识（同一服务商内唯一），改名等于换了一个条目。
+# - `name` 是进数据库的展示名，**可以**改（重名时用户会换一个名字）。
+# - 价格单位是「每 100 万 token」，`currency` 决定展示时的符号（¥ / $）。
+# - 价格拿不准就**留空**：留空 = 算不出成本（界面显示「—」），绝不瞎算一个
+#   错的数字——成本数字错比没有更糟。
+#
+# ---- 数据核对时间：2026-10-27
+#      来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing （人民币定价）
+
+provider: deepseek
+label: DeepSeek 官方
+docs_url: https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+# OpenAI 兼容端点（后端 provider=deepseek 会被映射成 openai 客户端 + base_url）
+base_url: https://api.deepseek.com
+
+defaults:
+  temperature: 0.2
+  timeout: 120
+  max_retries: 3
+
+models:
+  # ---- 当前官方在售的两个模型 ----
+  - key: deepseek-flash
+    model_name: deepseek-flash
+    label: DeepSeek-V4.1-Flash
+    # 官方标注 1M tokens 上下文
+    context_limit: 960000
+    prices:
+      # 兜底段：不限时段、不限星期 → 非高峰价
+      - note: 全天（非高峰）
+        input_per_1m: 1.00
+        cached_per_1m: 0.02
+        output_per_1m: 4.00
+        currency: CNY
+      # 高峰段：周一至周五 09:00–12:00（北京时间）。keeper 的时段按**机器本地
+      # 时间**匹配，所以这里写的是本地时间口径——按 UTC+8 的机器完全准确。
+      - note: 高峰 09:00–12:00
+        weekdays: "1,2,3,4,5"
+        time_from: "09:00"
+        time_to: "12:00"
+        input_per_1m: 2.00
+        cached_per_1m: 0.04
+        output_per_1m: 8.00
+        currency: CNY
+      - note: 高峰 14:00–18:00
+        weekdays: "1,2,3,4,5"
+        time_from: "14:00"
+        time_to: "18:00"
+        input_per_1m: 2.00
+        cached_per_1m: 0.04
+        output_per_1m: 8.00
+        currency: CNY
+
+  - key: deepseek-v4-pro
+    model_name: deepseek-v4-pro
+    label: DeepSeek-V4-Pro
+    context_limit: 960000
+    prices:
+      - note: 全天（非高峰）
+        input_per_1m: 4.50
+        cached_per_1m: 0.15
+        output_per_1m: 13.50
+        currency: CNY
+      - note: 高峰 09:00–12:00
+        weekdays: "1,2,3,4,5"
+        time_from: "09:00"
+        time_to: "12:00"
+        input_per_1m: 9.00
+        cached_per_1m: 0.30
+        output_per_1m: 27.00
+        currency: CNY
+      - note: 高峰 14:00–18:00
+        weekdays: "1,2,3,4,5"
+        time_from: "14:00"
+        time_to: "18:00"
+        input_per_1m: 9.00
+        cached_per_1m: 0.30
+        output_per_1m: 27.00
+        currency: CNY

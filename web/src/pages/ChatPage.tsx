@@ -1780,20 +1780,34 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     }
   };
 
+  /** 回填标记：一个会话只从服务端回填一次。
+   *  用户手动选过之后，迟到的响应不许把用户的选择冲掉。 */
+  const modeFilledRef = useRef<string | null>(null);
+  const thinkFilledRef = useRef<string | null>(null);
+
   // 思考模式/强度：已有会话改一下即写库（不影响工作空间，后端 exclude_unset 区分）；
   // 新会话只更新本地 pending 值（发第一条消息时才落库）。
+  //
+  // 关键是**先改本地状态**：不管有没有会话，选择器都必须立刻反映用户的选择。
+  // 之前只在"没有会话"分支里 setState，已有会话下点了等于没点——界面不动，
+  // 用户看不出选没选中（后台其实写进去了）。
   const applyThinking = async (enabled: boolean, effort: ReasoningEffort) => {
-    if (!sessionId) {
-      setThinkingMode(enabled);
-      setReasoningEffort(effort);
-      return;
-    }
+    const prevThinking = thinkingMode;
+    const prevEffort = reasoningEffort;
+    setThinkingMode(enabled);
+    setReasoningEffort(effort);
+    if (!sessionId) return; // 新会话：只存本地 pending，发第一条消息时落库
+    // 锁住这个会话的回填：迟到的服务端响应不能把用户刚选的值冲掉
+    thinkFilledRef.current = sessionId;
     try {
       await apiUpdateSessionWorkspace(agentId, sessionId, undefined, {
         enabled,
         reasoning_effort: effort,
       });
     } catch (e: any) {
+      setThinkingMode(prevThinking);
+      setReasoningEffort(prevEffort);
+      thinkFilledRef.current = null;
       toast.error(e?.message || "思考模式切换失败");
     }
   };
@@ -1804,36 +1818,42 @@ export default function ChatPage({ agentId }: { agentId: string }) {
    * 下一轮就生效，不必新建会话。选择器不再置灰：选中之后还能再选。
    */
   const applyRunMode = async (mode: RunMode) => {
-    if (!sessionId) {
-      setRunMode(mode);
-      return;
-    }
     const prev = runMode;
     setRunMode(mode); // 先切显示，后端失败再回滚
+    if (!sessionId) return; // 新会话：只存本地 pending
+    // 同上：锁住回填，免得迟到的响应把用户刚选的模式冲掉
+    modeFilledRef.current = sessionId;
     try {
       await apiUpdateSessionWorkspace(agentId, sessionId, undefined, undefined, mode);
     } catch (e: any) {
       setRunMode(prev);
+      modeFilledRef.current = null;
       toast.error(e?.message || "运行模式切换失败");
     }
   };
 
-  /** 打开已有会话时回填它真实的运行模式（库里那行才是准的）。
-   *  不回填的话：界面显示「普通」、实际跑的是「快捷」，用户随手点一下就把模式改了。 */
+  /** 打开已有会话时回填它真实的运行模式与思考设置（库里那行才是准的）。
+   *  不回填的话：界面显示「普通 / 高」、实际跑的是「快捷 / 关」，用户随手点一下就把设置改了。 */
   const wsQ = useQuery({
     queryKey: ["session-workspace", agentId, sessionId],
     queryFn: () => apiSessionWorkspace(agentId, sessionId!),
     enabled: !!sessionId,
   });
-  const modeFilledRef = useRef<string | null>(null);
   useEffect(() => {
-    const m = wsQ.data?.mode;
-    if (!m || !sessionId) return;
+    const d = wsQ.data;
+    if (!d || !sessionId) return;
+    const m = d.mode;
     // 一个会话只回填一次：用户刚选完的模式不能被迟到的响应覆盖掉
-    if (modeFilledRef.current === sessionId) return;
-    modeFilledRef.current = sessionId;
-    if (m === "normal" || m === "simple") setRunMode(m);
-  }, [wsQ.data?.mode, sessionId]);
+    if (m && modeFilledRef.current !== sessionId) {
+      modeFilledRef.current = sessionId;
+      if (m === "normal" || m === "simple") setRunMode(m);
+    }
+    if (thinkFilledRef.current !== sessionId) {
+      thinkFilledRef.current = sessionId;
+      setThinkingMode(!!d.thinking);
+      setReasoningEffort(((d.reasoning_effort || "low") as ReasoningEffort));
+    }
+  }, [wsQ.data, sessionId]);
 
   /** 输入框高度（可拖把手放大，向上拖变大） */
   const [inputH, setInputH] = useState(64);

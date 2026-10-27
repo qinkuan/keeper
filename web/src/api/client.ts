@@ -78,6 +78,11 @@ import type {
   ModelPrice,
 
   ModelPriceInput,
+  ModelProvider,
+  PresetPriceCandidate,
+  PresetPricesResp,
+  ProviderModelsCreateInput,
+  ProviderModelsCreateResult,
 
   UsageTimeseries,
 
@@ -2514,9 +2519,13 @@ export function apiUpdateModel(id: string, body: ModelProfileInput) {
 }
 
 export function apiDeleteModel(id: string) {
-
-  return apiDelete<{ id: string; removed: boolean }>(`/manage/models/${id}`);
-
+  return apiDelete<{
+    id: string;
+    removed: boolean;
+    /** 连带解绑了几个 agent（模型没了，绑定不能留成悬空的） */
+    unbound_agents: number;
+    reloaded_agents?: { id: string; name: string; ok: boolean; reason?: string }[];
+  }>(`/manage/models/${id}`);
 }
 
 export function apiTestModel(id: string) {
@@ -2545,6 +2554,39 @@ export function apiDeletePrice(modelId: string, priceId: string) {
 
   return apiDelete<null>(`/manage/models/${modelId}/prices/${priceId}`);
 
+}
+
+/**
+ * 预设包里的服务商及其支持的模型（新建模型向导的两级选择用）。
+ *
+ * 一次返回全部：选服务商 → 勾它支持的模型（含上下文、价格），不用逐个请求。
+ */
+export function apiListProviders() {
+
+  return apiGet<ModelProvider[]>("/manage/models/providers");
+}
+
+/**
+ * 查某个模型的出厂预设价格（按 provider + model_name 匹配）。
+ *
+ * 「单价」弹窗里的「从预设添加」用它：匹配上了就把预设配好的价格段（可能含
+ * 高峰/低峰错峰）列出来，点一下就能加进自己的价段列表。
+ */
+export function apiListPresetPrices(provider: string, modelName: string) {
+
+  const q = new URLSearchParams({ provider, model_name: modelName });
+  return apiGet<PresetPricesResp>(`/manage/models/preset-prices?${q.toString()}`);
+}
+
+/**
+ * 按服务商批量创建模型预设：同一个 Key 一次填好，勾几个模型就建几个条目。
+ *
+ * 每个模型建一行 `llm_profiles`（名字默认等于模型名），并把预设里的价格段
+ * 一起写进去。
+ */
+export function apiCreateModelsFromPreset(body: ProviderModelsCreateInput) {
+
+  return apiPost<ProviderModelsCreateResult>("/manage/models/from-preset", body);
 }
 
 // ---- 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件 ----

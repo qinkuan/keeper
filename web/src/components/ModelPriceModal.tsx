@@ -2,8 +2,17 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 
-import { apiCreatePrice, apiDeletePrice, apiListPrices } from "../api/client";
-import type { ModelPrice, ModelProfile } from "../api/types";
+import {
+  apiCreatePrice,
+  apiDeletePrice,
+  apiListPresetPrices,
+  apiListPrices,
+} from "../api/client";
+import type {
+  ModelPrice,
+  ModelProfile,
+  PresetPriceCandidate,
+} from "../api/types";
 import { Modal } from "./ui/Modal";
 import { Field, NumberInput, SelectInput, TextInput } from "./ui/Form";
 import { toast } from "./ui/Toast";
@@ -161,6 +170,38 @@ export default function ModelPriceModal({
     enabled: open && !!modelId,
   });
 
+  /* ---- 从出厂预设添加价格 ----
+   *
+   * 预设包（keeper/presets/llm）里已经配好了各家服务商的官方价格（含高峰/低峰
+   * 错峰段）。按 **provider + 模型名** 匹配上就不用照着官网再抄一遍数字。
+   */
+  const [presetOpen, setPresetOpen] = useState(false);
+  const presetQ = useQuery({
+    queryKey: ["preset-prices", model?.provider, model?.model_name],
+    queryFn: () => apiListPresetPrices(model!.provider, model!.model_name),
+    enabled: presetOpen && !!model?.provider,
+  });
+  const addPresetM = useMutation({
+    mutationFn: (p: PresetPriceCandidate) =>
+      apiCreatePrice(modelId, {
+        effective_from: new Date().toISOString(),
+        weekdays: p.weekdays ?? null,
+        time_from_minute: p.time_from_minute ?? null,
+        time_to_minute: p.time_to_minute ?? null,
+        input_price_per_1m: Number(p.input_price_per_1m ?? 0),
+        cached_price_per_1m: Number(p.cached_price_per_1m ?? 0),
+        output_price_per_1m: Number(p.output_price_per_1m ?? 0),
+        currency: p.currency || "CNY",
+        note: p.note ? `${p.note}（出厂预设）` : "出厂预设",
+      }),
+    onSuccess: () => {
+      toast.success("已添加预设价格段");
+      qc.invalidateQueries({ queryKey: ["prices", modelId] });
+      qc.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: (e: Error) => toast.error("添加失败：" + e.message),
+  });
+
   const resetForm = () => {
     setWeekdays([]);
     setTimeFrom("");
@@ -221,7 +262,7 @@ export default function ModelPriceModal({
       open={open}
       onClose={onClose}
       width={880}
-      title={model ? `单价配置 — ${model.name}` : "单价配置"}
+      title={model ? `价格配置 — ${model.name}` : "价格配置"}
     >
       <p className="text-[12px] leading-5 text-ink-muted">
         可配多段：例如「00:00–08:00 低峰价」+「08:00–24:00 高峰价」。匹配时
@@ -266,9 +307,91 @@ export default function ModelPriceModal({
       </div>
 
       <div className="mt-5 border-t border-line-soft pt-4">
-        <h3 className="mb-3 text-[13px] font-semibold text-ink-strong">
-          新增价格段
-        </h3>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-[13px] font-semibold text-ink-strong">新增价格段</h3>
+          <button
+            type="button"
+            onClick={() => setPresetOpen((v) => !v)}
+            className="rounded-lg border border-line bg-panel px-3 py-[6px] text-[12.5px] font-medium text-ink-muted shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:bg-surface hover:text-ink-strong active:scale-[0.98]"
+          >
+            {presetOpen ? "收起预设价格" : "从预设添加"}
+          </button>
+        </div>
+
+        {presetOpen && (
+          <div className="mb-4 rounded-lg border border-line-soft bg-surface/50 px-3 py-2.5">
+            <div className="text-[12px] leading-5 text-ink-muted">
+              出厂预设里配好的官方价格（按服务商 + 模型名匹配）。点「添加」即可
+              加进上面的列表，之后想改随时能改。
+            </div>
+            {presetQ.isLoading ? (
+              <div className="mt-2 flex items-center gap-2 text-[12px] text-ink-muted">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                匹配中…
+              </div>
+            ) : presetQ.data?.matched ? (
+              <div className="mt-2 divide-y divide-line-soft">
+                {presetQ.data.prices.length === 0 ? (
+                  <div className="py-2 text-[12px] text-ink-faint">
+                    这个模型的预设里没有价格
+                  </div>
+                ) : (
+                  presetQ.data.prices.map((seg, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between gap-3 py-1.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-ink-muted">
+                        <span>
+                          {seg.time_from_minute == null ? (
+                            <span className="inline-flex rounded-md bg-black/[0.06] px-1.5 py-0.5 text-[11px] leading-4 text-ink-muted dark:bg-white/[0.08]">
+                              全天（兜底）
+                            </span>
+                          ) : (
+                            `${fmtMinute(seg.time_from_minute)} – ${fmtMinute(seg.time_to_minute)}`
+                          )}
+                        </span>
+                        <span>{fmtWeekdays(seg.weekdays)}</span>
+                        <span className="font-mono">
+                          {seg.currency} {seg.input_price_per_1m} /{" "}
+                          {seg.output_price_per_1m}
+                          <span className="ml-1 text-ink-faint">每百万 token</span>
+                        </span>
+                        {seg.note && (
+                          <span className="text-ink-faint">{seg.note}</span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={addPresetM.isPending}
+                        onClick={() => addPresetM.mutate(seg)}
+                        className="shrink-0 rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-ink transition-colors hover:bg-surface disabled:opacity-50"
+                      >
+                        添加
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              <div className="mt-2 text-[12px] leading-5 text-ink-faint">
+                预设里没有「{model?.provider} / {model?.model_name}」的价格。
+                {presetQ.data?.others?.length ? (
+                  <>
+                    该服务商下有预设价格的模型：
+                    {presetQ.data.others
+                      .filter((o) => o.has_price)
+                      .map((o) => o.model_name)
+                      .join("、")}
+                    。
+                  </>
+                ) : (
+                  "该服务商没有预设价格，请手动填。"
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Field label="时段开始">

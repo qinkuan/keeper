@@ -1460,6 +1460,108 @@ export interface ModelPrice {
   note?: string | null;
 }
 
+// ---- 出厂模型预设（只读模板，给新建模型向导填表用） ----
+
+/** 一段价格（可能是全天兜底，也可能是某个时段的错峰价）。 */
+export interface ModelPriceSpec {
+  input_price_per_1m?: number | null;
+  cached_price_per_1m?: number | null;
+  output_price_per_1m?: number | null;
+  currency: string;
+  weekdays?: string | null;
+  time_from_minute?: number | null;
+  time_to_minute?: number | null;
+  note?: string | null;
+  /** 这段价来自出厂预设（preset）还是用户自己写的（user） */
+  source?: string | null;
+}
+
+/** 预设包里的一个模型（服务商 → 模型清单里的一个）。 */
+export interface ModelProviderModel {
+  model_name: string;
+  /** 进库时的默认名字（= 模型名，用户可改） */
+  name: string;
+  label: string;
+  context_limit?: number | null;
+  temperature: number;
+  timeout: number;
+  max_retries: number;
+  prices: ModelPriceSpec[];
+}
+
+/** 预设包里的一家服务商（`GET /manage/models/providers` 的数组元素）。 */
+export interface ModelProvider {
+  provider: string;
+  label: string;
+  base_url?: string | null;
+  docs_url?: string | null;
+  models: ModelProviderModel[];
+}
+
+/**
+ * 一个模型的**完整配置**。
+ *
+ * 预设只是帮用户快速填信息（默认值 + 候选项），落库的一切以这个对象为准。
+ */
+export interface ModelSpec {
+  name: string;
+  provider: string;
+  model_name: string;
+  base_url?: string | null;
+  api_key?: string | null;
+  context_limit?: number | null;
+  temperature: number;
+  timeout: number;
+  max_retries: number;
+  prices: ModelPriceSpec[];
+}
+
+/** 出厂预设里的一段价格（用于「单价」弹窗的"从预设添加"）。 */
+export interface PresetPriceCandidate {
+  input_price_per_1m?: number | null;
+  cached_price_per_1m?: number | null;
+  output_price_per_1m?: number | null;
+  currency: string;
+  weekdays?: string | null;
+  time_from_minute?: number | null;
+  time_to_minute?: number | null;
+  note?: string | null;
+}
+
+/** 按 provider + model_name 查到的出厂预设价格。 */
+export interface PresetPricesResp {
+  /** 是否匹配到了这个模型 */
+  matched: boolean;
+  model_name: string;
+  prices: PresetPriceCandidate[];
+  /** 同服务商下其它有预设价格的模型（匹配不上时给个提示） */
+  others: { model_name: string; label: string; has_price: boolean }[];
+}
+
+/** 按服务商批量创建模型预设的请求体。 */
+export interface ProviderModelsCreateInput {
+  provider: string;
+  /** 服务商级默认值（模型没单独填时的兜底） */
+  api_key?: string | null;
+  base_url?: string | null;
+  /** 每个模型的完整配置 */
+  models: ModelSpec[];
+}
+
+/** 批量创建的结果（`POST /manage/models/from-preset`）。 */
+export interface ProviderModelsCreateResult {
+  created: {
+    id: string;
+    name: string;
+    model_name: string;
+    provider: string;
+    has_api_key: boolean;
+  }[];
+  skipped: unknown[];
+  /** 名称被占用的（用户改名后可重试） */
+  conflicts: { name: string; reason: string }[];
+}
+
 // ---- 子 agent（delegatee）配置：每个子 agent 独立模型 + 插件 ----
 
 /** 单个子 agent 的当前配置（GET /manage/delegatees 的数组元素）。 */

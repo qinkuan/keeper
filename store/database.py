@@ -23,13 +23,25 @@ logger = logging.getLogger(__name__)
 # 默认库文件位置：keeper/data/keeper.db
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "keeper.db"
 
+
+def db_path() -> Path:
+    """实际的库文件位置：``KEEPER_DB`` 优先，否则用默认位置。
+
+    为什么给这个口子：默认位置在**项目目录里**，跑测试、起临时实例、验证新功能
+    时都会碰到用户的真实库（里面是 agent、会话、用量记录）。有了它就能把实例
+    指到别处去，验证完删掉即可，不碰用户数据。
+    （与 ``setting/user_settings.py`` 的 ``KEEPER_SETTINGS`` 同一套约定。）
+    """
+    env = (os.getenv("KEEPER_DB") or "").strip()
+    return Path(env) if env else DEFAULT_DB_PATH
+
 _engine: Optional[AsyncEngine] = None
 _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 
 
 def db_url(path: str | Path | None = None) -> str:
     """拼连接串；必要时创建目录。"""
-    p = Path(path) if path else DEFAULT_DB_PATH
+    p = Path(path) if path else db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite+aiosqlite:///{p}"
 
@@ -635,6 +647,38 @@ async def _migrate_llm_profile_prices(conn) -> None:
             )
 
 
+async def _migrate_llm_profile_preset(conn) -> None:
+    """移除早期版本给模型预设加的「出处」几列（存量库升级）。
+
+    那套设计是：预设导入时记 ``preset_key`` + 预设值快照，将来官方改预设时
+    只覆盖用户没改过的字段。**现在不用了**——预设只在前端帮忙填表，落库的一切
+    以创建时传入的数据为准，服务端不记账、不做合并。
+
+    所以这里把 ``llm_profiles.source / preset_key / preset_snapshot`` 与
+    ``model_prices.source / preset_key`` 删掉，让表结构回到"只有模型配置本身"。
+    """
+    # 有索引的列要先删索引，否则 SQLite 不允许 DROP COLUMN
+    for idx in (
+        "ix_llm_profiles_preset_key",
+        "ix_model_prices_preset_key",
+    ):
+        await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
+
+    for table, cols in (
+        ("llm_profiles", ("preset_snapshot", "preset_key", "source")),
+        ("model_prices", ("preset_key", "source")),
+    ):
+        rows = (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).fetchall()
+        existing = {r[1] for r in rows}
+        for col in cols:
+            if col not in existing:
+                continue
+            try:
+                await conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {col}")
+            except Exception as e:  # noqa: BLE001 —— 老 SQLite 不支持 DROP COLUMN
+                logger.warning("移除废弃列失败（忽略）：%s.%s：%s", table, col, e)
+
+
 async def _migrate_capability_loads(conn) -> None:
     """capability_loads 补列（存量库升级）。
 
@@ -837,6 +881,7 @@ async def init_db(url: str | None = None) -> None:
         # 可观测：llm_calls 表由上面的 create_all 自动建（ORM 模型），
         # 这里只需给存量表补列。
         await _migrate_llm_profile_prices(conn)
+        await _migrate_llm_profile_preset(conn)
         await _migrate_react_step_duration(conn)
         await _migrate_capability_loads(conn)
         await _migrate_session_message_duration(conn)

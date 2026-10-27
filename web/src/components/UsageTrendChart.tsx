@@ -80,7 +80,7 @@ export default function UsageTrendChart({
 
       {noCost ? (
         <span className="text-[12px] text-ink-muted">
-          未配单价，成本不可见（去「模型管理 → 单价」配置）
+          未配价格，成本不可见（去「模型管理 → 价格」配置）
         </span>
       ) : null}
 

@@ -59,6 +59,14 @@ else:
 # 这份只是「单跑内核」时的兜底。
 if (ROOT / "config.yaml").is_file():
     datas.append((str(ROOT / "config.yaml"), "keeper"))
+# 出厂模型预设包（keeper/presets/llm/*.yaml）：模型管理页的"预设库"读它，
+# 启动时播种进数据库。落点 <MEIPASS>/keeper/presets/llm —— 与
+# keeper/llm/presets.py 里 `Path(__file__).parent.parent / "presets" / "llm"`
+# 在冻结形态下算出来的位置一致。
+if (ROOT / "presets" / "llm").is_dir():
+    datas.append((str(ROOT / "presets" / "llm"), "keeper/presets/llm"))
+else:
+    print("[spec] WARNING: presets/llm not found - the frozen kernel will have no model presets")
 
 # 原生库（.dylib / .dll / .so / .pyd）与数据文件分开收：原生库要走 binaries，
 # PyInstaller 才会对 mac 上的 .dylib 做 ad-hoc 签名（.app 整体签名要求
