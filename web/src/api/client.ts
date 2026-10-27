@@ -35,10 +35,6 @@ import type {
 
   AgentEnvReq,
 
-  UserSpace,
-
-  UserSpaceInput,
-
   SessionWorkspace,
 
   Artifact,
@@ -846,8 +842,6 @@ export function apiNewSession(
 
   agentId: string,
 
-  userSpaceId?: string,
-
   kind: SessionKind = "chat",
 
   thinking?: boolean,
@@ -863,8 +857,6 @@ export function apiNewSession(
     `/agents/${agentId}/sessions`,
 
     {
-
-      user_space_id: userSpaceId ?? "",
 
       thinking: thinking ?? false,
 
@@ -934,9 +926,7 @@ export function apiChat(
 
   sessionId?: string,
 
-  stepId?: string,
-
-  userSpaceId?: string
+  stepId?: string
 
 ) {
 
@@ -947,8 +937,6 @@ export function apiChat(
     session_id: sessionId,
 
     step_id: stepId,
-
-    user_space_id: userSpaceId === "" ? undefined : userSpaceId,
 
   });
 
@@ -1293,9 +1281,7 @@ export function apiChatStream(
 
     stepId?: string;
 
-    userSpaceId?: string;
-
-    /** 思考模式（仅新建会话时生效；已有会话沿用库里绑定，同 userSpaceId） */
+    /** 思考模式（仅新建会话时生效；已有会话沿用库里绑定） */
 
     thinking?: boolean;
 
@@ -1360,8 +1346,6 @@ export function apiChatStream(
       session_id: opts.sessionId || "",
 
       step_id: opts.stepId || "",
-
-      user_space_id: opts.userSpaceId === "" ? undefined : opts.userSpaceId,
 
       // 思考：仅新会话传（已有会话前端传 undefined，后端沿用库里绑定）
 
@@ -1931,32 +1915,6 @@ export function apiUpdateAgentEnv(agentId: string, body: AgentEnvReq) {
 }
 
 
-// ---- 用户空间（用户自管的命名文件路径）----
-
-export function apiListUserSpaces() {
-
-  return apiGet<{ user_spaces: UserSpace[] }>("/user-spaces");
-
-}
-
-export function apiCreateUserSpace(body: UserSpaceInput) {
-
-  return apiPost<UserSpace>("/user-spaces", body);
-
-}
-
-export function apiUpdateUserSpace(id: string, body: UserSpaceInput) {
-
-  return apiPut<UserSpace>(`/user-spaces/${id}`, body);
-
-}
-
-export function apiDeleteUserSpace(id: string) {
-
-  return apiDelete<{ id: string; removed: boolean }>(`/user-spaces/${id}`);
-
-}
-
 /** 浏览服务器本机目录（只读列目录），path 为空时从用户 home 开始。 */
 
 export function apiBrowseDir(path?: string) {
@@ -2089,8 +2047,6 @@ export function apiUpdateSessionWorkspace(
 
   sessionId: string,
 
-  userSpaceId?: string | null,
-
   thinking?: { enabled: boolean; reasoning_effort?: ReasoningEffort },
 
   mode?: RunMode
@@ -2100,8 +2056,6 @@ export function apiUpdateSessionWorkspace(
   return apiPut<{
 
     session_id: string;
-
-    user_space_id: string | null;
 
     thinking?: boolean;
 
@@ -2117,9 +2071,7 @@ export function apiUpdateSessionWorkspace(
 
     {
 
-      // 只带显式给的字段：思考/模式可单独改而不动工作空间（后端用 exclude_unset 区分）
-
-      ...(userSpaceId !== undefined ? { user_space_id: userSpaceId ?? null } : {}),
+      // 只带显式给的字段：思考/模式可单独改（后端用 exclude_unset 区分）
 
       ...(thinking
 
@@ -2606,31 +2558,6 @@ export function apiGetAgentModel(agentId: string) {
 }
 
 
-/** 设定 / 清除 agent 的默认工作区（引用 user_space；传 null = 无工作区）。
-
- *
-
- *  保存后服务端会重装配该 agent（工作区是 build 期装配的），并回报是否成功。
-
- */
-
-export function apiSetAgentWorkspace(agentId: string, userSpaceId: string | null) {
-
-  return apiPut<{
-
-    ok: boolean;
-
-    user_space_id: string | null;
-
-    workspace: string;
-
-    reloaded: boolean;
-
-    reason: string;
-
-  }>(`/manage/agents/${agentId}/workspace`, { user_space_id: userSpaceId });
-
-}
 
 
 export function apiSetAgentModel(agentId: string, llmProfileId: string | null) {

@@ -1,11 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import {
-  apiCreateLocalAgent,
-  apiListPlugins,
-  apiListUserSpaces,
-} from "../api/client";
+import { apiCreateLocalAgent, apiListPlugins } from "../api/client";
 import type { LibraryPlugin } from "../api/types";
 import { Field, SelectInput, TextInput } from "../components/ui/Form";
 import { Hint, PageHeader, Section } from "../components/ui/Page";
@@ -30,7 +26,6 @@ interface CreateForm {
   description: string;
   status: string;
   persona: string;
-  workspace_space_id: string;
 }
 
 /**
@@ -55,27 +50,12 @@ export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
     description: "",
     status: "active",
     persona: "",
-    workspace_space_id: "",
   });
   const patch = (k: keyof CreateForm, v: string) =>
     setForm((p) => ({ ...p, [k]: v }));
   const [nameErr, setNameErr] = useState("");
 
   const libQ = useQuery({ queryKey: ["plugins"], queryFn: apiListPlugins });
-  const spacesQ = useQuery({
-    queryKey: ["user-spaces"],
-    queryFn: apiListUserSpaces,
-  });
-
-  // 默认选「default」空间：它是系统的默认工作区，几乎每个 agent 都要用它。
-  // 放在 effect 里而不是初始值 —— 空间列表是异步拿到的，
-  // 初次渲染时还不知道 default 的 id 是什么。
-  useEffect(() => {
-    const list = spacesQ.data?.user_spaces ?? [];
-    if (!list.length) return;
-    const def = list.find((s) => s.name === "default") ?? list[0];
-    if (def) setForm((p) => (p.workspace_space_id ? p : { ...p, workspace_space_id: def.id }));
-  }, [spacesQ.data]);
 
   const create = useMutation({
     mutationFn: apiCreateLocalAgent,
@@ -91,7 +71,6 @@ export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
 
   const lib = libQ.data;
   const libPlugins = (lib?.plugins ?? []).filter((p) => !p.error);
-  const spaces = spacesQ.data?.user_spaces ?? [];
 
   const onFinish = () => {
     if (!form.name.trim()) {
@@ -104,10 +83,8 @@ export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
       description: form.description || null,
       persona: form.persona || "",
       status: form.status || "active",
-      // 只给「选了哪个用户空间」，路径与只读由后端从 user_space 那条记录取。
-      // 前端不再手填路径 / 摆只读开关：只读是**工作空间**的属性，两处各填一份
-      // 曾经把 agent 的工作区判成只读，写类工具（bash__run）在界面上凭空消失。
-      workspace_space_id: form.workspace_space_id || null,
+      // 不传工作区：工作空间是**会话级**的属性，且「我的空间」是全局唯一的空间
+      // （路径在 settings.yaml），创建 agent 时无处可选。
       plugins,
     });
   };
@@ -176,23 +153,6 @@ export default function AgentCreatePage({ onDone }: { onDone?: () => void }) {
               onChange={(e) => patch("persona", e.target.value)}
               placeholder="角色、语气、该关注什么…"
               className="w-full resize-none rounded-[7px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-6 text-ink shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition-all duration-150 placeholder:text-ink-faint focus:border-brand focus:shadow-[0_0_0_3px_rgba(66,133,244,0.48)]"
-            />
-          </Field>
-
-          <Field
-            label="工作区"
-            extra="选项来自「用户空间」。只读是工作空间自己的属性，在「用户空间」里改；这里选哪个，agent 就用哪个目录。"
-          >
-            <SelectInput
-              value={form.workspace_space_id}
-              onChange={(v) => patch("workspace_space_id", v)}
-              options={[
-                { value: "", label: "不选 = 无工作区" },
-                ...spaces.map((s) => ({
-                  value: s.id,
-                  label: `${s.name}  ${s.path}${s.read_only ? "（只读）" : ""}`,
-                })),
-              ]}
             />
           </Field>
 

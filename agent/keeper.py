@@ -129,7 +129,9 @@ class KeeperAgent:
         调用方不需要知道内部有几步、什么顺序，将来要加第三种能力（比如自定义
         tool）也只改这里。MCP 连不上不会抛错：进降级模式，由执行侧的后台重连兜底补连。
         """
-        # 工作空间总是要有：文件 / git 类工具都依赖这个根目录（不存在就建出来）
+        # 工作空间（可选）：agent 画像里显式配了路径才会有。没配就不建——
+        # 运行期用的是会话空间（见 chat/service.py 的 resolve_workspace），
+        # 这里只是装配期兜底。
         ws_root = self.workspace_root
         if ws_root:
             ws_root.mkdir(parents=True, exist_ok=True)
@@ -873,9 +875,9 @@ async def build_core_agent() -> Optional[KeeperAgent]:
             "在对话输入框下方选择模型即可绑定。"
         )
 
-    # 工作区：**不钉路径**。会话各自绑定 user_space（见 chat/service.py 的
-    # _resolve_workspace），那才是这个角色当下工作的地方。这里给 kind="none"，
-    # 让会话的绑定生效——一个陪伴的角色不该被锁死在某个固定目录里。
+    # 工作区：**不钉路径**。工作空间由「我的空间」决定（见 chat/service.py 的
+    # resolve_workspace），那才是这个角色当下工作的地方。这里给 kind="none"，
+    # 让运行期的解析生效——一个陪伴的角色不该被锁死在某个固定目录里。
     # read_only=False：陪用户做事的角色需要能写文件（其它 agent 默认只读）。
     workspace = WorkspaceConfig(
         kind="none",

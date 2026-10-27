@@ -159,8 +159,10 @@ MCP 组件或 bin 组件）。
 
 ### `setting/` 与 `config.py` —— 两层配置
 
-- `config.yaml` —— **元配置**，只由人手动改：server / agent / core_agent /
-  framework / llm / workspace / agent_overrides / plugins / observability / a2a / context
+- `config.yaml` —— **元配置**，只由人手动改：server / core_agent /
+  framework / llm / plugins / observability / a2a / context
+  （端口**不写死**：`server.port: 0` = 系统分配空闲端口，实际端口写在
+  `~/.keeper/runtime/kernel.json`，见 `keeper/kernel_info.py`）
 - `~/.keeper/settings.yaml` —— **用户设置**，设置页写入、**立即生效**不需重启：
   observability / a2a / context / user_space / search（检索索引的自动同步参数，
   在「搜索」页改）
@@ -400,7 +402,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 └── settings.yaml               用户设置
 ```
 
-数据库在 `data/keeper.db`（SQLite，随项目目录走）。
+数据库在 `~/.keeper/data/keeper.db`（SQLite，跟用户主目录走，打包版与开发版同一份）。
 
 ---
 
@@ -439,7 +441,8 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 3. **模型**：在「模型管理」建预设 → 测试连通性 → 绑定给 agent
    （核心 agent 的 id 是 `core`）。**不配模型 = agent 不调用模型**（纯索引模式）。
 4. **「我的空间」**：在设置里选一个目录（路径存 `~/.keeper/settings.yaml` 的 `user_space.path`）。
-5. 起服务，打开 `http://127.0.0.1:8080`（桌面形态由壳自动打开）。
+5. 起服务，打开 `http://127.0.0.1:<实际端口>`（端口是自动分配的，查
+   `cat ~/.keeper/runtime/kernel.json`；桌面形态由壳自动打开）。
 
 完整步骤见项目根 [`README.md`](../README.md)。
 

@@ -1,17 +1,41 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-// 前端开发服务器把 /api 反向代理到 keeper 服务（默认 :8080），无需跨域配置。
-// keeper 端口可用 KEEPER_PORT 覆盖（需与后端实际端口一致）。
+/**
+ * 后端端口：优先环境变量 KEEPER_PORT，其次读内核写下的
+ * ~/.keeper/runtime/kernel.json，最后才退回 8080。
+ *
+ * 为什么不再写死 8080：keeper 启动时自己挑一个空闲端口（用户机器上 8080
+ * 很可能已被别的程序占着），实际端口记在 kernel.json 里。写死代理目标会
+ * 指到别人的服务上，或者连不上——界面上表现为"服务未启动"，但后端明明活着。
+ */
+function resolveKeeperPort(): string {
+  const env = process.env.KEEPER_PORT;
+  if (env) return env;
+  try {
+    const info = JSON.parse(
+      readFileSync(join(homedir(), ".keeper", "runtime", "kernel.json"), "utf-8"),
+    );
+    if (info && info.port) return String(info.port);
+  } catch {
+    // 文件不存在 / 读不到：后端还没起，走下面的兜底
+  }
+  return "8080";
+}
+
+// 前端开发服务器把 /api 反向代理到 keeper 服务，无需跨域配置。
+const keeperPort = resolveKeeperPort();
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5273,
     proxy: {
       "/api": {
-        target: process.env.KEEPER_PORT
-          ? `http://localhost:${process.env.KEEPER_PORT}`
-          : "http://localhost:8080",
+        target: `http://localhost:${keeperPort}`,
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api/, ""),
       },

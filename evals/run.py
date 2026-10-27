@@ -154,7 +154,7 @@ def main() -> None:
     ap.add_argument(
         "--no-compare", action="store_true", help="不与任何基线对比"
     )
-    ap.add_argument("--source-db", help="被复制的源库路径，默认 keeper/data/keeper.db")
+    ap.add_argument("--source-db", help="被复制的源库路径，默认 ~/.keeper/data/keeper.db")
     ap.add_argument("--show", help="只打印某份历史报告（run_id 或 latest）后退出")
     ap.add_argument("--compare-only", help="把该历史报告与 latest 对比后退出")
     ap.add_argument("-v", "--verbose", action="store_true", help="打开 debug 日志")

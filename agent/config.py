@@ -41,7 +41,6 @@ from ..store import (
     AgentCapabilityOverride,
     AgentLLMBinding,
     LLMProfile,
-    USER_SPACE_DEFAULT_NAME,
     get_session_factory,
 )
 
@@ -80,14 +79,22 @@ class WorkspaceConfig:
     kind: str = "none"
     path: Optional[str] = None
     read_only: bool = True
-    # 系统默认用户空间（workspace/user/default），此字段不再参与路径计算。
+    # 本 agent 的**私有**工作区路径（可选）。绝大多数情况留空：工作空间是会话级
+    # 的属性，运行期由 ``chat/service.py`` 的 ``resolve_workspace`` 注入会话空间。
     agent_name: Optional[str] = None
 
     def root(self) -> Optional[Path]:
-        """工作空间根目录：显式路径优先，否则落到系统默认用户空间 ``workspace/user/default``。"""
+        """工作空间根目录：显式路径优先；没配就**没有**工作区（None）。
+
+        为什么不兜底到某个默认目录：兜底的后果是模型在一个用户根本不知道的
+        地方读写文件，而界面显示的却是「我的空间」——用户以为文件存进了自己的
+        目录，实际躺在 ``~/.keeper/`` 下的某个角落。多空间下线后「我的空间」
+        由用户显式选择（``settings.yaml`` 的 ``user_space.path``），没选就是
+        没选，不必替用户猜一个。
+        """
         if self.path:
             return Path(self.path).expanduser()
-        return default_workspace_root() / USER_SPACE_DEFAULT_NAME
+        return None
 
 
 @dataclass
@@ -157,16 +164,6 @@ WORKSPACE_ROOT = Path(
 )
 
 
-def default_workspace_root() -> Path:
-    """用户工作区（``user``）的**默认根目录**：``~/.keeper/workspace/user``。
-
-    不指定 path 时，按 agent 名落到 ``~/.keeper/workspace/user/<agent_name>/``。
-    ``~/.keeper/workspace`` 下统一分 ``user`` / ``agent`` / ``session`` 三层，分别属于
-    用户、agent、会话；跟连接器缓存 ``~/.keeper/mcp`` 同级。
-    """
-    return WORKSPACE_ROOT / "user"
-
-
 def default_agent_space_root(session_id: str, agent_id: str = "") -> Path:
     """会话级 agent 空间（``session``）：``~/.keeper/workspace/session/<session_id>``。
 
@@ -221,21 +218,78 @@ def _kind_download_root(agent, kind: str) -> Path:
     return default_agent_resource_root(agent_id) / kind
 
 
+#: 核心 agent 出厂自动绑定的内置插件。
+#:
+#: 为什么必须有这一步：内置插件是**应用带走的**（打包在 app 的 resources 里），
+#: 启动时复制到 ``~/.keeper/plugins``。但"装进插件库"和"绑给 agent"是两件事
+#: ——绑定关系是 ``~/.keeper/agents/<id>/plugins/<name>`` 这个符号链接，而以前
+#: 只有 UI 能创建它（用户在智能体抽屉里勾选）。
+#:
+#: 于是**全新安装**的机器上：用户一个 agent 都没建、也没勾过任何插件，核心
+#: agent 就一条工具都没有——连一条 shell 命令都跑不了（bash 插件是唯一的执行
+#: 入口）。这不是"配置缺失"，是"开箱即用"本身断了。
+#:
+#: 只绑 ``bash``：它是执行入口，装上它 agent 就有基本的动手能力。其余内置
+#: 插件（pdf / excel / plugin-authoring…）各有各的用途，交给用户在抽屉里挑，
+#: 别替用户决定。
+CORE_AUTO_PLUGINS = ("bash",)
+
+
+def _auto_bind_core_plugins(agent: Agent) -> List[str]:
+    """给「从来没绑定过插件」的核心 agent 自动绑上内置插件。
+
+    只在**核心 agent**、且**它的插件目录压根不存在**时触发（见
+    :func:`_ensure_plugin_links`）。目录存在但为空 = 用户自己把插件全解绑了，
+    那种情况不干预——用户显式表达过"不要"，自动绑回去就是添乱。
+
+    返回实际绑上的插件名（供日志）。
+    """
+    from ..config import core_agent_id
+
+    try:
+        core_id = core_agent_id()
+    except Exception:  # noqa: BLE001 配置读不到就按默认 id 判断
+        core_id = "core"
+    if agent.id != core_id:
+        return []
+
+    bound: List[str] = []
+    for name in CORE_AUTO_PLUGINS:
+        p = find_plugin(name)
+        if p is None:
+            logger.info("内置插件 %s 不在插件库里，跳过自动绑定", name)
+            continue
+        try:
+            link = link_plugin(agent.id, p)
+        except (OSError, ValueError) as e:
+            logger.warning("内置插件 %s 自动绑定失败：%s", name, e)
+            continue
+        bound.append(link.name)
+    if bound:
+        logger.info(
+            "核心 agent（%s）首次装配：已自动绑定内置插件 %s", agent.id, "、".join(bound)
+        )
+    return bound
+
+
 async def _ensure_plugin_links(agent: Agent) -> List[str]:
-    """装载前把该 agent 目录里**断掉的**插件链接补回来。
+    """装载前把该 agent 的插件链接准备好。
 
     绑定关系由 ``~/.keeper/agents/<id>/plugins/<name>`` 这个符号链接目录本身表达，
-    所以"有哪些绑定"直接列目录就知道，不需要查表。这里只处理一种情况：
-    链接存在但**悬空**（插件库里那个目录被删了 / 移走了）→ 从库里重新建一次。
+    所以"有哪些绑定"直接列目录就知道，不需要查表。这里处理两种情况：
+
+    1. **链接目录压根不存在** → 这个 agent 从来没绑过插件（典型是全新安装后
+       的核心 agent）→ 自动绑上内置插件（见 :func:`_auto_bind_core_plugins`）。
+    2. **链接存在但悬空**（插件库里那个目录被删了 / 移走了）→ 从库里重新建一次。
 
     库里也找不到了就留着不动并告警：删插件不该让整个 agent 起不来，而且留着
     这条链接，用户把插件放回去它还能自己恢复。
 
-    返回补建成功的插件名（供日志）。
+    返回处理过的插件名（供日志）。
     """
     linked_dir = agent_plugins_dir(agent.id)
     if not linked_dir.is_dir():
-        return []
+        return _auto_bind_core_plugins(agent)
 
     repaired: List[str] = []
     for link in sorted(linked_dir.iterdir()):
@@ -358,7 +412,7 @@ def _enabled(
     return default if v is None else v
 
 
-async def _resolve_default_workspace(agent_id: str) -> tuple[Path, bool]:
+async def _resolve_default_workspace(agent_id: str) -> tuple[Optional[Path], bool]:
     """装配期确定「工作空间根 + 它是否只读」——**永远是「我的空间」**。
 
     「我的空间」是唯一的用户空间，路径存在 ``settings.yaml`` 的 ``user_space.path``
@@ -369,6 +423,12 @@ async def _resolve_default_workspace(agent_id: str) -> tuple[Path, bool]:
     没有 ``agent`` 表里的那一行，但同样需要一份装配期兜底工作区。
 
     只收 ``agent_id``（用于日志）。「我的空间」默认可写（read_only=False）。
+
+    **没配置「我的空间」→ 没有工作区**（root=None、只读）。这是有意为之：
+    兜底到某个内置目录，等于让模型在一个用户看不见的地方读写文件，而界面显示
+    的是「我的空间」——存的东西对不上，是比"没有工作区"更难查的问题。
+    对话过程本身不受影响：会话工作区是运行期注入的（见 ``chat/service.py`` 的
+    ``resolve_workspace``），与「我的空间」配没配无关。
     """
     from ..setting import get_user_space_path
 
@@ -380,16 +440,14 @@ async def _resolve_default_workspace(agent_id: str) -> tuple[Path, bool]:
         )
         return root, False
 
-    # 没配置「我的空间」：回落到内置默认目录，保证 agent 仍可运行；
-    # 「我的空间」页会提示用户去配置。
-    root = default_workspace_root() / USER_SPACE_DEFAULT_NAME
     logger.warning(
-        "agent %s 未配置「我的空间」，回落到内置默认目录 %s", agent_id, root
+        "agent %s 未配置「我的空间」：装配期没有工作区（文件类工具在无会话上下文时不可用）",
+        agent_id,
     )
-    return root, False
+    return None, True
 
 
-async def _resolve_workspace(row: Agent) -> tuple[Path, bool]:
+async def _resolve_workspace(row: Agent) -> tuple[Optional[Path], bool]:
     """按画像行解析装配期工作空间（``_resolve_default_workspace`` 的行包装）。
 
     存在的意义只是让「需要 agent 画像」的调用点（``_load_plugins``）读起来自洽；
@@ -535,7 +593,7 @@ class PluginComponents:
             }
         )
 
-    def print_summary(self, agent_id: str, read_only: bool, root: Path) -> None:
+    def print_summary(self, agent_id: str, read_only: bool, root: Optional[Path]) -> None:
         """装配结束打一条汇总（INFO 级），方便事后复盘。"""
         ok = [d for d in self.diagnostics if d["ok"]]
         bad = [d for d in self.diagnostics if not d["ok"]]
@@ -1000,15 +1058,16 @@ def _build_plugin_components(
                     name, t["name"],
                 )
             if needs_ws and not root:
-                logger.info("无工作区，跳过插件 %s 的依赖工作区工具 %s", name, t["name"])
-                out.add_diag(
+                # 装配期没有「我的空间」**不等于**没有工作区：运行期注入的是
+                # **会话空间**（见 chat/service.py 的 resolve_workspace），它在任何
+                # 会话里都存在。所以这里照常装配——否则用户只是没配「我的空间」，
+                # agent 的 bash 工具就整个消失了（对话其实完全能用）。
+                logger.info(
+                    "插件 %s 的工具 %s 依赖工作区：装配期没有「我的空间」，"
+                    "仍照常装配（运行期用当前会话的工作区）",
                     name,
-                    "bin",
                     t["name"],
-                    False,
-                    "agent 没有可用工作区，而工具声明 requires_workspace=true",
                 )
-                continue
             reg_name = f"{name}{_MCP_SEP}{t['name']}"
             try:
                 out.tools.append(
@@ -1054,8 +1113,11 @@ async def _load_plugins(
     - 清单真源是**包内** ``keeper-plugin.json``，不读库里的快照（避免库包漂移）；
     - ``loaded=False`` 的是被卸载过的，直接跳过（与 agent 卸载同一套语义）。
 
-    可执行文件组件沿用内置工具的权限规则：``mutating`` 且工作区只读 → 不装配；
-    ``requires_workspace`` 却没有工作区 → 不装配。
+    可执行文件组件沿用内置工具的权限规则：``mutating`` 且工作区只读 → 不装配。
+
+    ``requires_workspace`` 的工具**一律装配**：工作区是会话级的（运行期注入
+    会话空间，见 ``chat/service.py`` 的 ``resolve_workspace``），任何会话里都存在；
+    装配期拿「我的空间」判空会让"没配我的空间"变成"agent 没有工具"。
 
     单个插件出问题只跳过它并告警：插件是附加能力，缺哪个就少哪个。
     """
@@ -1076,6 +1138,11 @@ async def _load_plugins(
     agent_space = default_agent_space_base(agent.id)
     agent_space.mkdir(parents=True, exist_ok=True)
     out = PluginComponents()
+    # 链接准备（自动绑定 + 悬空自愈）放在**这里**而不是只在 load_agent_config 里：
+    # 核心 agent 不走 load_agent_config（它从本地目录构建、不查 agent 表），
+    # 放外面的话核心 agent 永远不会被自动绑上内置插件——全新安装的机器上，
+    # 主脑就一条工具都没有。
+    await _ensure_plugin_links(agent)  # type: ignore[arg-type]
     # 绑定 = ~/.keeper/agents/<id>/plugins/<name> 这个符号链接。列目录就是读绑定，
     # 链接有效就等于"插件还在"——不需要查任何表。
     bound = sorted(agent_plugins_dir(agent.id).iterdir()) if agent_plugins_dir(
@@ -1137,8 +1204,8 @@ def _build_config(
     skill_registry / tools 也是 DB 解析出的能力对象，一并作为 ``AgentConfig`` 的
     字段——这样 ``KeeperAgent`` 只认一份 ``AgentConfig``，不再有额外的注入参数。
 
-    ``workspace_read_only`` 必须由调用方用 :func:`_resolve_workspace` 从
-    ``user_space`` 记录解析后传入（只读的真源在那里，agent 表上已不存这一列）。
+    ``workspace_read_only`` 必须由调用方用 :func:`_resolve_workspace` 解析后传入
+    （只读的真源是「我的空间」的设置，agent 表上不存这一列）。
     缺省 True 是「没有工作区上下文时按最保守处理」，不是给调用方偷懒的默认值。
     """
     return AgentConfig(
@@ -1147,8 +1214,8 @@ def _build_config(
         description=row.description or "",
         workspace=WorkspaceConfig(
             # agent 不再绑定工作区：path 留空、kind=none，运行期 resolve_workspace
-            # 会落到 user_space 里的 default（与装配期同一个真源）；只读标志由
-            # _resolve_workspace 从 default 空间解析后经参数传入。
+            # 会落到「我的空间」（与装配期同一个真源）；只读标志由
+            # _resolve_workspace 解析后经参数传入。
             kind="none",
             path=None,
             read_only=bool(workspace_read_only),

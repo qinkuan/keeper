@@ -282,16 +282,6 @@ async def resolve_memory_day(session_id: Optional[str]) -> str:
     return day_of()
 
 
-async def _default_space_id() -> Optional[str]:
-    """取会话默认绑定的用户空间 id。
-
-    已作废：用户空间不再存数据库，单一「我的空间」路径来自 ``settings.yaml``，由
-    ``resolve_workspace`` 直接读取。会话不再绑定 ``user_space_id``（恒为 None），
-    统一落到全局的「我的空间」。这里一律返回 None。
-    """
-    return None
-
-
 async def run_one_ask(
     *,
     agent_id: str,
@@ -300,7 +290,6 @@ async def run_one_ask(
     run_id: str,
     kind: str = SESSION_KIND_CHAT,
     step_id: Optional[str] = None,
-    user_space_id: Optional[str] = None,
     thinking: bool = False,
     reasoning_effort: Optional[str] = None,
     mode: str = "normal",
@@ -366,7 +355,7 @@ async def run_one_ask(
         if on_session is not None:
             await on_session(svc.session_id)
         return await svc.ask(
-            text, step_id=step_id or None, user_space_id=user_space_id or None,
+            text, step_id=step_id or None,
             thinking=thinking, reasoning_effort=reasoning_effort or None,
             mode=mode, attachments=attachments,
             mention_raw=mention_raw, mentions=mentions,
@@ -414,7 +403,6 @@ async def run_one_ask(
         res = await svc.ask(
             text,
             step_id=step_id or None,
-            user_space_id=user_space_id or None,
             thinking=thinking,
             reasoning_effort=reasoning_effort or None,
             mode=mode,
@@ -486,8 +474,6 @@ class ChatService:
         # session_id 传了但本库没有时怎么办：False=报错（前端防呆），
         # True=用它新建（跨端：对端给的 thread_id 本库必然没有，契约要求拿来当 session_id）
         self.upsert = upsert
-        # 本会话要绑定的用户空间（新建会话时由 ask 传入；已有会话沿用库里的绑定）
-        self.user_space_id: Optional[str] = None
         # 生成会话标题时**优先用**它，而不是首条消息的正文（见 _auto_title）。
         # 调用方给的正文可能是拼过的 prompt（带上下文前缀）时，用它传用户原始提问，
         # 自动标题才不会被裁成同一个样子。不传就退回原本的行为（用正文）。
@@ -509,7 +495,6 @@ class ChatService:
         text: str,
         step_id: Optional[str] = None,
         message_id: Optional[str] = None,
-        user_space_id: Optional[str] = None,
         thinking: bool = False,
         reasoning_effort: Optional[str] = None,
         mode: str = "normal",
@@ -538,16 +523,8 @@ class ChatService:
         if self.agent is None:
             return {"answer": "（agent 实例未就绪，服务尚未启动完成）", "llm": False}
 
-        # 新建会话时记录要绑定的用户空间；已有会话忽略（沿用库里的绑定，中途不可换）
-        self.user_space_id = user_space_id
-        # 没指定就落到默认用户空间（default）。否则 user_space_id 恒为 None，顶栏
-        # 那个下拉一个匹配项都没有、只能渲染成空白，看起来就像配置没保存。
-        # **仅对新建会话生效**：已有会话的绑定按约定中途不可换。
-        if not self.session_id and not self.user_space_id:
-            self.user_space_id = await _default_space_id()
-
         # 思考模式：新建会话时记录（_ensure_session 写库）；已有会话沿用库里绑定。
-        # 与 user_space_id 同一套路——这里只存"新建要用"的值，真正生效以 _ask_locked
+        # 这里只存"新建要用"的值，真正生效以 _ask_locked
         # 从会话行读回的为准（新/旧会话统一从行读，避免两条路径口径不一致）。
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort or "low"
@@ -556,7 +533,7 @@ class ChatService:
         if not text.strip():
             return {"answer": "", "llm": self.agent.llm is not None}
 
-        # 会话：带 session_id 就沿用，没带就新建（新建时按 user_space_id 绑定工作空间）
+        # 会话：带 session_id 就沿用，没带就新建（工作空间统一是「我的空间」）
         session_id = await self._ensure_session()
 
         async with self._session_lock(session_id):
@@ -1178,7 +1155,6 @@ class ChatService:
                     initiator_id=self.initiator_id,
                     agent_id=self.agent_id,
                     context_id=self.context_id,
-                    user_space_id=self.user_space_id,
                     title=DEFAULT_SESSION_TITLE,
                     kind=self.session_kind,
                     thinking=self.thinking,
@@ -1209,7 +1185,6 @@ class ChatService:
                     initiator_id=self.initiator_id,
                     agent_id=self.agent_id,
                     context_id=self.context_id,
-                    user_space_id=self.user_space_id,
                     title=DEFAULT_SESSION_TITLE,
                     kind=self.session_kind,
                     thinking=self.thinking,
@@ -1225,7 +1200,6 @@ class ChatService:
                 initiator_id=self.initiator_id,
                 agent_id=self.agent_id,
                 context_id=self.context_id,
-                user_space_id=self.user_space_id,
                 title=DEFAULT_SESSION_TITLE,
                 kind=self.session_kind,
                 thinking=self.thinking,
@@ -1463,7 +1437,6 @@ class ChatService:
                 "title": s.title,
                 "initiator_id": s.initiator_id,
                 "agent_id": s.agent_id,
-                "user_space_id": s.user_space_id,
                 "status": s.status,
                 "kind": s.kind,
                 "thinking": bool(s.thinking),

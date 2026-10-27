@@ -32,7 +32,6 @@ from ..agent.keeper import (
     resolve_core_agent,
     resolve_for_chat,
 )
-from ..framework.linkutil import make_dir_link
 from ..store import SessionMessage, get_session_factory, new_id
 from ..plugin import agent_plugins_dir, scan_library
 from .artifacts import ArtifactResolutionError, ArtifactSource, resolve_artifact_uri
@@ -201,12 +200,10 @@ async def chat(
     q: str = "",
     session_id: str = "",
     step_id: str = "",
-    user_space_id: str = "",
 ) -> Dict[str, Any]:
     """聊天：不带 session_id 视为新建会话；响应回传 session_id，后续请求带上即可续接。
 
     step_id 有值 = 回答某条挂起的提问（走恢复）；没值 = 新话轮（会作废挂起步骤）。
-    user_space_id 仅在新会话（无 session_id）时生效，用于绑定该会话的用户空间。
     """
     _agent(agent_id)
     logger.info(
@@ -218,7 +215,7 @@ async def chat(
     try:
         return await ChatService(
             agent_id=agent_id, session_id=session_id or None
-        ).ask(q, step_id=step_id or None, user_space_id=user_space_id or None)
+        ).ask(q, step_id=step_id or None)
     except ValueError as e:
         return {"error": str(e), "answer": "（会话不存在或已失效）", "llm": False}
 
@@ -229,14 +226,13 @@ class ChatStreamIn(BaseModel):
     q: str
     session_id: str = ""
     step_id: str = ""
-    user_space_id: str = ""
-    # 思考模式（本轮是否让模型"先想再答"）。**仅新建会话时生效**，之后沿用库里绑定
-    # （与 user_space_id 同套路）；已有会话忽略这里传的值。
+    # 思考模式（本轮是否让模型"先想再答"）。**仅新建会话时生效**，之后沿用库里绑定；
+    # 已有会话忽略这里传的值。
     thinking: bool = False
     # 思考强度：low / high / max。仅 thinking 开启时有意义。
     reasoning_effort: Literal["low", "high", "max"] = "low"
     # 运行模式：normal=普通 ReAct / simple=快捷一次性（翻译/OCR/总结）/ ptc=写代码。
-    # **仅新建会话时生效**，之后沿用库里绑定（同 user_space_id）。
+    # **仅新建会话时生效**，之后沿用库里绑定。
     mode: Literal["normal", "simple", "ptc"] = "normal"
     # 本次运行要建的会话属于哪一类。「对话」页发 chat，任务会话发 task。
     #
@@ -437,7 +433,6 @@ async def chat_stream(agent_id: str, body: ChatStreamIn):
                     run_id=run_id,
                     kind=body.kind,
                     step_id=body.step_id or "",
-                    user_space_id=body.user_space_id or "",
                     thinking=body.thinking,
                     reasoning_effort=body.reasoning_effort or None,
                     mode=body.mode or "normal",
@@ -562,8 +557,7 @@ class RenameSessionIn(BaseModel):
 class NewSessionIn(BaseModel):
     """新建一个空会话。"""
 
-    user_space_id: str = ""
-    # 思考模式与强度（新建时定，之后沿用库里绑定，同 user_space_id 套路）。
+    # 思考模式与强度（新建时定，之后沿用库里绑定）。
     thinking: bool = False
     reasoning_effort: Literal["low", "high", "max"] = "low"
     # 运行模式（新建时定，之后沿用库里绑定）：normal / simple / ptc。
@@ -586,7 +580,6 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
 
     会话空着是合法状态：不发消息也占一条记录，正好让新会话立刻出现在列表里。
     """
-    from ..chat import service as chat_service
     from ..zonefilesystem.session_link import ensure_my_space_link
 
     _agent(agent_id)
@@ -594,13 +587,10 @@ async def new_session(agent_id: str, body: NewSessionIn) -> Dict[str, Any]:
     # 类别必须在这里定下来：_ensure_session 只在**新建**的那一次读它，之后一律沿用
     # 库里的值。所以这一行是"这条会话属于哪一页"的唯一决定点。
     svc.session_kind = body.kind
-    # 工作区：没指定就用默认用户空间。这里必须显式定下来，因为绑定只发生在
-    # **建会话那一刻**——等第一次 ask 再定就晚了（那时会话已存在，不再改绑定）。
-    svc.user_space_id = body.user_space_id or await chat_service._default_space_id()
-    # 思考模式：同工作区，只在建会话那一刻定，之后沿用库里绑定。
+    # 思考模式：只在建会话那一刻定，之后沿用库里绑定。
     svc.thinking = body.thinking
     svc.reasoning_effort = body.reasoning_effort or "low"
-    # 运行模式：同工作区/思考，只在建会话那一刻定。
+    # 运行模式：同思考，只在建会话那一刻定。
     svc.mode = body.mode or "normal"
     sid = await svc.ensure_session_id()
     # 会话工作区里给「我的空间」建软链接：让 agent 在会话空间 ls 就能看到用户的
@@ -1238,141 +1228,21 @@ async def effective_tools(agent_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 用户空间（UserSpace）：用户自管的命名文件路径模块
+# 「我的空间」：单一用户空间（路径在 settings.yaml 的 user_space.path）
+#
+# 多用户空间已下线：``user_space`` 表已删除，会话也不再绑定空间。这里的这一组
+# ``/mine`` 接口就是「我的空间」的全部对外能力——读写、增删、重命名、导入导出。
 # ---------------------------------------------------------------------------
-import os  # noqa: E402
 import re  # noqa: E402
-from ..agent.config import WORKSPACE_ROOT  # noqa: E402
 from ..store import (
     ChatSession,
     Task,
     TaskItem,
-    UserSpace,
-    USER_SPACE_DEFAULT_NAME,
     get_session_factory,
 )  # noqa: E402
 from ..store.models import ReactStep, SessionMessage  # noqa: E402
 
 user_space_router = APIRouter(prefix="/user-spaces", tags=["user-spaces"])
-
-# 用户空间统一落在 workspace/user/ 下；新建的空间是这里的一个软链接（指向用户真实文件夹）。
-USER_DIR = WORKSPACE_ROOT / "user"
-
-
-def _validate_ws_name(name: str) -> str:
-    """校验用户空间名称：作为 user/ 下的软链接文件名，必须是单段、不含路径分隔符、
-    不能是 '.' 或 '..'（防止路径穿越）；允许中文/Unicode 等任意字符。返回去空白后的名称。
-    """
-    n = name.strip()
-    if not n:
-        raise HTTPException(status_code=400, detail="名称不能为空")
-    if n in (".", "..") or "/" in n or "\\" in n:
-        raise HTTPException(
-            status_code=400,
-            detail="名称不能含路径分隔符（/ 或 \\），也不能是 '.' 或 '..'（用作 user/ 下的目录名）",
-        )
-    return n
-
-
-class UserSpaceIn(BaseModel):
-    name: str
-    path: str
-    read_only: bool = True
-    description: Optional[str] = None
-
-
-class UserSpacePatch(BaseModel):
-    name: Optional[str] = None
-    path: Optional[str] = None
-    read_only: Optional[bool] = None
-    description: Optional[str] = None
-
-
-def _normalize_ws_path(path: str) -> Path:
-    p = Path(path).expanduser()
-    if not p.is_absolute():
-        raise HTTPException(status_code=400, detail="路径必须是绝对路径")
-    return p
-
-
-def _resolve_safe(p: Path) -> Path:
-    """解析真实路径；若该链路上已有损坏的自指软链接，resolve 会抛 ELOOP，此时退回原值。"""
-    try:
-        return p.resolve()
-    except OSError:
-        return p
-
-
-def _target_if_changed(submitted: Path, entry: Path) -> Optional[Path]:
-    """编辑时判断「绝对路径」是否被真正改写，返回要指向的新目标；没改则返回 None。
-
-    库里存的 path 是**软链接入口**（user/<名称>），前端回填后会原样提交回来。
-    这时若照常执行 unlink + symlink(target, entry)，就是 symlink(entry, entry)，
-    直接造出一个指向自己的链接（ELOOP，读写/列目录/git 全挂）。
-
-    所以：提交的仍指向入口本身 ⇒ 判定为「用户没改路径」，返回 None 沿用现有链接、
-    不再重建；否则返回新目标交给上层校验 + 重建。
-    """
-    if _resolve_safe(submitted) == _resolve_safe(entry) or submitted == entry:
-        return None
-    return submitted
-
-
-def _guard_symlink_target(target: Path, entry: Path) -> None:
-    """保证「真实文件夹」不会绕回受管目录 user/ —— 否则软链接会成环或直接无限递归。
-
-    两种翻车方式：
-    ① 把填的路径正好是这条软链接自己 → unlink 后 symlink(target==entry, entry)，
-       链接指向自己，之后任何读写 / 列目录 / git 都报 ELOOP（Too many levels of symbolic links）；
-    ② 填的是 user/ 的上层目录（如 ~/.keeper/workspace）→ user/<名>/user/<名>/… 无限套娃。
-
-    因此这里要求：目标既不能在受管目录 user/ 之内，也不能是它的上层。
-    """
-    t = _resolve_safe(target)
-    e = _resolve_safe(entry)
-    if t == e:
-        raise HTTPException(
-            status_code=400,
-            detail="目标目录不能就是该用户空间自己的路径（会形成软链接循环），请另选一个真实文件夹",
-        )
-    managed = _resolve_safe(USER_DIR)
-    if t == managed or managed in t.parents or t in managed.parents:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"目标目录不能落在受管目录 {managed} 之内，也不能是它的上层目录"
-                "（会造成路径自引用或无限递归），请另选一个真实文件夹"
-            ),
-        )
-
-
-def _is_inside_workspace(p: Path) -> bool:
-    """判断真实目录是否落在 workspace 根内部（含 workspace 根本身）。
-
-    内部目录不走软链接，直接以真实路径作为工作空间路径，
-    从而避免「在 user/ 内再建软链接」造成的自环 / 无限递归。
-    """
-    rp = p.resolve()
-    root = WORKSPACE_ROOT.resolve()
-    return rp == root or root in rp.parents
-
-
-@user_space_router.get("")
-async def list_user_spaces() -> Dict[str, Any]:
-    async with get_session_factory()() as db:
-        rows = (await db.execute(select(UserSpace).order_by(UserSpace.name))).scalars().all()
-        return {
-            "user_spaces": [
-                {
-                    "id": r.id,
-                    "name": r.name,
-                    "path": r.path,
-                    "read_only": r.read_only,
-                    "description": r.description,
-                }
-                for r in rows
-            ]
-        }
 
 
 @user_space_router.get("/browse")
@@ -1515,207 +1385,28 @@ async def import_from_local(body: Dict[str, Any]) -> Dict[str, Any]:
     return copy_from_local(str(body.get("src") or ""), str(body.get("dst") or ""))
 
 
-@user_space_router.post("")
-async def create_user_space(data: UserSpaceIn) -> Dict[str, Any]:
-    name = _validate_ws_name(data.name)
-    if name == USER_SPACE_DEFAULT_NAME:
-        raise HTTPException(status_code=400, detail="名称 'default' 为系统保留，不可新建")
-    # 用户给的是「真实文件夹」；不存在则自动创建（决策：允许自动 mkdir）。
-    target = _normalize_ws_path(data.path)
-    USER_DIR.mkdir(parents=True, exist_ok=True)
-    entry = USER_DIR / name
-    # 真实目录若落在 workspace 内部，则不建软链接，直接以真实路径作为工作空间路径
-    # （默认空间本就是真实路径；这样可避免 user/ 内再建软链接导致的自环 / 递归）。
-    if _is_inside_workspace(target):
-        if entry.exists() or entry.is_symlink():
-            raise HTTPException(status_code=409, detail=f"user/ 下已存在同名条目: {name}")
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"无法创建目标目录: {e}")
-        final_path = target
-    else:
-        # 先校验再落盘：避免非法目标（落在受管目录内）被拒绝时仍把真实目录建出来。
-        _guard_symlink_target(target, entry)
-        if entry.is_symlink():
-            entry.unlink()
-        elif entry.exists():
-            raise HTTPException(status_code=409, detail=f"user/ 下已存在同名条目: {name}")
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"无法创建目标目录: {e}")
-        try:
-            # Windows 上用 junction（不需要开发者模式/管理员），POSIX 上是软链
-            make_dir_link(target, entry, relative=False)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"创建软链接失败: {e}")
-        final_path = entry
-    async with get_session_factory()() as db:
-        clash = (await db.execute(select(UserSpace).where(UserSpace.name == name))).scalars().first()
-        if clash:
-            if entry.is_symlink():
-                entry.unlink()
-            raise HTTPException(status_code=409, detail=f"名称已存在: {name}")
-        # 记录的 path：外部空间存软链接路径（agent 统一在 workspace/user/<name> 下工作），
-        # 内部空间直接存真实路径。二者都能被 resolve_workspace 直接用。
-        row = UserSpace(
-            name=name, path=str(final_path), read_only=data.read_only, description=data.description
-        )
-        db.add(row)
-        await db.commit()
-        await db.refresh(row)
-        return {
-            "id": row.id,
-            "name": row.name,
-            "path": row.path,
-            "read_only": row.read_only,
-            "description": row.description,
-        }
-
-
-@user_space_router.put("/{us_id}")
-async def update_user_space(us_id: str, data: UserSpacePatch) -> Dict[str, Any]:
-    async with get_session_factory()() as db:
-        row = (await db.execute(select(UserSpace).where(UserSpace.id == us_id))).scalars().first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="用户空间不存在")
-        if row.name == USER_SPACE_DEFAULT_NAME:
-            raise HTTPException(status_code=400, detail="默认用户空间不可编辑（除非手动改库）")
-
-        # 改名：软链接直接 rename。
-        if data.name is not None and data.name.strip():
-            nm = _validate_ws_name(data.name)
-            if nm == USER_SPACE_DEFAULT_NAME:
-                raise HTTPException(status_code=400, detail="名称 'default' 为系统保留")
-            if nm != row.name:
-                clash = (await db.execute(select(UserSpace).where(UserSpace.name == nm))).scalars().first()
-                if clash:
-                    raise HTTPException(status_code=409, detail=f"名称已存在: {nm}")
-                old_entry = USER_DIR / row.name
-                new_entry = USER_DIR / nm
-                if old_entry.is_symlink():
-                    if new_entry.exists() or new_entry.is_symlink():
-                        raise HTTPException(status_code=409, detail=f"user/ 下已存在同名条目: {nm}")
-                    old_entry.rename(new_entry)
-                    row.path = str(new_entry)
-                row.name = nm
-
-        # 改路径（真实文件夹）。
-        if data.path is not None and data.path.strip():
-            entry = USER_DIR / row.name
-            submitted = _normalize_ws_path(data.path)
-            # 路径没被真正改写（提交的仍是本空间自己的入口）→ 沿用现有链接，禁止重建。
-            target = _target_if_changed(submitted, entry)
-            if target is None:
-                logger.info("编辑用户空间 %s：路径未改变，沿用现有链接 %s", row.name, entry)
-            else:
-                # 若此前是外部空间（有软链接），先移除旧软链接。
-                if entry.is_symlink():
-                    entry.unlink()
-                if _is_inside_workspace(target):
-                    # 内部目录：不建软链接，直接用真实路径。
-                    if entry.exists():
-                        raise HTTPException(
-                            status_code=409, detail=f"user/ 下已存在同名条目: {row.name}"
-                        )
-                    try:
-                        target.mkdir(parents=True, exist_ok=True)
-                    except Exception as e:  # noqa: BLE001
-                        raise HTTPException(status_code=400, detail=f"无法创建目标目录: {e}")
-                    row.path = str(target)
-                else:
-                    _guard_symlink_target(target, entry)
-                    try:
-                        target.mkdir(parents=True, exist_ok=True)
-                    except Exception as e:  # noqa: BLE001
-                        raise HTTPException(status_code=400, detail=f"无法创建目标目录: {e}")
-                    if entry.exists() and not entry.is_symlink():
-                        raise HTTPException(
-                            status_code=409, detail=f"user/ 下已存在同名条目: {row.name}"
-                        )
-                    try:
-                        make_dir_link(target, entry, relative=False)
-                    except Exception as e:  # noqa: BLE001
-                        raise HTTPException(status_code=400, detail=f"创建软链接失败: {e}")
-                    row.path = str(entry)
-
-        if data.read_only is not None:
-            row.read_only = data.read_only
-        if data.description is not None:
-            row.description = data.description
-        await db.commit()
-        await db.refresh(row)
-        return {
-            "id": row.id,
-            "name": row.name,
-            "path": row.path,
-            "read_only": row.read_only,
-            "description": row.description,
-        }
-
-
-@user_space_router.delete("/{us_id}")
-async def delete_user_space(us_id: str) -> Dict[str, Any]:
-    async with get_session_factory()() as db:
-        row = (await db.execute(select(UserSpace).where(UserSpace.id == us_id))).scalars().first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="用户空间不存在")
-        if row.name == USER_SPACE_DEFAULT_NAME:
-            raise HTTPException(status_code=400, detail="默认用户空间不可删除（除非手动改库）")
-        
-        # 删掉 user/ 下的软链接（真实文件夹不動）。
-        entry = USER_DIR / row.name
-        if entry.is_symlink():
-            entry.unlink()
-        # 引用它的会话**改绑到 default**：工作空间是跟会话绑定的，删掉一个空间不等于
-        # 让会话变成"没有工作区"——那等于静默改了它读写的位置。明确改绑到 default，
-        # 语义才是"这个会话还在，只是换了默认目录"。default 一定查得到：上面已拦住
-        # "默认用户空间不可删除"。
-        default_id = (
-            await db.execute(
-                select(UserSpace.id).where(UserSpace.name == USER_SPACE_DEFAULT_NAME)
-            )
-        ).scalars().first()
-        await db.execute(
-            ChatSession.__table__.update()
-            .where(ChatSession.user_space_id == us_id)
-            .values(user_space_id=default_id)
-        )
-        await db.delete(row)
-        await db.commit()
-        return {"id": us_id, "removed": True}
 
 
 @router.get("/{agent_id}/sessions/{session_id}/workspace")
 async def session_workspace(agent_id: str, session_id: str) -> Dict[str, Any]:
-    """返回某会话当前生效的工作空间（用户空间 + agent 私有空间），供聊天头部展示。"""
+    """返回某会话当前生效的工作空间（「我的空间」+ agent 私有空间），供聊天头部展示。
+
+    多空间下线后只有一个空间：路径来自 ``settings.yaml`` 的 ``user_space.path``。
+    没配置时 ``user_space`` 返回 None（前端据此提示去「我的空间」页配置）。
+    """
     agent = _agent(agent_id)
+    from ..setting import get_user_space_path
     from .service import resolve_workspace
 
     ctx = await resolve_workspace(agent, session_id)
-    user_space = None
+    space_path = (get_user_space_path() or "").strip()
+    user_space = (
+        {"name": "我的空间", "path": space_path, "read_only": False}
+        if space_path
+        else None
+    )
     async with get_session_factory()() as db:
         sess = await db.get(ChatSession, session_id)
-        usid = getattr(sess, "user_space_id", None) if sess else None
-        us = await db.get(UserSpace, usid) if usid else None
-        if us is None:
-            # 没绑定 / 绑的已被删：按**实际生效的根目录**反查。resolve_workspace
-            # 本来就有兜底，这里不硬编码找 default，是为了让展示的永远是真正在用
-            # 的那一个——否则界面与实际行为不一致：下拉渲染成空白像配置丢了，读写
-            # 却发生在兜底目录里。
-            us = (
-                await db.execute(
-                    select(UserSpace).where(UserSpace.path == str(ctx.root))
-                )
-            ).scalars().first()
-        if us:
-            user_space = {
-                "id": us.id,
-                "name": us.name,
-                "path": us.path,
-                "read_only": us.read_only,
-            }
     return {
         "user_space": user_space,
         "agent_space": str(ctx.agent_space),
@@ -1729,7 +1420,6 @@ async def session_workspace(agent_id: str, session_id: str) -> Dict[str, Any]:
 
 
 class SessionWorkspacePatch(BaseModel):
-    user_space_id: Optional[str] = None  # 传 null 表示回落 agent 默认目录
     # 思考模式 / 强度：不传（缺省）= 不改；传了就地更新这条会话的绑定。
     thinking: Optional[bool] = None
     reasoning_effort: Optional[Literal["low", "high", "max"]] = None
@@ -1741,10 +1431,13 @@ class SessionWorkspacePatch(BaseModel):
 async def update_session_workspace(
     agent_id: str, session_id: str, data: SessionWorkspacePatch
 ) -> Dict[str, Any]:
-    """切换某会话绑定的用户空间。
+    """改某会话的思考模式 / 强度 / 运行模式。
 
     约束：会话正处于「等待人类输入」的挂起态时禁止（对话中途不可换）；
-    结束后（无挂起步骤）可换。传 ``user_space_id=null`` 回落 agent 默认目录。
+    结束后（无挂起步骤）可换。
+
+    工作空间不再按会话切换——「我的空间」是全局唯一的空间，改它请去「我的空间」页
+    （``PUT /user-spaces/mine``）。
     """
     async with get_session_factory()() as db:
         sess = await db.get(ChatSession, session_id)
@@ -1765,16 +1458,8 @@ async def update_session_workspace(
             raise HTTPException(
                 status_code=409, detail="会话正处于等待输入状态，结束后才能换工作空间"
             )
-        # 只改**显式传来**的字段（exclude_unset）：这样"只改思考"不会顺带把工作空间
-        # 清空，"只改工作空间"（传 null=回落默认）也不会碰到思考——两者互不牵连。
+        # 只改**显式传来**的字段（exclude_unset）：这样"只改思考"不会顺带把模式清空。
         fields = data.model_dump(exclude_unset=True)
-        if "user_space_id" in fields:
-            target = fields["user_space_id"]
-            if target:
-                us = await db.get(UserSpace, target)
-                if us is None:
-                    raise HTTPException(status_code=400, detail="用户空间不存在")
-            sess.user_space_id = target
         if fields.get("thinking") is not None:
             sess.thinking = bool(fields["thinking"])
         if fields.get("reasoning_effort") is not None:
@@ -1784,7 +1469,6 @@ async def update_session_workspace(
         await db.commit()
         return {
             "session_id": session_id,
-            "user_space_id": sess.user_space_id,
             "thinking": bool(sess.thinking),
             "reasoning_effort": sess.reasoning_effort or "low",
             "mode": sess.mode or "normal",
@@ -2573,13 +2257,12 @@ async def _get_task(db, agent_id: str, task_id: str) -> Task:
 class TaskIn(BaseModel):
     """新建任务。
 
-    ``user_space_id`` 可选：决定本任务那个 session 的工作空间（不传回落默认空间）。
-    工作空间落在 session 上而非任务上，是为了复用既有的「会话 → 工作空间」解析。
+    任务绑定的那个 session 落在「我的空间」里（单一空间，路径在 settings.yaml），
+    不再按任务指定。
     """
 
     title: str
     description_md: str = ""
-    user_space_id: Optional[str] = None
 
 
 class TaskPatch(BaseModel):
@@ -2617,16 +2300,9 @@ async def create_task(agent_id: str, body: TaskIn) -> Dict[str, Any]:
     if not title:
         raise HTTPException(status_code=400, detail="任务标题不能为空")
     async with get_session_factory()() as db:
-        if body.user_space_id:
-            us = await db.get(UserSpace, body.user_space_id)
-            if us is None:
-                raise HTTPException(
-                    status_code=400, detail=f"用户空间不存在: {body.user_space_id}"
-                )
         sess = ChatSession(
             agent_id=agent_id,
             initiator_id=default_initiator_id,
-            user_space_id=body.user_space_id or None,
             title=title,
             kind="task",  # D1：任务绑定会话，区别于普通会话
         )

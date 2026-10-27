@@ -25,6 +25,7 @@ files:
   - main.js
   - preload.js
   - sidecar.js
+  - seedPlugins.js
   - spaceFs.js
   - spaceWatch.js
   - package.json
@@ -43,6 +44,13 @@ extraResources:
     to: plugins
     filter:
       - "**/*"
+      # 只带源码：__pycache__ / .pyc 是本地跑出来的字节码（换机器就对不上），
+      # .DS_Store 是 macOS 的目录属性垃圾。带进安装包只会让包变大、变脏。
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/.DS_Store"
+      - "!**/.pytest_cache/**"
+      - "!**/node_modules/**"
   # 额外的运行时（Windows 用）：真 node（node.exe + npm/npx）与 busybox 的
   # POSIX shell（sh.exe）。mac/Linux 上这个目录是空的 —— 那边的 node 用
   # Electron 自带的、shell 用 /bin/sh 就够。

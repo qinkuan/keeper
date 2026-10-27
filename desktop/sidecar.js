@@ -27,6 +27,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { app } = require('electron');
+const { installBuiltinPlugins } = require('./seedPlugins');
 
 const KEEPER_DIR = path.resolve(__dirname, '..');
 const PROJECT_ROOT = path.resolve(KEEPER_DIR, '..');
@@ -45,28 +46,33 @@ let state = null;
 let pending = null;
 
 /**
- * 内置插件库：首次运行时把 app 里带的插件复制到 ``~/.keeper/plugins``。
+ * 内置插件库：把 app 里带的插件装到 ``~/.keeper/plugins``。
  *
  * 为什么必须做：内核读插件的位置是 config.yaml 的 ``plugins.root``（默认
  * ``~/.keeper/plugins``），而**不在**代码目录里。新装的机器上那个目录是空的
  * —— bash 插件（agent 唯一的执行入口）也就没有，agent 连一条命令都跑不了。
  *
- * 只补「缺的那个」：用户装过/改过的插件一律不动（app 升级不覆盖用户数据）。
+ * 安装 / 升级策略（逐文件比对哈希、用户改过的保留不动）见
+ * ``desktop/seedPlugins.js`` 的文件头注释。实现放在那一个文件里，是为了能
+ * 被 node 直接跑测试——这里只负责算路径再调进去。
  */
 function seedPlugins() {
-  if (!app.isPackaged) return;
-  const src = path.join(process.resourcesPath, 'plugins');
-  if (!fs.existsSync(src)) return;
   const dest = path.join(os.homedir(), '.keeper', 'plugins');
-  fs.mkdirSync(dest, { recursive: true });
-  for (const name of fs.readdirSync(src)) {
-    const from = path.join(src, name);
-    if (!fs.statSync(from).isDirectory()) continue;
-    const to = path.join(dest, name);
-    if (fs.existsSync(to)) continue; // 用户已有 → 不覆盖
-    fs.cpSync(from, to, { recursive: true, dereference: false });
-    console.log('[desktop] 已安装内置插件 ' + name);
+  if (app.isPackaged) {
+    // 打包形态：插件在 app 的 resources 里
+    const src = path.join(process.resourcesPath, 'plugins');
+    if (!fs.existsSync(src)) return;
+    installBuiltinPlugins(src, dest);
+    return;
   }
+  // 开发形态：插件源码在仓库的 plugins/ 下。**同样要同步**——不然改了插件源码
+  // 桌面版还在用 ~/.keeper/plugins 里的旧副本，改动看不到效果（曾经就是这样：
+  // 仓库里修好了，用户目录里还是首装那版，只能手动删目录重装）。
+  // 插件源码在 keeper/plugins/ 下（KEEPER_DIR = <repo>/keeper；
+  // PROJECT_ROOT 是它的上一级，里面没有 plugins/）。
+  const src = path.join(KEEPER_DIR, 'plugins');
+  if (!fs.existsSync(src)) return;
+  installBuiltinPlugins(src, dest);
 }
 
 /**
@@ -381,15 +387,18 @@ async function startSidecar({ onLog } = {}) {
           // 找到），这里额外指一次是为了让「外挂资源」这种放法也能用。
           ...(kernel.webDist ? { KEEPER_WEB_DIST: kernel.webDist } : {}),
           /*
-           * 内核日志落盘。stdio 是 pipe，全靠 onLog 转给窗口上的日志面板——而面板
-           * 只在窗口活着时才有。浏览器僵死恰恰是最需要日志的时候，那次排查就是因为
-           * 日志只在面板里、什么都留不下，最后只能靠"进程还在不在"反推。
+           * 内核日志落盘由内核自己做：默认写 ~/.keeper/logs/<YYYY-MM-DD>.log，
+           * 每天一个文件、保留最近 14 天（见 keeper/log/）。
            *
-           * main.py 里有这个开关（RotatingFileHandler，10MB × 5 份），命令行形态
-           * 一直可用；桌面壳之前没设，等于白放着。
+           * 这里**不再**额外指定 LOG_FILE —— 那会多出一份按大小轮转的
+           * kernel.log，与按天文件内容重复，两份日志得分头翻。
+           *
+           * 保留 KEEPER_LOG_FILE 这个口子：想把内核日志重定向到某个固定文件
+           * （比如采集器盯着一个文件）时仍然可用。
            */
-          LOG_FILE: process.env.KEEPER_LOG_FILE
-            || path.join(os.homedir(), '.keeper', 'logs', 'kernel.log'),
+          ...(process.env.KEEPER_LOG_FILE
+            ? { LOG_FILE: process.env.KEEPER_LOG_FILE }
+            : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       }

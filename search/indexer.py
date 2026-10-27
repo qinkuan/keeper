@@ -133,6 +133,12 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
         source_kind = "markdown"
 
     if not chunks:
+        if source_kind == "pdf":
+            # 扫描件 / 纯图片 PDF：正文是图，没有文字层可抽 → 切不出块。
+            # 静默跳过会让人以为"索引坏了"，所以说清楚是哪一类问题。
+            logger.info(
+                "PDF 没有可索引的正文（多半是扫描件 / 纯图片 PDF），跳过：%s", path
+            )
         if existing:
             dbmod.delete_document(conn, existing["id"])
         return "empty"

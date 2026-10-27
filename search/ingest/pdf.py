@@ -263,7 +263,9 @@ def _open(path):
         from pypdf import PdfReader
     except ImportError as e:  # noqa: BLE001
         raise RuntimeError(
-            "PDF 索引需要 pypdf（pip install pypdf）。"
+            "PDF 索引需要 pypdf，但当前解释器里没有。pypdf 是 keeper 的**硬依赖**"
+            "（见 requirements.txt），正常启动方式下它一定在——出现这个错通常是"
+            "用错了解释器（比如系统 python 而不是 keeper/.venv 里的）。"
             "没装时 PDF 会被跳过，Markdown 检索不受影响。"
         ) from e
     try:

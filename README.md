@@ -142,7 +142,7 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 
 #### 创建 Agent
 
-字段：名称（本机唯一，必填）、说明、状态、画像 persona（每次对话都带上）、工作区（用户空间下拉）、能力绑定（插件勾选，显示组件类型与环境要求）。创建页**只做创建**，其余在配置抽屉改。
+字段：名称（本机唯一，必填）、说明、状态、画像 persona（每次对话都带上）、能力绑定（插件勾选，显示组件类型与环境要求）。创建页**只做创建**，其余在配置抽屉改。工作空间**不在这里选**：多用户空间已下线，「我的空间」是全局唯一的空间（路径在 `settings.yaml` 的 `user_space.path`），在工作区为会话空间。
 
 #### Agent 配置抽屉（对话页顶栏进入，5 个 tab）
 
@@ -440,7 +440,7 @@ pip install -r requirements.txt
 ```yaml
 server:
   host: 127.0.0.1        # 必须绑回环：这是现在唯一的网络边界
-  port: 8080
+  port: 0                # 0 = 由系统分配一个空闲端口（推荐）
 ```
 
 - **keeper 是本机单用户应用，没有入站认证**。所以 `host` 保持 `127.0.0.1` 就不只是
@@ -448,6 +448,9 @@ server:
   的接口暴露给整个局域网。
 - 内核里有能让 agent 执行命令的对话接口，而 CORS 只挡"读响应"、不挡"发请求"：
   你打开的任意网页都能向回环端口发请求。**别在有不可信代码的机器上跑演示形态。**
+- **端口不用写死**：`port: 0` 表示让系统分配一个空闲端口（用户机器上 8080 很可能
+  已被别的程序占着）。实际端口写在 `~/.keeper/runtime/kernel.json`，前端代理与
+  脚本都从那儿读。填了具体数字时优先用它，被占用则自动换一个。
   详见 [`doc/security.md`](doc/security.md)。
 - 桌面形态**什么都不用配**。
 
@@ -467,7 +470,7 @@ server:
 | `~/.keeper/core-agent/agent.yaml` | 核心 agent（主脑）的名字 |
 | `~/.keeper/core-agent/soul.md` | 核心 agent 的人格 / 语气（每次对话都带上） |
 | `~/.keeper/settings.yaml` | 用户设置（可观测 / A2A / 上下文 / 我的空间） |
-| `data/keeper.db` | SQLite 库（建表幂等） |
+| `~/.keeper/data/keeper.db` | SQLite 库（建表幂等；`KEEPER_DB` 可改位置） |
 
 ### 4. 配置模型 ← **必做，否则 agent 不调模型**
 
@@ -569,8 +572,9 @@ user_space:
 桌面端该页走**原生实现**（系统文件对话框、Finder 访达、剪贴板），见
 [`desktop/spaceFs.js`](desktop/spaceFs.js) 与 [`desktop/preload.js`](desktop/preload.js)。
 
-没配时的行为：agent 回落到内置默认目录 `~/.keeper/workspace/user/default`
-（可写），日志里会提示「未配置我的空间」。
+没配时的行为：**没有工作区**（不再兜底到某个内置默认目录——那会让模型在
+用户看不见的地方读写文件，而界面显示的是「我的空间」）。日志里会提示
+「未配置我的空间」。对话不受影响：会话工作区是运行期注入的。
 
 ---
 
@@ -610,11 +614,12 @@ npm start                           # 3) 启动
 ## 命令行形态
 
 ```bash
-./start_keeper.sh                          # 前台，默认 :8080
-PORT=9090 ./start_keeper.sh                # 换端口
+./start_keeper.sh                          # 前台，端口自动分配
+PORT=9090 ./start_keeper.sh                # 指定端口（被占用会自动换一个）
 LOG_LEVEL=DEBUG ./start_keeper.sh          # 更详细的日志
-LOG_FILE=/tmp/keeper.log ./start_keeper.sh # 额外落一份日志（Rotating 10MB × 5）
-./start_keeper.sh --daemon                 # 后台守护（日志 → keeper.log）
+KEEPER_LOG_DIR=/tmp/keeper-logs ./start_keeper.sh  # 换日志目录
+LOG_FILE=/tmp/keeper.log ./start_keeper.sh # 额外再落一份到固定文件（Rotating 10MB × 5）
+./start_keeper.sh --daemon                 # 后台守护
 ./stop_keeper.sh                           # 停止
 ```
 
@@ -622,16 +627,18 @@ LOG_FILE=/tmp/keeper.log ./start_keeper.sh # 额外落一份日志（Rotating 10
 
 ```bash
 cd ..                                  # 即 /path/to/parent
-python -m keeper.main --config keeper/config.yaml 8080
+python -m keeper.main --config keeper/config.yaml        # 端口自动分配
+python -m keeper.main --config keeper/config.yaml 8080   # 指定端口
 ```
 
 `Ctrl+C` 停止（会一并关闭 MCP 会话与子进程）。
+实际端口查 `cat ~/.keeper/runtime/kernel.json`（桌面壳启动时也会写这个文件）。
 
 ---
 
 ## 前端开发模式
 
-改前端时用 vite dev server 热更新，内核仍在 8080：
+改前端时用 vite dev server 热更新（内核端口自动探测）：
 
 ```bash
 cd keeper/web
@@ -639,8 +646,9 @@ npm install
 npm run dev          # http://localhost:5273
 ```
 
-`vite.config.ts` 里配了 `/api` 反向代理到 `http://localhost:8080`，
-所以**不需要处理跨域**。内核端口不是 8080 时，用环境变量告诉 vite：
+`vite.config.ts` 里配了 `/api` 反向代理，目标是**内核的实际端口**——
+从 `~/.keeper/runtime/kernel.json` 读（内核启动时写的），所以**不需要处理跨域**，
+也不会指错地方。内核端口不在那儿时，用环境变量告诉 vite：
 
 ```bash
 KEEPER_PORT=9090 npm run dev
@@ -657,8 +665,11 @@ KEEPER_PORT=9090 npm run dev
 | `config.yaml` | **人手动改** | 重启 |
 | `~/.keeper/settings.yaml` | 设置页写入 | **立即生效**，不需重启 |
 
-`config.yaml` 的段：`server` / `agent` / `core_agent` / `framework` /
-`llm` / `workspace` / `agent_overrides` / `plugins` / `observability` / `a2a` / `context`。
+`config.yaml` 的段：`server` / `core_agent` / `framework` / `llm` / `plugins` /
+`observability` / `a2a` / `context`。
+
+（「我的空间」路径、`agent_overrides` 这些**不是**元配置：前者放在
+`settings.yaml`（用户自己的目录，用的时候改），后者由框架接口按需写出。）
 
 `settings.yaml` 只放「用的时候调」的五段：`observability` / `a2a` / `context` /
 `user_space` / `search`（检索索引的自动同步参数，在「搜索」页改）。
@@ -684,12 +695,12 @@ KEEPER_PORT=9090 npm run dev
 ├── evals/                 评测产物（基线 / 运行记录）
 ├── prompt-dump/           prompt 落盘（调试，默认关）
 ├── context-store/         上下文外部化的块
-├── logs/                  桌面形态的内核日志
+├── logs/                  内核日志，按天分文件：<YYYY-MM-DD>.log（保留 14 天）
 ├── framework/             本机运行时（python / node）
 └── settings.yaml          用户设置
 ```
 
-数据库：`data/keeper.db`（SQLite，随项目目录走）。
+数据库：`~/.keeper/data/keeper.db`（SQLite，跟用户主目录走）。
 
 ---
 
@@ -770,7 +781,11 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 服务端包解压后目录结构不变，`start_keeper.sh` 可直接用。
 在宝塔 / systemd 下用**前台模式**（进程管理器自己保活），不要加 `--daemon`。
 
-**日志**默认只到控制台；设 `LOG_FILE` 会额外落一份（Rotating，默认 10MB × 5 份）。
+**日志**打两份：控制台（前台运行时可见）+ `~/.keeper/logs/<YYYY-MM-DD>.log`
+（**按天分文件**，保留最近 14 天，跨天自动换文件、超期自动清理）。
+文件里每行带完整日期与 `[agent]` 标签，排查"上周那次为什么出错"直接翻对应那天。
+目录用 `KEEPER_LOG_DIR` 改；设 `LOG_FILE` 会**额外**再落一份到固定文件
+（按大小轮转 10MB × 5，适合采集器盯着一个文件）。
 装配期会打印每个插件、每个工具的装配结果与跳过原因——查「工具为什么没出现」先看这里。
 
 ---
@@ -787,6 +802,7 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 | 产品定位 | [`positioning.md`](doc/positioning.md) |
 | 安全边界与已知缺口 | [`security.md`](doc/security.md) |
 | 会话存储 | [`session-design.md`](doc/session-design.md) |
+| **每张数据库表是干什么用的** | [`database.md`](doc/database.md)（自动生成，也可用 `GET /schema/tables` 查） |
 | 任务模式 | [`task-design.md`](doc/task-design.md) |
 | 能力按需加载 | [`capability-loading.md`](doc/capability-loading.md) |
 | 上下文治理（外部化 + 压缩） | [`context.md`](doc/context.md) |

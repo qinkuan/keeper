@@ -5,6 +5,12 @@
 - 能力市场（资源）：mcp（连接器）/ skill / tool —— 装配 agent 的原料
 - 任务模式：tasks / task_items —— 一个任务绑定一个会话，计划点即任务步骤
 
+外加一张元数据表 ``schema_doc``：**每张表是干什么用的**都写在里面。
+SQLite 没有 ``COMMENT ON TABLE``，表结构上挂不住说明，而这类信息恰恰最容易
+丢——代码删了就没了，文档没人更新就成了骗人的东西。写进库里既能被程序读到
+（``GET /schema/tables``），又能生成文档（``keeper/doc/database.md``），
+还与表同生共死。说明的真源在 ``store/schema_doc.py``。
+
 字段与设计取舍见 keeper/doc/session-design.md 第四节；
 任务模式单独成文，见 keeper/doc/task-design.md。
 """
@@ -39,11 +45,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# 系统默认用户空间：启动建库时自动播种、始终存在。其路径固定为
-# ``~/.keeper/workspace/user/default``，用户空间管理页不可删除（除非手动改库）。
-USER_SPACE_DEFAULT_NAME = "default"
-
-
 class Base(DeclarativeBase):
     pass
 
@@ -76,11 +77,6 @@ class ChatSession(Base):
     # 协议层对话上下文锚（A2A contextId 等）：与内部 session 主键**解耦**，
     # 换协议时只换映射，不动 session 主键。入站按它找/建内部 session。
     context_id: Mapped[Optional[str]] = mapped_column(String(26), nullable=True, index=True)
-    # 本会话绑定的用户空间；可空 → 回落 agent 默认工作目录
-    # （工作空间与 agent 解耦，只按 会话+agent 解析）
-    user_space_id: Mapped[Optional[str]] = mapped_column(
-        String(26), ForeignKey("user_space.id"), nullable=True, index=True
-    )
     # 注意：这里**没有**模型字段。模型绑定在 agent 上（agent_llm_binding），
     # 不随会话变——多 agent 协作时各 agent 用各自的模型跑，模型是 agent 的属性，
     # 不是这次对话的参数。
@@ -98,13 +94,13 @@ class ChatSession(Base):
     # 没有任何 DB 约束（TEXT + default，无 CHECK）——新增取值不需要迁移，但校验
     # 责任在接口层，见 chat/service.py::SESSION_KINDS。
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
-    # 「谁来认领这条会话」的标记列（当前无使用者，保留以备默认会话类需求）。
-    # 非空即代表它是某类默认/自动会话。它不参与用户可见字段，也不随重命名/删除变化。
-    ball_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
-    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 「谁来认领这条会话」的标记列（ball_key）与「会话摘要」（summary）都没人用，
+    # 已随下线一并删掉——重建 chat_sessions 表时 DROP COLUMN，见 store/database.py
+    # 的 _drop_chat_sessions_legacy_columns。
+    #
     # 思考模式：这一轮是否让模型"先想再答"（DeepSeek thinking / 推理）。
-    # 会话级、建会话时定，之后沿用——与 user_space_id 同一套路：新建取前端传入的值，
-    # 已有会话读库里绑定的（见 chat/api.py 与 chat/service.py）。
+    # 会话级、建会话时定，之后沿用——新建取前端传入的值，已有会话读库里绑定的
+    # （见 chat/api.py 与 chat/service.py）。
     thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 思考强度：low / high / max。仅 thinking 开启时有意义，关时忽略。
     # 同 kind：无 DB CHECK，取值校验在接口层，新增取值不需迁移。
@@ -113,7 +109,7 @@ class ChatSession(Base):
     )
     # 运行模式：normal=普通 ReAct（默认，现状）/ simple=快捷一次性（翻译/OCR/总结，
     # 无循环、无记忆、无 planner）/ ptc=写代码解决问题。会话级、建会话时定，之后沿用
-    # （同 user_space_id：新建取前端传入，已有会话读库里绑定）。无 DB CHECK，校验在接口层。
+    # （新建取前端传入，已有会话读库里绑定）。无 DB CHECK，校验在接口层。
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="normal")
     # 本会话动态激活的插件名列表（JSON 数组，如 ["excel","pdf"]）——用户在对话里用 `/`
     # 临时启用「库里有但未 link 给本 agent」的插件，仅对本会话生效（见 plugin/active.py）。
@@ -464,36 +460,6 @@ class AgentPeer(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
     )
-
-
-class UserSpace(Base):
-    """用户空间：用户自管的命名文件路径（agent 在此目录下干活的主目录）。
-
-    一个用户可配很多个；每个会话通过 ``ChatSession.user_space_id`` 绑定其中之一。
-    agent 自身不再绑定工作空间（见 ChatSession 注释）。
-    """
-
-    __tablename__ = "user_space"
-
-    id: Mapped[str] = mapped_column(String(26), primary_key=True, default=new_id)
-    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    # 绝对路径。``default`` 是唯一真实目录（workspace/user/default）；其余空间在
-    # workspace/user/<name> 建软链接指向用户真实文件夹，path 存的就是这个软链接路径。
-    path: Mapped[str] = mapped_column(Text, nullable=False)
-    read_only: Mapped[bool] = mapped_column(Boolean, default=True)  # 默认只读（安全）
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
-
-    def __repr__(self) -> str:
-        return f"<UserSpace {self.name} {self.path}>"
-
 
 
 class Agent(Base):
@@ -895,6 +861,44 @@ class ReactParseStat(Base):
     model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, index=True
+    )
+
+
+class SchemaDoc(Base):
+    """表说明元数据：每张表「是干什么用的」写在库里，而不是只躺在文档里。
+
+    为什么要有这张表：SQLite **不支持** ``COMMENT ON TABLE``，表结构上没有地方挂
+    说明。而"这张表为什么存在、谁写它、数据多久留一次"这类信息恰恰最容易丢——
+    代码删了就没了，文档没人更新就成了骗人的东西。把它放进库，于是：
+
+    - 任何程序都能读到（``keeper.store.schema_doc.list_schema_docs()``）；
+    - 文档由它**生成**（``doc/database.md``），不会与代码脱节；
+    - 说明与表同生共死——表删了，说明的种子数据也一起删。
+
+    ``db`` 区分归属库：``keeper`` = 主库 ``~/.keeper/data/keeper.db``，
+    ``search`` = 检索索引库 ``~/.keeper/search/search.db``（独立的 SQLite 文件，
+    表结构不在 ORM 里，但同样需要说明）。
+    """
+
+    __tablename__ = "schema_doc"
+
+    #: 表名（``db`` + ``table_name`` 唯一）。搜索库里 ``chunks_fts_*`` 这类
+    #: SQLite 内部影子表也各占一行——它们确实是真实的表，运维时看得到。
+    table_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 归属库：keeper（主库）/ search（检索索引库）
+    db: Mapped[str] = mapped_column(String(16), nullable=False, default="keeper")
+    #: 这张表是干什么用的（一句话）
+    purpose: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 谁写它：模块路径
+    owner: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    #: 谁读它：模块路径
+    readers: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: 数据生命周期：什么时候产生、多久留一次、怎么清
+    lifecycle: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: 注意事项：踩过的坑、容易误解的地方
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
     )
 
 

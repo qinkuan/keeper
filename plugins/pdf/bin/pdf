@@ -11,8 +11,20 @@ stdout 最后一行 JSON {"ok":true,"result":...} 或 {"ok":false,"error":...}�
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
+
+# pypdf 读"不规范"的 PDF 时会刷一串：
+#     WARNING pypdf._reader | Ignoring wrong pointing object 183 0 (offset 0)
+# 那是它在**修复**交叉引用表（对象偏移是 0 / 指向越界），修完照常能读——实测那几份
+# PDF 三十几页都能正常打开抽文字。所以这是噪音不是错误，压掉，别把真警告埋了。
+#
+# 为什么用「设 logger 级别」而不是逐条过滤消息：pypdf 的 logger 是子 logger
+# （pypdf._reader），而 **filter 不沿父 logger 继承**（只有 level 继承）。
+# pypdf 自己没设过级别，所以设父 logger 就够；它真出问题时记的是 ERROR/CRITICAL，
+# 不受影响。
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 MAX_TEXT = 20000
 

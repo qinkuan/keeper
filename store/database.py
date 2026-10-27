@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -16,12 +17,20 @@ from sqlalchemy.ext.asyncio import (
 
 import logging
 
-from .models import Base, UserSpace, new_id, USER_SPACE_DEFAULT_NAME
+from .models import Base, ChatSession
 
 logger = logging.getLogger(__name__)
 
-# 默认库文件位置：keeper/data/keeper.db
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "keeper.db"
+# 默认库文件位置：``~/.keeper/data/keeper.db``（用户主目录下的 keeper 数据目录）。
+#
+# 为什么不再放在项目目录里：打包后的桌面端里 ``__file__`` 指向**解包出来的临时
+# 目录**，把库写在项目目录（``keeper/data/keeper.db``）意味着每次启动都是一个
+# 全新空库——用户装好的应用"一点数据都没有"就是这么来的（会话、模型、用量全
+# 丢在一份没人读的空库里）。数据应该跟着用户走，和 settings.yaml / agents /
+# search / logs 放在同一个目录下。
+#
+# 想指到别处仍然可以：设 ``KEEPER_DB`` 环境变量（测试、临时实例都靠它）。
+DEFAULT_DB_PATH = Path.home() / ".keeper" / "data" / "keeper.db"
 
 
 def db_path() -> Path:
@@ -280,14 +289,27 @@ async def _migrate_chat_session_context_id(conn) -> None:
         await conn.exec_driver_sql("ALTER TABLE chat_sessions ADD COLUMN context_id TEXT")
 
 
-async def _migrate_chat_session_user_space(conn) -> None:
-    """chat_sessions 补 user_space_id 列：会话绑定用户空间（存量库升级）。"""
-    rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
-    existing = {r[1] for r in rows}
-    if "user_space_id" not in existing:
-        await conn.exec_driver_sql(
-            "ALTER TABLE chat_sessions ADD COLUMN user_space_id TEXT"
-        )
+async def _drop_user_space_table(conn) -> None:
+    """下线多用户空间：删掉 ``user_space`` 表（存量库升级，幂等）。
+
+    多空间已经下线——「我的空间」是**唯一**的空间，路径存在 ``settings.yaml`` 的
+    ``user_space.path``，不再走数据库。因此这张表连同它承载的"会话绑哪个空间"
+    语义一起作废：``chat_sessions.user_space_id`` 这一列也不再被任何代码读或写
+    （ORM 里已删掉映射），存量行里残留的值没有意义，直接留着即可——它是可空列，
+    读它的代码路径已经不存在。
+
+    为什么**不**顺手 ``ALTER TABLE chat_sessions DROP COLUMN``：那一列上挂着指向
+    ``user_space.id`` 的外键约束，而 SQLite 不允许 DROP COLUMN 一个被外键引用的
+    列；要真删就得整表重建（重建 ``chat_sessions`` 会牵动引用它的
+    ``session_messages`` / ``react_step`` / ``task`` 等多张表的外键），风险远大于
+    收益——一列没人读的可空列不占空间、不影响行为，留着是最稳的选择。
+
+    删表时还要注意外键：``chat_sessions.user_space_id`` 仍指向被删的表。SQLite
+    默认不开 ``PRAGMA foreign_keys``（keeper 也没开），所以删被引用的表不会报错；
+    这里显式关掉再删，保证即便将来有人打开了外键也不会在这里炸。
+    """
+    await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    await conn.exec_driver_sql("DROP TABLE IF EXISTS user_space")
 
 
 async def _migrate_session_message_artifacts(conn) -> None:
@@ -321,6 +343,28 @@ async def _migrate_agent_peer_source(conn) -> None:
         await conn.exec_driver_sql("ALTER TABLE agent_peers ADD COLUMN trust_env BOOLEAN")
 
 
+def _my_space_root() -> Optional[str]:
+    """「我的空间」的绝对路径（``settings.yaml`` 的 ``user_space.path``）。
+
+    没配置 / 读不到时返回 None——**不兜底到某个内置目录**。多空间下线后
+    「我的空间」由用户显式选择，没选就是没选；替用户猜一个目录只会让产物落到
+    用户看不见的地方。口径与 :func:`agent.config._resolve_default_workspace` 一致。
+
+    放在本模块而不是直接调 ``setting.get_user_space_path``：``store`` 是最底层，
+    不想在 import 期就牵扯 yaml 解析；这里用**函数内延迟导入**。
+    """
+    raw = ""
+    try:
+        from ..setting import get_user_space_path
+
+        raw = (get_user_space_path() or "").strip()
+    except Exception as e:  # noqa: BLE001 读不到就按"没配置"处理
+        logger.warning("读取「我的空间」路径失败（已忽略）: %s", e)
+    if raw:
+        return os.path.expanduser(raw)
+    return None
+
+
 async def _migrate_session_message_artifact_paths(conn) -> None:
     """旧产物 ``path`` 规范化（存量库升级，幂等）。
 
@@ -328,27 +372,23 @@ async def _migrate_session_message_artifact_paths(conn) -> None:
     - 相对路径（如 ``xian_travel.html``）→ 新版按 CWD 解析会 404；
     - 裸绝对路径（如 ``/abs/x.html``）→ 可用但缺 ``file://`` scheme，风格不统一。
 
-    这里把相对路径**按会话绑定的工作空间根**还原为 ``file://`` 绝对路径
-    （回落系统默认用户空间），裸绝对路径补 ``file://`` 前缀；已是 ``file://`` 的跳过。
+    这里把相对路径**按「我的空间」根**还原为 ``file://`` 绝对路径，裸绝对路径补
+    ``file://`` 前缀；已是 ``file://`` 的跳过。
+
+    单一空间后不再按会话 join 空间表：所有会话的工作空间都来自
+    ``settings.yaml`` 的 ``user_space.path``（没配置就没有根，相对路径原样保留）。
     """
-    default_rows = (
-        await conn.exec_driver_sql(
-            "SELECT path FROM user_space WHERE name = ?", (USER_SPACE_DEFAULT_NAME,)
-        )
-    ).fetchall()
-    default_root = os.path.expanduser(default_rows[0][0]) if default_rows else None
+    default_root = _my_space_root()
 
     rows = (
         await conn.exec_driver_sql(
-            "SELECT sm.id, sm.artifacts, us.path "
+            "SELECT sm.id, sm.artifacts "
             "FROM session_messages sm "
-            "LEFT JOIN chat_sessions cs ON cs.id = sm.chat_session_id "
-            "LEFT JOIN user_space us ON us.id = cs.user_space_id "
             "WHERE sm.artifacts IS NOT NULL AND sm.artifacts != ''"
         )
     ).fetchall()
 
-    for msg_id, artifacts_json, us_path in rows:
+    for msg_id, artifacts_json in rows:
         try:
             arts = json.loads(artifacts_json)
         except Exception:
@@ -356,7 +396,7 @@ async def _migrate_session_message_artifact_paths(conn) -> None:
         if not isinstance(arts, list):
             continue
         changed = False
-        root = os.path.expanduser(us_path) if us_path else default_root
+        root = default_root
         for a in arts:
             p = a.get("path")
             if not p or p.startswith("file://"):
@@ -510,22 +550,154 @@ async def _migrate_chat_session_kind(conn) -> None:
     )
 
 
-async def _migrate_chat_session_ball_key(conn) -> None:
-    """chat_sessions 补 ball_key 列：标记「浮球的默认会话」（存量库升级）。
+async def _drop_chat_sessions_legacy_columns(conn) -> None:
+    """删掉 ``chat_sessions`` 上几个没人用的遗留列（存量库升级，幂等）。
 
-    存量行一律留空 —— 只有浮球第一次发消息时才会建带这个标记的会话，
-    而那一刻本来就会新建一条，不存在"存量里已经有一条该被认领"的情形。
+    - ``user_space_id``：多用户空间下线后没人读也没人写；它上面还挂着一条指向
+      已删除的 ``user_space`` 表的**死外键**。
+    - ``ball_key``：「浮球」默认会话的归属键，浮球功能已下线。
+    - ``summary``：会话摘要——从来没有代码写过它（ORM 里定义了，读取侧一次都没
+      用过），存量行全为 NULL。
+
+    为什么不能直接 ``ALTER TABLE chat_sessions DROP COLUMN``：实测 SQLite 会报
+    ``error in table chat_sessions after drop column: unknown column "user_space_id"
+    in foreign key definition``——DROP COLUMN 删不掉**带外键约束**的列（删掉列后
+    表里会剩下一条指向不存在列的约束，SQLite 解析不了），而 SQLite 没有
+    ``DROP CONSTRAINT``；``ball_key`` 那列则先被索引挡着（索引里有这列就删不了列）。
+
+    所以只能**重建表**：按现有 DDL 改写出「去掉这几列与其外键」的版本 → 建新表 →
+    拷数据 → 换名 → 重建索引。整个过程在 init_db 的**一个事务**里，中途失败会
+    整体回滚，不会留下半张表。
+
+    四个容易踩的细节：
+
+    1. **改写 DDL 时按「顶层逗号」切片段**，不能按行——``ALTER TABLE ADD COLUMN``
+       追加的列会挤在同一行里（``parent_id TEXT, activated_plugins TEXT,``），
+       按行删会连带删掉别的列。
+    2. **换名时开 ``PRAGMA legacy_alter_table=ON``**：SQLite 默认（legacy 关闭）会
+       在 RENAME 时重写全库的引用，把 ``session_messages`` / ``threads`` 里
+       ``REFERENCES chat_sessions`` 改成指向临时表名，最后那两张表的外键就指向了
+       一张被删掉的表。开了 legacy 就只改表名本身、不动别人的引用文本。
+    3. **先 DROP 旧表再 RENAME 新表**：DROP 会连带删掉旧表上的索引，正好腾出名字
+       给新表重建用；反过来（旧表改名、新表顶上）会把索引名占着。
+    4. **表名按模式替换**：重建过一次之后 sqlite_master 里的 DDL 会变成
+       ``CREATE TABLE "chat_sessions"``（RENAME 会加引号），硬编码字符串就再也
+       匹配不上了。
     """
+    legacy = ("user_space_id", "ball_key", "summary")
     rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_sessions)")).fetchall()
+    if not rows:
+        return
     existing = {r[1] for r in rows}
-    if "ball_key" not in existing:
+    if not any(c in existing for c in legacy):
+        return  # 新库（create_all 建的）本来就没这几列
+
+    old_cols = [r[1] for r in rows]
+    old_ddl = (
         await conn.exec_driver_sql(
-            "ALTER TABLE chat_sessions ADD COLUMN ball_key VARCHAR(32)"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_sessions'"
         )
+    ).scalar()
+    if not old_ddl:
+        return
+
+    # --- 1) 改写 DDL：去掉这几列的定义，以及引用它们的外键约束 ---
+    head = old_ddl[: old_ddl.index("(") + 1]
+    body = old_ddl[old_ddl.index("(") + 1 : old_ddl.rindex(")")]
+    tail = old_ddl[old_ddl.rindex(")") :]
+    kept: list[str] = []
+    for frag in _split_sql_top_level(body):
+        st = frag.strip()
+        if not st:
+            continue
+        if st.upper().startswith("FOREIGN KEY"):
+            # 形如 FOREIGN KEY(user_space_id) REFERENCES user_space (id)
+            inner = st.split("(", 1)[1] if "(" in st else ""
+            if any(inner.startswith(c) and (len(inner) == len(c) or not inner[len(c)].isalnum())
+                   for c in legacy):
+                continue
+        elif st.split()[0] in legacy:
+            continue
+        kept.append(st)
+    new_ddl = head + "\n\t" + ",\n\t".join(kept) + "\n" + tail
+
+    # --- 2) 记下旧表上的索引（跳过 sqlite_autoindex 与涉及遗留列的）---
+    keep_idx: dict[str, list[str]] = {}
+    for r in await conn.exec_driver_sql("PRAGMA index_list(chat_sessions)"):
+        name = r[1]
+        if name.startswith("sqlite_autoindex"):
+            continue
+        cols = [
+            c[2]
+            for c in await conn.exec_driver_sql(f"PRAGMA index_info({name!r})")
+        ]
+        if any(c in legacy for c in cols):
+            continue
+        keep_idx[name] = cols
+    # ORM 里声明的索引也补上（老库可能缺，比如后加的 parent_id 索引）——
+    # 让重建后的库与新库（create_all 建的）结构一致。
+    for idx in ChatSession.__table__.indexes:
+        cols = [c.name for c in idx.columns]
+        if not any(c in legacy for c in cols):
+            keep_idx.setdefault(idx.name, cols)
+
+    # --- 3) 建新表 → 拷数据 → 换名 → 重建索引 ---
+    tmp = "chat_sessions__rebuild"
+    await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {tmp}")
+    # 表名要按**模式**替换，不能按字面量：重建过一次之后 sqlite_master 里的
+    # DDL 变成了 CREATE TABLE "chat_sessions"（RENAME 会加上引号），硬编码
+    # "CREATE TABLE chat_sessions" 就再也匹配不上了。
+    await conn.exec_driver_sql(
+        re.sub(
+            r"^CREATE TABLE (IF NOT EXISTS )?\"?chat_sessions\"?",
+            lambda m: f'CREATE TABLE {m.group(1) or ""}"{tmp}"',
+            new_ddl,
+            count=1,
+        )
+    )
+    new_cols = [
+        r[1] for r in await conn.exec_driver_sql(f"PRAGMA table_info({tmp})")
+    ]
+    copy_cols = [c for c in new_cols if c in old_cols]
+    collist = ", ".join(copy_cols)
+    await conn.exec_driver_sql(
+        f"INSERT INTO {tmp} ({collist}) SELECT {collist} FROM chat_sessions"
+    )
+    await conn.exec_driver_sql("DROP TABLE chat_sessions")
+    await conn.exec_driver_sql("PRAGMA legacy_alter_table=ON")
+    try:
+        await conn.exec_driver_sql(f"ALTER TABLE {tmp} RENAME TO chat_sessions")
+    finally:
+        await conn.exec_driver_sql("PRAGMA legacy_alter_table=OFF")
+    for name, cols in keep_idx.items():
         await conn.exec_driver_sql(
-            "CREATE INDEX IF NOT EXISTS ix_chat_sessions_ball_key "
-            "ON chat_sessions (ball_key)"
+            f"CREATE INDEX IF NOT EXISTS {name} ON chat_sessions ({', '.join(cols)})"
         )
+    logger.info("chat_sessions 已重建：删除遗留列 %s", ", ".join(legacy))
+
+
+def _split_sql_top_level(s: str) -> list[str]:
+    """按**顶层**逗号切分 SQL 片段（括号内的逗号不算）。
+
+    用来把建表语句的 body 拆成「一个列定义 / 一条表约束」一段，好逐段判断要不要
+    保留。``DECIMAL(10,2)`` 这种括号内带逗号的类型也不会被切错。
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in s:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    return parts
 
 
 async def _migrate_chat_session_activated_plugins(conn) -> None:
@@ -574,40 +746,6 @@ async def _migrate_chat_session_mode(conn) -> None:
         )
     await conn.exec_driver_sql(
         "UPDATE chat_sessions SET mode = 'normal' WHERE mode IS NULL"
-    )
-
-
-async def _seed_default_user_space(conn) -> None:
-    """播种系统默认用户空间 ``~/.keeper/workspace/user/default``（幂等）。
-
-    用户不手动新建 / 切换时，这就是 agent 干活的主目录。名称被保留，
-    管理页与 API 都禁止删除（除非手动改库）。由于 agent.config 反向依赖 store，
-    这里直接拼路径，不与 ``WORKSPACE_ROOT`` 耦合，避免循环导入。
-    """
-    from datetime import datetime, timezone
-    from sqlalchemy import text
-
-    row = (
-        await conn.execute(
-            text("SELECT id FROM user_space WHERE name = :n"),
-            {"n": USER_SPACE_DEFAULT_NAME},
-        )
-    ).first()
-    if row is not None:
-        return
-    default_path = Path.home() / ".keeper" / "workspace" / "user" / USER_SPACE_DEFAULT_NAME
-    default_path.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    await conn.execute(
-        UserSpace.__table__.insert().values(
-            id=new_id(),
-            name=USER_SPACE_DEFAULT_NAME,
-            path=str(default_path),
-            read_only=False,
-            description="系统默认工作空间；不可删除或编辑，除非手动改库。",
-            created_at=now,
-            updated_at=now,
-        )
     )
 
 
@@ -865,6 +1003,44 @@ async def _migrate_chat_session_parent_id(conn) -> None:
         )
 
 
+async def _seed_schema_docs(conn) -> None:
+    """播种表说明（``schema_doc`` 表），内容变了才写。
+
+    为什么不是无条件 upsert：这张表每次启动都全量比对 + 写一遍的话，
+    WAL 会一直有写、``updated_at`` 每次都变（那列本来是"说明何时改过"的语义），
+    还会无谓地惊动文件系统监控。所以只写**内容确实不同**的行。
+
+    说明的真源是 ``store/schema_doc.py`` 里的种子数据——改说明改那里，
+    再跑 ``python -m keeper.store.schema_doc --write`` 重新生成
+    ``doc/database.md``。
+    """
+    from .models import SchemaDoc
+    from .schema_doc import all_docs
+
+    rows = (await conn.exec_driver_sql("SELECT table_name, db, purpose FROM schema_doc")).all()
+    current = {(r[0], r[1]): r[2] for r in rows}
+    for doc in all_docs():
+        key = (doc["table_name"], doc["db"])
+        payload = {
+            "purpose": doc.get("purpose") or "",
+            "owner": doc.get("owner"),
+            "readers": doc.get("readers"),
+            "lifecycle": doc.get("lifecycle"),
+            "notes": doc.get("notes"),
+        }
+        if key not in current:
+            await conn.execute(
+                SchemaDoc.__table__.insert().values(table_name=key[0], db=key[1], **payload)
+            )
+        elif current[key] != payload["purpose"]:
+            # 说明改过了：整行更新（其余字段可能也变了，一起覆盖）
+            await conn.execute(
+                SchemaDoc.__table__.update()
+                .where(SchemaDoc.table_name == key[0])
+                .values(**payload)
+            )
+
+
 async def init_db(url: str | None = None) -> None:
     """建表（幂等）+ 补列迁移。顺带开 WAL，提升读写并发。"""
     engine = get_engine(url)
@@ -881,7 +1057,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_thread_context_id(conn)
         await _migrate_thread_last_task_state(conn)
         await _migrate_chat_session_context_id(conn)
-        await _migrate_chat_session_user_space(conn)
+        await _drop_user_space_table(conn)
         await _migrate_session_message_artifacts(conn)
         await _migrate_session_message_attachments(conn)
         await _migrate_agent_peer_source(conn)
@@ -889,12 +1065,11 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_task_paused(conn)
         await _migrate_task_review_fields(conn)
         await _migrate_chat_session_kind(conn)
-        await _migrate_chat_session_ball_key(conn)
+        await _drop_chat_sessions_legacy_columns(conn)
         await _migrate_chat_session_deleted_at(conn)
         await _migrate_chat_session_thinking(conn)
         await _migrate_chat_session_mode(conn)
         await _migrate_chat_session_activated_plugins(conn)
-        await _seed_default_user_space(conn)
         await _migrate_session_message_artifact_paths(conn)
         await _migrate_strip_tmp_artifacts(conn)
         await _drop_legacy_resource_tables(conn)
@@ -914,6 +1089,8 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_tool_call_args_hash(conn)
         await _migrate_react_parse_stat_model(conn)
         await _migrate_chat_session_parent_id(conn)
+        # 表说明元数据：放最后，确保前面的建表/迁移都已完成
+        await _seed_schema_docs(conn)
 
 
 async def dispose_engine() -> None:

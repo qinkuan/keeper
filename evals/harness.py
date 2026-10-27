@@ -356,8 +356,8 @@ class EvalHarness:
         为什么是会话空间
         ----------------
         运行期唯一的工作目录是会话空间（``<WORKSPACE_ROOT>/session/<session_id>``，
-        见 chat/service.py 的 ``resolve_workspace``）——「用户空间」已经是历史遗留
-        概念，运行期不再读 ``chat_sessions.user_space_id``。
+        见 chat/service.py 的 ``resolve_workspace``）——多用户空间已经下线，
+        运行期不再有"会话绑哪个空间"这回事。
 
         所以 setup 文件必须写进会话空间。早年的评测把文件写到
         ``run_dir/cases/<case_id>`` 再登记成一条 user_space，运行时 agent 看到的

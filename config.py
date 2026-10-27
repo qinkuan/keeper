@@ -27,19 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class WorkspaceSection:
-    """本地工作区默认值。
-
-    工作区在哪、是否只读，完全是本机的事——没有外部配置源来管它。
-    ``root`` 下按 agent 名字各自一个目录；``path`` 不指定时装配器会自动算。
-    """
-
-    kind: str = "local"
-    root: str = "~/.keeper/workspace/user"
-    read_only: bool = False
-
-
-@dataclass
 class FrameworkSection:
     """framework 运行时检测配置。
 
@@ -264,21 +251,24 @@ class KeeperConfig:
     """
 
     host: str = "127.0.0.1"
-    port: int = 8080
-    # 用哪个 agent 画像：装配器据此去数据库的 agent 表读（name 与 id 二选一）
-    agent_name: Optional[str] = None
-    agent_id: Optional[str] = None
-    # 核心 agent（会话的默认落点）。语义与上面两个字段重叠，但用途不同：
-    # 上面两个是"这个进程跑哪个 agent"（单 agent 部署），core 是"会话默认找谁"
-    # （多 agent 部署下仍要有一个主脑）。留空时回落，所以不加这一段也照旧运行。
+    # 首选端口。**0 = 由系统分配一个空闲端口**（推荐：用户机器上 8080 可能
+    # 早被别的程序占着，写死就起不来）。配了具体数字时优先用它，被占用则自动
+    # 换一个。实际端口写进 ~/.keeper/runtime/kernel.json。
+    port: int = 0
+    # 核心 agent（会话的默认落点）。多 agent 部署下仍要有一个主脑，
+    # 留空时回落，所以不加这一段也照旧运行。
     core_agent: AgentSection = field(default_factory=AgentSection)
     # framework 运行时下载源（镜像 / 自建）
     framework: FrameworkSection = field(default_factory=FrameworkSection)
     # 本地默认大模型配置：用哪个模型完全是本机自己的事
     llm: Dict[str, Any] = field(default_factory=dict)
-    # 本地默认工作区
-    workspace: WorkspaceSection = field(default_factory=WorkspaceSection)
     # 按 agent（id 或 name）的本地覆盖：{"旅游小助手": {"llm": {...}, "workspace": {...}}}
+    #
+    # 现状：**只有 python / node 两个解释器键被写入**（framework/api.py 的
+    # ``PUT /framework/agents/{id}/env``），而实际执行取解释器走的是环境变量
+    # ``KEEPER_PYTHON`` / ``KEEPER_NODE``——per-agent 覆盖**尚未接线**，
+    # 写进来的值目前只会被原样回显。所以 config.yaml 里不再预置这一段
+    # （空着也没用），需要时由上面那个接口写出来。
     agent_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # 可观测（调试开关等）
     observability: ObservabilitySection = field(
@@ -295,11 +285,9 @@ class KeeperConfig:
     def from_dict(cls, d: Dict[str, Any]) -> "KeeperConfig":
         d = dict(d)
         server_section = d.pop("server", {}) or {}
-        agent_section = d.pop("agent", {}) or {}
         core_section = d.pop("core_agent", {}) or {}
         framework_section = d.pop("framework", {}) or {}
         llm_section = d.pop("llm", {}) or {}
-        workspace_section = d.pop("workspace", {}) or {}
         overrides_section = d.pop("agent_overrides", {}) or {}
         observability_section = d.pop("observability", {}) or {}
         pd_section = observability_section.get("prompt_dump") or {}
@@ -308,9 +296,8 @@ class KeeperConfig:
         plugins_section = d.pop("plugins", {}) or {}
         return cls(
             host=server_section.get("host") or "127.0.0.1",
-            port=int(server_section.get("port") or 8080),
-            agent_name=agent_section.get("name"),
-            agent_id=agent_section.get("id"),
+            # 0 = 系统分配空闲端口（见 KeeperConfig.port 的注释）
+            port=int(server_section.get("port") or 0),
             core_agent=AgentSection(
                 dir=core_section.get("dir"),
                 id=core_section.get("id"),
@@ -321,11 +308,6 @@ class KeeperConfig:
                 extra_paths=list(framework_section.get("extra_paths") or []),
             ),
             llm=llm_section,
-            workspace=WorkspaceSection(
-                kind=workspace_section.get("kind") or "local",
-                root=workspace_section.get("root") or "~/.keeper/workspace/user",
-                read_only=bool(workspace_section.get("read_only", False)),
-            ),
             agent_overrides=overrides_section,
             observability=ObservabilitySection(
                 prompt_dump=PromptDumpSection(

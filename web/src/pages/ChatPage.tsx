@@ -1528,8 +1528,6 @@ export default function ChatPage({ agentId }: { agentId: string }) {
         {
           sessionId: targetSid,
           stepId,
-          // 已移除工作空间选择，新会话一律用 agent 默认目录
-          userSpaceId: undefined,
           // 思考模式/强度：同理，仅新建会话传；已有会话沿用库里绑定（后端读行）
           thinking: targetSid ? undefined : thinkingMode,
           reasoningEffort: targetSid ? undefined : reasoningEffort,
@@ -1629,8 +1627,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             agentId,
             q,
             targetSid,
-            stepId,
-            undefined
+            stepId
           )) || { answer: "", llm: false };
         if (resp.session_id && resp.session_id !== targetSid) {
           rekey(resp.session_id);
@@ -1800,7 +1797,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     // 锁住这个会话的回填：迟到的服务端响应不能把用户刚选的值冲掉
     thinkFilledRef.current = sessionId;
     try {
-      await apiUpdateSessionWorkspace(agentId, sessionId, undefined, {
+      await apiUpdateSessionWorkspace(agentId, sessionId, {
         enabled,
         reasoning_effort: effort,
       });
@@ -1824,7 +1821,7 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     // 同上：锁住回填，免得迟到的响应把用户刚选的模式冲掉
     modeFilledRef.current = sessionId;
     try {
-      await apiUpdateSessionWorkspace(agentId, sessionId, undefined, undefined, mode);
+      await apiUpdateSessionWorkspace(agentId, sessionId, undefined, mode);
     } catch (e: any) {
       setRunMode(prev);
       modeFilledRef.current = null;

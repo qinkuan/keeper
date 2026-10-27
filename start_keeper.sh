@@ -6,8 +6,8 @@
 # （会走 shutdown()，一并关闭 MCP 会话与 stdio 子进程）。
 #
 # 用法：
-#   ./start_keeper.sh              # 前台运行，默认端口 8080，Ctrl+C 停止
-#   PORT=9090 ./start_keeper.sh    # 自定义端口
+#   ./start_keeper.sh              # 前台运行，端口自动分配，Ctrl+C 停止
+#   PORT=9090 ./start_keeper.sh    # 指定端口（被占用会自动换一个）
 #   LOG_LEVEL=DEBUG ./start_keeper.sh   # 更详细的日志
 #   ./start_keeper.sh --daemon     # 后台守护运行（日志 -> keeper.log）
 set -euo pipefail
@@ -15,7 +15,10 @@ KEEPER_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$KEEPER_DIR/.." && pwd)"
 cd "$ROOT"
 
-PORT="${PORT:-8080}"
+# 端口：**不写死**。用户机器上 8080 很可能早被别的程序占着，写死就起不来——
+# 或者更糟，起了个服务却连到了别人的服务上。没指定就抢一个空闲端口。
+# 实际端口也会写进 ~/.keeper/runtime/kernel.json。
+PORT="${PORT:-}"
 # 必须是绝对路径：load_config 对相对路径按 keeper 包目录解析，
 # 传 "keeper/config.yaml" 会被拼成 keeper/keeper/config.yaml 而找不到。
 CONFIG="$KEEPER_DIR/config.yaml"
@@ -121,6 +124,8 @@ fi
 
 # ---- 后台守护模式（可选）----
 if [ "${1:-}" = "--daemon" ]; then
+  # 后台跑：先抢一个空闲端口（内核也会再兜底一次，见 keeper/kernel_info.py）
+  [ -n "$PORT" ] || PORT="$("$VIRTUAL_ENV/bin/python" -c 'from keeper.kernel_info import free_port; print(free_port())')"
   echo "[keeper] 后台启动 (http://localhost:${PORT})，日志 -> ${LOGFILE}"
   nohup "$VIRTUAL_ENV/bin/python" -m keeper.main \
     --config "$CONFIG" "$PORT" >> "$LOGFILE" 2>&1 &
@@ -138,9 +143,12 @@ fi
 # 再加一个 FileHandler 会让两路输出交错）。
 export LOG_FILE="${LOG_FILE:-$KEEPER_DIR/keeper.log}"
 
+# 前台跑：同样先抢一个空闲端口，好让下面就能打出准确地址
+[ -n "$PORT" ] || PORT="$("$VIRTUAL_ENV/bin/python" -c 'from keeper.kernel_info import free_port; print(free_port())')"
 echo "[keeper] 前台启动 (http://localhost:${PORT})"
 echo "[keeper] 日志直接输出到控制台，按 Ctrl+C 停止（会一并关闭 MCP 连接）"
 echo "[keeper] 日志文件: ${LOG_FILE}"
+echo "[keeper] 实际端口也会写进 ~/.keeper/runtime/kernel.json"
 echo ""
 
 cleanup() {

@@ -23,6 +23,7 @@ from .models import (
     ToolCall,
     CapabilityLoad,
     ReactParseStat,
+    SchemaDoc,
     AgentMessage,
     AgentCapabilityOverride,
     AgentPeer,
@@ -30,13 +31,11 @@ from .models import (
     A2AOutboundTask,
     Base,
     ChatSession,
-    UserSpace,
     ReactStep,
     SessionMessage,
     Task,
     TaskItem,
     Thread,
-    USER_SPACE_DEFAULT_NAME,
     new_id,
 )
 
@@ -52,7 +51,6 @@ __all__ = [
     "Base",
     "ChatSession",
     "SessionMessage",
-    "UserSpace",
     "ReactStep",
     "Task",
     "TaskItem",
@@ -71,6 +69,6 @@ __all__ = [
     "ToolCall",
     "CapabilityLoad",
     "ReactParseStat",
-    "USER_SPACE_DEFAULT_NAME",
+    "SchemaDoc",
     "new_id",
 ]

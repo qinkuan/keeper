@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from typing import Optional
 
 from ..base import ProcessorTool
 from .sandbox import (
@@ -75,23 +76,38 @@ def _integrity_hint(rel: str, content: str) -> str:
     return ""
 
 
-def _effective(fallback_root: Path, fallback_ro: bool):
+class NoWorkspace(Exception):
+    """当前没有可用工作区（用户还没在「我的空间」里选目录）。"""
+
+
+def _effective(fallback_root: Optional[Path], fallback_ro: bool):
     """取当前请求的 (root, read_only, tmp_root)；无工作空间上下文则回落兜底值。
 
     ``tmp_root`` 是本 (会话, agent) 的私有目录，模型用 ``@tmp/`` 前缀指代它
     （见 :func:`sandbox.resolve_path`）。它是工作区**之外**的一个额外合法根，
     用来放测试脚本之类的临时文件——不放出去的话，模型写临时文件时只能往用户
     工作区根下堆。
+
+    ``fallback_root`` 为 None = 装配期就没有工作区（用户没配「我的空间」）。
+    这种情况下**明确报错**，而不是悄悄落到某个默认目录——落到默认目录的后果是
+    模型在一个用户根本不知道的地方读写文件，而界面显示的却是「我的空间」。
+    对话过程中通常不会走到这里：会话工作区是运行期注入的（见
+    ``chat/service.py`` 的 ``resolve_workspace``），跟「我的空间」配没配无关。
     """
     from ...chat.context import current_workspace
 
     ws = current_workspace()
     if ws is None:
+        if fallback_root is None:
+            raise NoWorkspace(
+                "当前没有工作区：请先到「我的空间」里选一个目录，"
+                "或换个不依赖文件操作的用法。"
+            )
         return Path(fallback_root), bool(fallback_ro), None
     return ws.root, ws.read_only, ws.agent_space
 
 
-def make_deliver(root: Path, read_only: bool) -> ProcessorTool:
+def make_deliver(root: Optional[Path], read_only: bool) -> ProcessorTool:
     """把工作空间内**已存在**的文件（或结构化内容），作为本次对话的交付清单推给用户
     （不复制 / 不重写）。
 

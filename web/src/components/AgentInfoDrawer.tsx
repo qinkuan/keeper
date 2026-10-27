@@ -475,11 +475,11 @@ export default function AgentInfoDrawer({
               <div className="rounded-card border border-line-soft px-4 py-1">
                 <Row label="名称">{cfg.name}</Row>
                 <Row label="工作区">
-                  {/* 只读：工作空间是**会话级**属性，不是 agent 的。agent 装配时
-                      用的目录只是它自己的默认工作目录，与会话实际读写哪里无关。
-                      给入口反而会让人以为"改了这里会话就跟着变"。要换会话的
-                      工作空间，用会话页顶栏那个下拉。 */}
-                  {cfg.workspace || "默认"}
+                  {/* 只读：工作空间是**会话级**属性，不是 agent 的。agent 装配期
+                      没有工作区（多空间下线后不再有"默认目录"兜底），会话实际读写
+                      哪里由「我的空间」决定。给入口反而会让人以为"改了这里会话
+                      就跟着变"。要换会话的工作空间，用会话页顶栏那个下拉。 */}
+                  {cfg.workspace || "会话级（在会话页切换）"}
                 </Row>
                 <Row label="MCP 连接">
                   <Pill tone={cfg.mcp_connected ? "green" : "red"}>

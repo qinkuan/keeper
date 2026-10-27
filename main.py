@@ -46,40 +46,46 @@ if _PROJECT_ROOT and _PROJECT_ROOT not in sys.path:
 
 from keeper.config import load_config
 from keeper.agent.keeper import build_all_agents, list_keepers, shutdown_all
+from keeper.kernel_info import clear_kernel_info, pick_port, write_kernel_info
+from keeper.log import AgentFilter, setup_file_logging, silence_noisy_loggers
 from keeper.store import dispose_engine, init_db
 
 
 def _setup_logging() -> None:
-    """把日志直接打到控制台（前台运行时可见），级别可用 LOG_LEVEL 覆盖。
+    """日志：控制台 + **按天分文件**。
 
+    控制台给前台运行时看（``start_keeper.sh`` 直接输出到终端），文件给回溯用
+    ——「上次那个错为什么发生」不能靠人肉复现，所以每条都留档：
+    ``~/.keeper/logs/<YYYY-MM-DD>.log``，每天一个文件，保留最近 14 天。
+
+    级别用 ``LOG_LEVEL`` 覆盖；日志目录用 ``KEEPER_LOG_DIR`` 覆盖。
     每条日志前面带 ``[agent]``：单进程装多个 agent 时，LLM 调用 / 工具 / 对端
     调用这些日志会混在一起，没有它分不清哪行属于哪个 agent。值由请求入口写进
     ContextVar（见 ``chat.context.set_agent``），这里用 filter 读出来注入；
     不在任何 agent 上下文里（比如启动装载阶段）时显示 ``-``。
     """
-    from keeper.chat.context import agent_label
-
-    class _AgentFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            if not hasattr(record, "agent"):
-                record.agent = agent_label()
-            return True
-
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     fmt = "%(asctime)s %(levelname)-7s [%(agent)s] %(name)s | %(message)s"
     logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
+    # 第三方库的已知噪音降噪（如 pypdf 读不规范 PDF 时的 "Ignoring wrong
+    # pointing object"——它在修复交叉引用表，修完照常能读，不是错误）。
+    silence_noisy_loggers()
     # basicConfig 建的是 root 的 handler，给它挂上 filter 即可覆盖所有
     # 没有独立 handler 的 logger（keeper.*、httpx 等都会走到 root）。
     for h in logging.getLogger().handlers:
-        h.addFilter(_AgentFilter())
+        h.addFilter(AgentFilter())
 
-    # 可选的**文件**日志：宝塔进程守护 / systemd 这类拉起方式，日志只进容器里
-    # 的 stdout，进程一重启上次的记录就没了——排查「上次那个错为什么发生」
-    # 全靠人肉复现。设 LOG_FILE 即额外落一份（控制台仍然照打）。
-    #
-    # 一定要用 Rotating：agent 的 LLM 调用与工具日志量不小，不限大小能把磁盘
-    # 撑爆；10MB × 5 份 = 最多 50MB，够回溯又不失控。
+    # 文件日志：**默认就开**（不再需要设 LOG_FILE 才有留档）。
+    handler = setup_file_logging(level, fmt)
+    if handler is not None:
+        logging.getLogger().info(
+            "日志文件已开启：%s（保留 %d 天）", handler.directory, handler.retention_days
+        )
+
+    # 显式指定了单文件时（LOG_FILE）：额外再落一份到那个路径，按大小轮转。
+    # 这是老行为，保留给"想把日志重定向到某个固定文件"的场景（比如采集器
+    # 盯着一个文件）。与上面的按天文件并存，互不影响。
     log_file = os.getenv("LOG_FILE", "").strip()
     if log_file:
         try:
@@ -95,9 +101,9 @@ def _setup_logging() -> None:
             )
             fh.setLevel(level)
             fh.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
-            fh.addFilter(_AgentFilter())
+            fh.addFilter(AgentFilter())
             logging.getLogger().addHandler(fh)
-            logging.getLogger().info("日志文件已开启：%s", path)
+            logging.getLogger().info("额外的单文件日志已开启：%s", path)
         except Exception as e:  # noqa: BLE001
             # 写不了日志文件不该拦住服务启动：控制台还能看，只是没有留档。
             logging.getLogger().warning("开启 LOG_FILE 失败（继续用控制台）：%s", e)
@@ -182,6 +188,10 @@ def make_app():
     app.include_router(settings_router)
     # framework 环境（~/.keeper/framework 下集中管理的 python / node 运行时）
     app.include_router(framework_router)
+    # 数据库表说明（每张表是干什么用的；说明存在 schema_doc 表里，见 keeper/store/schema_doc.py）
+    from keeper.store.api import router as schema_router
+
+    app.include_router(schema_router)
     # A2A 入站：按 agent 路由，每个已装载 agent 各有自己的端点
     # POST /agents/{agent_id}/a2a 与 GET /agents/{agent_id}/.well-known/agent.json
     from keeper.a2a import build_a2a_router
@@ -247,8 +257,11 @@ def make_app():
     return app
 
 
-async def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
-    """启动 HTTP 服务；退出时优雅关闭所有 agent（释放 MCP 等）并释放连接池。"""
+async def serve(host: str = "127.0.0.1", port: int = 0) -> None:
+    """启动 HTTP 服务；退出时优雅关闭所有 agent（释放 MCP 等）并释放连接池。
+
+    ``port=0`` 表示让系统分配一个空闲端口。
+    """
     import uvicorn
 
     app = make_app()
@@ -292,9 +305,17 @@ def main() -> None:
             i += 1
 
     cfg = load_config(cfg_path)   # 框架：端口等
-    host, port = cfg.host, cfg.port
-    if rest:
-        port = int(rest[0])   # 命令行位置参数优先级最高
+    host = cfg.host
+    # 端口优先级：命令行位置参数 > config.yaml 的 server.port > 系统分配。
+    #
+    # 为什么不给死值：用户机器上 8080 可能早被别的程序占着，写死就起不来——
+    # 或者更糟，起了个服务却连到了别人的服务上。config.yaml 里 port 留 0（或
+    # 配的端口被占用）就由系统分配一个空闲端口，实际端口写进
+    # ~/.keeper/runtime/kernel.json，谁要连就问那个文件。
+    preferred = int(rest[0]) if rest else int(cfg.port or 0)
+    port, how = pick_port(host, preferred)
+    if how != "配置的端口":
+        logger.info("端口 %s（%s）", port, how)
 
     logger.info("监听地址: %s:%d", host, port)
     if host not in ("127.0.0.1", "localhost", "::1"):
@@ -306,16 +327,33 @@ def main() -> None:
         )
 
     async def run() -> None:
+        # nonlocal：下面重试时会给 port 重新赋值。不声明的话 Python 会把 port
+        # 当成 run() 的局部变量，读外层的那个就报 UnboundLocalError。
+        nonlocal port
         # 1) 初始化存储：建表（幂等，已存在则跳过）
         await init_db()
         # 2) 从数据库装载所有 active agent 到本进程（单个失败只跳过，不拖垮整体）
         await build_all_agents()
-        # 3) 启动对外 HTTP API；Ctrl+C 时 serve() 的 finally 会优雅关闭
-        await serve(host=host, port=port)
+        # 3) 记下实际地址：脚本 / 前端 dev server 据此连，不用猜端口
+        write_kernel_info(host, port, config_path=cfg_path or "")
+        # 4) 启动对外 HTTP API；Ctrl+C 时 serve() 的 finally 会优雅关闭
+        try:
+            await serve(host=host, port=port)
+        except (SystemExit, OSError) as e:
+            # 端口在「探测可用」与「真正 bind」之间被别的进程抢走了（竞态窗口
+            # 很小，但不是零）。那就换一个端口再试一次——总比整个起不来强。
+            logger.warning("端口 %d 启动时发现被占用，换一个再试：%s", port, e)
+            port, _ = pick_port(host, 0)
+            write_kernel_info(host, port, config_path=cfg_path or "")
+            logger.info("改用端口 %d", port)
+            await serve(host=host, port=port)
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
         logger.info("收到 Ctrl+C，已退出")
+    finally:
+        # 端口信息留着会误导人（下次看到的是已经关掉的端口）
+        clear_kernel_info()
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@
 **SQLite + SQLAlchemy 异步**（`store/`）。
 
 理由：本地单用户、单机部署；不需要独立数据库进程；异步接口与 FastAPI 一致。
-数据库位置 `keeper/data/keeper.db`。
+数据库位置 `~/.keeper/data/keeper.db`。
 
 **不做的**：不做跨设备同步、不做多写副本——数据主权在本地，一台机器一份库。
 
@@ -68,15 +68,13 @@ chat_sessions ──1:N──> session_messages ──1:N──> react_steps
 | `agent_id` | **所属 agent**。单进程多 agent 下按它隔离会话（没有这列会串台） |
 | `initiator_id` | 发起人 id（人或外部 agent），区分谁发起的 |
 | `context_id` | 协议层上下文锚（A2A contextId），与内部主键**解耦** |
-| `user_space_id` | **历史遗留列**：工作区已改为会话空间（`~/.keeper/workspace/session/<sid>/`），运行期不再读它 |
 | `kind` | 会话类别：`chat`（普通，对话页）/ `task`（任务绑定会话）/ `browser`（浏览器会话，浏览器页）。**三者在列表里互斥**，列表按这列筛；新增取值不需要迁移（无 CHECK 约束），但校验在接口层 |
 | `mode` | 运行模式：`normal`（ReAct 多步）/ `simple`（快捷）/ `ptc`（代码沙箱） |
 | `parent_id` | 父会话 —— 子会话树 |
-| `ball_key` | 「浏览器」页的归属键 |
 | `thinking` / `reasoning_effort` | 思考内容 / 推理强度开关 |
 | `activated_plugins` | 本轮启用的插件 |
 | `deleted_at` / `status="deleted"` | **软删除**；删除的会话进回收站（`GET /manage/sessions/trash`），可恢复 |
-| `status` / `title` / `summary` | 状态、标题、摘要 |
+| `status` / `title` | 状态、标题 |
 
 `context_id` 与主键分离的意义：换协议时只换映射，不动 session 主键。
 

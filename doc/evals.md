@@ -56,7 +56,7 @@ L3 不做，因为要引入 LLM judge，而 judge 换个模型 / 换个提示词
 | **独立工作空间** | 用的是**会话空间**（运行期唯一的工作目录），且会话空间的根被 `KEEPER_WORKSPACE_ROOT` 指到 `~/.keeper/evals/workspace`；「我的空间」也被重定向到评测自己的临时目录，被测 agent 碰不到用户真实的文件 |
 
 工作空间这一条要特别小心：运行期的工作目录**早就从「用户空间」改成了会话空间**
-（`chat_sessions.user_space_id` 是历史遗留列，运行期不读）。评测如果还按老模型把
+（多用户空间已下线，`chat_sessions.user_space_id` 是历史遗留列，运行期不读）。评测如果还按老模型把
 setup 文件写到别处，agent 看到的目录永远是空的——十条用例会集体扑空，而报告里
 全是「文件不存在」，看起来像模型不行，其实是评测自己接错了线。
 
@@ -149,7 +149,7 @@ python -m keeper.evals.run
 | `--case-timeout <秒>` | 单条用例墙钟上限 |
 | `--baseline <run_id>` | 与指定基线对比 |
 | `--no-compare` | 不与任何基线对比 |
-| `--source-db <path>` | 被复制的源库路径（默认 `keeper/data/keeper.db`） |
+| `--source-db <path>` | 被复制的源库路径（默认 `~/.keeper/data/keeper.db`） |
 | `--show <run_id\|latest>` | 只打印某份历史报告后退出 |
 | `--compare-only <run_id>` | 把该历史报告与 latest 对比后退出 |
 | `-v / --verbose` | 打开 debug 日志 |

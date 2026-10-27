@@ -903,8 +903,7 @@ export interface LocalAgent {
   persona: string;
   workspace_kind: string;
   workspace_path: string | null;
-  // 注意：**没有** workspace_read_only。只读是**工作空间**的属性，真源在
-  // user_space.read_only；要查某个 agent 能不能写，看它绑定的那个空间。
+  // 注意：**没有** workspace_read_only。只读是**工作空间**的属性（「我的空间」默认可写）。
   /** 勾选的插件（库内目录名） */
   plugins: string[];
   /** 勾了但链接不可用（库里目录被删了）——装起来会少这些工具 */
@@ -920,12 +919,8 @@ export interface CreateLocalAgentInput {
   description?: string | null;
   persona?: string;
   status?: string;
-  /** 选中的用户空间 id（不选 = 无工作区）。路径与只读由后端从该记录取。 */
-  workspace_space_id?: string | null;
-  /** @deprecated 兼容旧调用：新代码用 workspace_space_id */
-  workspace_kind?: string;
-  /** @deprecated 兼容旧调用：新代码用 workspace_space_id */
-  workspace_path?: string | null;
+  // 注意：**没有**工作区字段。工作空间是会话级的属性，且「我的空间」是全局唯一的
+  // 空间（路径在 settings.yaml），创建 agent 时无处可选。
   /** 插件的库内目录名或清单 name 都接受 */
   plugins?: string[];
 }
@@ -1135,8 +1130,6 @@ export interface SessionItem {
   id: string;
   title?: string | null;
   initiator_id?: number | null;
-  /** 本会话绑定的用户空间（可空 → 回落 agent 默认目录） */
-  user_space_id?: string | null;
   status?: string | null;
   /** chat=普通会话（「对话」页）／task=任务绑定会话 */
   kind?: SessionKind | null;
@@ -1150,24 +1143,7 @@ export interface SessionItem {
   updated_at?: string | null;
 }
 
-// ---- 用户空间：用户自管的命名文件路径模块 ----
-export interface UserSpace {
-  id: string;
-  name: string;
-  /** 绝对路径 */
-  path: string;
-  /** 是否只读（默认 true） */
-  read_only: boolean;
-  description?: string | null;
-}
-
-/** 创建 / 更新用户空间的请求体 */
-export interface UserSpaceInput {
-  name: string;
-  path: string;
-  read_only?: boolean;
-  description?: string | null;
-}
+// ---- 「我的空间」：单一用户空间（路径在 settings.yaml 的 user_space.path）----
 
 /** GET /user-spaces/browse：浏览服务器本机目录，供选择工作目录 */
 export interface DirBrowseEntry {
@@ -1193,15 +1169,15 @@ export interface DirBrowseResp {
 
 /** 某会话当前生效的工作空间（供聊天头部展示） */
 export interface SessionWorkspace {
+  /** 唯一的工作空间「我的空间」；没配置时为 null */
   user_space: {
-    id: string;
     name: string;
     path: string;
     read_only: boolean;
   } | null;
   /** 本 (会话, agent) 的私有产物目录（自动创建、不落库） */
   agent_space: string;
-  /** 实际生效的文件根（用户空间路径，或 agent 默认目录） */
+  /** 实际生效的文件根（「我的空间」路径，或 agent 默认目录） */
   effective_root: string;
   /** 是否只读 */
   read_only: boolean;
