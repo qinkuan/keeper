@@ -48,7 +48,11 @@ export function Stat({
       >
         {value}
       </div>
-      {sub && <div className="mt-1.5 text-[11px] text-ink-faint">{sub}</div>}
+      {/* sub 加 truncate：里面常放路径（索引库路径、模型目录），一长就会把
+          卡片撑破、把整行挤歪。截断比溢出好，完整内容另有地方看。 */}
+      {sub && (
+        <div className="mt-1.5 truncate text-[11px] text-ink-faint">{sub}</div>
+      )}
     </div>
   );
 }

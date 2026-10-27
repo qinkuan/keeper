@@ -2881,8 +2881,24 @@ export function apiSearchModelDownload(source: "auto" | "hf" | "modelscope" = "a
  *
  * 返回的 `status` 可能是 `already_running`——自动同步正在跑时不必重复触发。
  */
-export function apiSearchIndex(body?: { roots?: string[]; force?: boolean; paths?: string[] }) {
+export function apiSearchIndex(body?: {
+  roots?: string[];
+  force?: boolean;
+  paths?: string[];
+  /** 建哪种索引：auto（有模型就关键词+向量）/ keyword（只建关键词） */
+  index_kinds?: "auto" | "keyword";
+}) {
   return apiPost<{ status: string }>("/search/index", body ?? {});
+}
+
+/**
+ * 补建向量索引（**后台跑**）。
+ *
+ * 只补**缺向量**的文档，不全量重建：用户先建了关键词索引、后来才下载向量
+ * 模型时，靠这个把语义检索补回来。
+ */
+export function apiSearchVectorBackfill() {
+  return apiPost<{ status: string }>("/search/vector/backfill");
 }
 
 /**

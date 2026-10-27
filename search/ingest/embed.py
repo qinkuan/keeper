@@ -9,6 +9,7 @@ import logging
 import platform
 import threading
 from pathlib import Path
+from typing import Optional
 
 from .. import config
 from ..deps import require_numpy
@@ -203,16 +204,60 @@ class Embedder:
 # 很便宜，可以放心在任何地方调。
 
 _embedder_lock = threading.Lock()
-_embedder: Embedder = None
+_embedder: Optional[Embedder] = None
 _embedder_failed = False
+#: 向量通道不可用的原因（空串 = 可用）。用于在界面上说清楚"为什么搜不了语义"。
+_embedder_reason = ""
 
 
-def get_embedder() -> Embedder:
-    """跨调用复用的 embedder；没装 litert-lm 时返回 ``None``。
+def unavailable_reason() -> str:
+    """向量通道当前**为什么**不可用（空串 = 可用）。
 
-    失败过一次就不再重试（每次请求都重试会刷屏，而且必然还是失败）。
+    两个硬条件，缺一不可：
+
+    1. ``litert-lm`` 得装上（否则没有 EmbeddingEngine）；
+    2. 模型文件得在本地（``config.MODEL_DIR/config.MODEL_FILE``）。
+
+    为什么要在**构造 embedder 之前**就判：``Embedder`` 是懒加载的——构造它几乎
+    不会失败，真正加载模型是在第一次 embed 时才炸。所以以前"有没有 embedder"
+    这个判断是**假的**（永远说"可用"），结果建索引跑到一半抛异常，
+    **连关键词索引都建不出来**。这里提前把话说清楚，调用方才能干净地降级。
     """
-    global _embedder, _embedder_failed
+    if EmbeddingEngine is None:
+        return "未安装 litert-lm（pip install litert-lm==0.18.0）"
+    try:
+        from .model import is_model_ready
+
+        if not is_model_ready():
+            return "向量模型未下载"
+    except Exception as e:  # noqa: BLE001
+        return f"向量模型状态未知（{type(e).__name__}）"
+    return ""
+
+
+def get_embedder() -> Optional[Embedder]:
+    """跨调用复用的 embedder；**向量通道不可用时返回 ``None``**。
+
+    不可用 = 没装 litert-lm，或者模型还没下载。两种情况都**不影响关键词检索**——
+    调用方（建索引 / 检索）据此降级为纯关键词，而不是抛异常把整件事搞挂。
+
+    不可用状态会**重新评估**：模型可能刚被下载好（原因从"未下载"变成空串），
+    这时要能重新拿到 embedder，不能被之前的一次失败永久挡住。
+    """
+    global _embedder, _embedder_failed, _embedder_reason
+    reason = unavailable_reason()
+    if reason:
+        if reason != _embedder_reason:
+            logger.info("向量通道不可用（降级为纯关键词检索）：%s", reason)
+        _embedder_reason = reason
+        _embedder = None
+        _embedder_failed = True
+        return None
+    # 通道恢复了（模型刚下载好 / litert-lm 刚装上）→ 清掉失败标记，允许重来
+    if _embedder_failed:
+        logger.info("向量通道已可用")
+        _embedder_failed = False
+        _embedder_reason = ""
     if _embedder is None and not _embedder_failed:
         with _embedder_lock:
             if _embedder is None and not _embedder_failed:
@@ -220,5 +265,11 @@ def get_embedder() -> Embedder:
                     _embedder = Embedder()
                 except Exception as e:  # noqa: BLE001
                     _embedder_failed = True
+                    _embedder_reason = f"加载 embedding 模型失败：{e}"
                     logger.warning("embedding 模型不可用（降级为纯关键词检索）：%s", e)
     return _embedder
+
+
+def unavailable_note() -> str:
+    """当前不可用原因（给界面用的一句话说明）。"""
+    return _embedder_reason or unavailable_reason()

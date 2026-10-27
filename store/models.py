@@ -683,6 +683,16 @@ class LLMCall(Base):
     reasoning_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ttft_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 首字延迟
+    #: 本次调用的成本：**调用返回时就按当时的单价算好落库**。
+    #: None = 当时没有有效单价（没配价 / 那档价已被删），不是 0。
+    #: 落库之后成本就是"这次调用"的属性——换模型、解绑、删预设、改价都改不动它。
+    cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    #: 成本币种（CNY / USD…），与 cost 同时写入。
+    currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    #: 用的是哪一档价（JSON 快照）：{"price_id":…,"input":…,"cached":…,"output":…,
+    #: "currency":…,"effective_from":…,"matched_by":…}。留着是为了能核对"这轮用的
+    #: 哪档价"，也为将来按快照重算留后路。
+    price_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

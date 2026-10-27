@@ -656,6 +656,100 @@ def doc_chunk_version(conn, doc_id):
     return None
 
 
+# ---------------------------------------------------------------- 向量覆盖情况
+#
+# 「这个文档有没有向量」是判断"要不要补建向量索引"的唯一事实来源。
+# 以前索引库里没有这个信息：写 chunk 时 embed_version **无条件**写当前版本
+# （哪怕向量是 NULL），prescreen 于是认为"这文档没变过"→ 直接跳过 → 模型下载
+# 之后**永远补不上向量**。所以这里补两个查询：谁缺向量、缺多少。
+
+
+def doc_missing_vectors(conn, doc_id) -> int:
+    """该文档叶子块里**缺向量**的数量（0 = 向量齐全）。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE doc_id=? AND is_parent=0 AND vector IS NULL",
+        (doc_id,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def count_vectors(conn) -> dict:
+    """向量覆盖统计：叶子块总数 / 有向量 / 缺向量。"""
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN vector IS NULL THEN 1 ELSE 0 END) "
+        "FROM chunks WHERE is_parent=0"
+    ).fetchone()
+    leaves = int(row[0] or 0)
+    missing = int(row[1] or 0)
+    return {"leaves": leaves, "with_vector": leaves - missing, "missing": missing}
+
+
+def documents_missing_vectors(conn):
+    """列出**还缺向量**的文档（doc_id, file_path），按文档顺序。
+
+    只看叶子块：父块本来就不参与向量化（它是给 agent 做上下文展开用的）。
+    """
+    rows = conn.execute(
+        "SELECT d.id, d.file_path FROM documents d "
+        "WHERE EXISTS (SELECT 1 FROM chunks c "
+        "              WHERE c.doc_id=d.id AND c.is_parent=0 AND c.vector IS NULL) "
+        "ORDER BY d.file_path"
+    ).fetchall()
+    return [{"id": r[0], "file_path": r[1]} for r in rows]
+
+
+# ---------------------------------------------------------------- 索引元信息
+#
+# 记在 idx_meta（key/value）里，不新建表：这个库本来就是"文件 + SQLite"，
+# 再加一张注册表反而多一处要同步的状态。
+#   index_kinds   —— 当前索引里有哪些通道："keyword" / "keyword,vector"
+#   embed_model   —— 写向量时用的模型（config.MODEL_REPO）
+#   embed_dim     —— 向量维度（换模型维度变了，旧向量必须重算）
+#   last_vector_at—— 最后一次写入向量的时间戳
+
+
+def set_meta(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO idx_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+
+
+def get_meta(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM idx_meta WHERE key=?", (key,)).fetchone()
+    return (row[0] if row and row[0] is not None else default) or default
+
+
+def index_kinds(conn) -> list:
+    """当前索引里有哪些通道（列表，如 ``["keyword", "vector"]``）。"""
+    raw = get_meta(conn, "index_kinds", "")
+    return [x for x in (raw or "").split(",") if x]
+
+
+def vector_index_state(conn) -> dict:
+    """向量索引状态：``none`` / ``partial`` / ``full`` + 缺失数量 + 模型信息。"""
+    cov = count_vectors(conn)
+    leaves = cov["leaves"]
+    missing = cov["missing"]
+    if leaves == 0:
+        state = "none"
+    elif missing == 0:
+        state = "full"
+    else:
+        state = "partial"
+    return {
+        "state": state,
+        "leaves": leaves,
+        "with_vector": cov["with_vector"],
+        "missing": missing,
+        "model": get_meta(conn, "embed_model", ""),
+        "dim": int(get_meta(conn, "embed_dim", "0") or 0),
+        "kinds": index_kinds(conn),
+        "last_vector_at": float(get_meta(conn, "last_vector_at", "0") or 0),
+    }
+
+
 def sync_chunks(conn, doc_id, chunks, vectors):
     """同步某文档的 chunk 集合。
 

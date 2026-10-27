@@ -15,7 +15,7 @@ from sqlalchemy import case, func, select
 
 from ..store import ChatSession, LLMCall, get_session_factory
 from ._guard import raise_if_bug
-from .pricing import _context_limit_for, _cost_of, _price_for
+from .pricing import _context_limit_for
 from .stats import _session_subtree_ids
 
 logger = logging.getLogger(__name__)
@@ -90,8 +90,10 @@ async def aggregate(
 ) -> Dict[str, Any]:
     """按任一维度聚合用量与成本（至少给一个维度）。
 
-    成本按 (model, provider, profile_id) 分组分别计价再求和——不同调用可能走
-    不同模型，混在一起算会串价。
+    成本直接 **SUM(llm_calls.cost)** —— 金额在每次调用返回时就按当时的单价
+    算好落库了（见 ``observability/recording.py``），这里只负责加总。
+    不再"展示时按当前价目表现算"：那样一来，删掉模型预设（连带删价段）就会让
+    历史金额凭空消失，改价段也会让同一段历史悄悄变成另一个数。
     """
     out: Dict[str, Any] = {
         "calls": 0,
@@ -140,8 +142,9 @@ async def aggregate(
                 func.max(LLMCall.prompt_tokens),  # 单次最大输入：上下文水位用
                 # 失败调用数（ok=False）：超时 / 报错都算，用于错误率
                 func.sum(case((LLMCall.ok.is_(False), 1), else_=0)),
-                # 该组最早的调用时间：用于匹配**当时**生效的单价（模型会调价）
-                func.min(LLMCall.created_at),
+                # 成本：调用返回时就按当时单价算好落库，这里只加总
+                func.sum(LLMCall.cost),
+                func.max(LLMCall.currency),
             ).group_by(LLMCall.model, LLMCall.provider, LLMCall.profile_id)
 
             if step_id:
@@ -194,7 +197,8 @@ async def aggregate(
                             func.count(LLMCall.id),
                             func.count(LLMCall.cached_tokens),
                             func.sum(case((LLMCall.ok.is_(False), 1), else_=0)),
-                            func.min(LLMCall.created_at),
+                            func.sum(LLMCall.cost),
+                            func.max(LLMCall.currency),
                         )
                         .where(LLMCall.session_id.in_(sids))
                         .group_by(
@@ -217,7 +221,8 @@ async def aggregate(
                     n_calls,
                     n_cached_rows,
                     n_errors,
-                    s_first_at,
+                    s_cost,
+                    s_currency,
                 ) in sess_rows:
                     a = sess_acc.setdefault(
                         sid,
@@ -241,18 +246,11 @@ async def aggregate(
                     a["cached_tokens"] += cached
                     a["duration_ms"] += int(s_dur or 0)
                     a["errors"] += int(n_errors or 0)
-                    price = await _price_for(
-                        profile_id, model, provider, at=s_first_at
-                    )
-                    c = _cost_of(
-                        prompt,
-                        completion,
-                        cached if n_cached_rows else None,
-                        price,
-                    )
+                    # 成本已落库，直接加总（NULL = 当时没配价，不计入）
+                    c = s_cost
                     if c is not None:
-                        a["cost"] += c
-                        a["currency"] = price[3] if price else a["currency"]
+                        a["cost"] += float(c)
+                        a["currency"] = s_currency or a["currency"]
 
         total_cost = 0.0
         priced = False
@@ -271,7 +269,8 @@ async def aggregate(
             n_cached_rows,
             s_max_prompt,
             n_errors,
-            s_first_at,
+            s_cost,
+            s_currency,
         ) in rows:
             # 上下文是「单次请求」的概念，累加没意义，取单次最大输入
             out["max_prompt_tokens"] = max(
@@ -291,12 +290,12 @@ async def aggregate(
             if int(n_cached_rows or 0) > 0:
                 out["cached_reported"] = True
 
-            price = await _price_for(profile_id, model, provider, at=s_first_at)
-            c = _cost_of(prompt, completion, cached if n_cached_rows else None, price)
+            # 成本已落库，直接加总（NULL = 当时没配价，不计入）
+            c = s_cost
             if c is not None:
-                total_cost += c
+                total_cost += float(c)
                 priced = True
-                currency = price[3] if price else currency
+                currency = s_currency or currency
 
             # 上下文水位按组算（不同模型上限不同），整体取**最危险**的那组
             lim = await _context_limit_for(profile_id, model, provider)

@@ -11,6 +11,7 @@ import {
   FolderPlus,
   Loader2,
   PanelLeft,
+  PanelRight,
   Pencil,
   RefreshCw,
   Search as SearchIcon,
@@ -1000,7 +1001,16 @@ function HResizeBar({ onResize }: { onResize: (dx: number) => void }) {
   );
 }
 
-export default function UserSpacePage() {
+export default function UserSpacePage({
+  onToggleChat,
+  chatCollapsed,
+}: {
+  /** 收/展右侧对话区。对话区自己的顶栏与那条竖边都没了，
+   *  按钮就放在「文件展示区」的右上角。 */
+  onToggleChat?: () => void;
+  /** 对话区当前是否已收起（决定按钮的提示文案）。 */
+  chatCollapsed?: boolean;
+} = {}) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
   const path = (q.data?.path ?? "").trim();
@@ -1420,7 +1430,7 @@ export default function UserSpacePage() {
     : "";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-w-0 flex-col">
       {q.isLoading ? (
         <div className="flex items-center gap-2 py-10 text-[13px] text-ink-muted">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -1432,7 +1442,7 @@ export default function UserSpacePage() {
         </Hint>
       ) : !path ? (
         /* 未配置：提醒页 */
-        <div className="max-w-[760px] rounded-xl border border-dashed border-brand/40 bg-brand/[0.04] p-6">
+        <div className="mt-4 max-w-[760px] rounded-xl border border-dashed border-brand/40 bg-brand/[0.04] p-6">
           <div className="flex items-center gap-3">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-gradient text-white shadow-brand">
               <FolderOpen className="h-5 w-5" />
@@ -1466,108 +1476,93 @@ export default function UserSpacePage() {
           </button>
         </div>
       ) : (
-        /* 已配置：顶部搜索 + 两栏文件浏览器（目录树可拖宽 / 可收起） */
-        <div className="mt-4 flex min-h-0 flex-1 flex-col">
-          {/* ── 最上方：文件搜索 ── */}
-          <div className="mb-3 flex items-center gap-2">
-            <div className="relative min-w-0 flex-1">
-              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-              <input
-                value={kw}
-                onChange={(e) => setKw(e.target.value)}
-                onKeyDown={(e) => {
-                  // 输入法拼字中：回车是确认候选词，不是提交
-                  if (isComposingKey(e)) return;
-                  if (e.key === "Enter") {
-                    setDebouncedKw(kw.trim());
-                    setView("results");
-                  }
-                }}
-                placeholder="搜索「我的空间」里的文件…"
-                className="h-9 w-full rounded-lg border border-line-soft bg-panel pl-8 pr-8 text-[13px] text-ink shadow-card outline-none placeholder:text-ink-faint focus:border-brand/50"
-              />
-              {kw && (
-                <button
-                  type="button"
-                  onClick={() => setKw("")}
-                  title="清空"
-                  className="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+        /* 已配置：两栏文件浏览器（目录树可拖宽 / 可收起）+ 右侧展示区。
+           搜索框在右侧「文件展示区」里（见下），不占左边的浏览区。 */
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* 面板上方的一行：两个开关分别贴在「文件展示区」的左右上角——
+              左边收起/展开目录浏览区，右边收/展对话区。
+              这一行压得尽量扁（只有按钮本身的高度），别在面板上方留一条空白带。
+              左边先放一个与目录树等宽的占位块，按钮才正好落在展示区的左缘；
+              目录收起时占位为 0，按钮跟着贴到展示区的新左缘。 */}
+          <div className="flex items-center pb-1">
+            <div className="shrink-0" style={{ width: treeCollapsed ? 0 : treeWidth + 6 }} />
+            <button
+              type="button"
+              onClick={() => setTreeCollapsed((v) => !v)}
+              title={treeCollapsed ? "展开目录" : "收起目录"}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+            >
+              {/* 目录浏览区：展开时向右（PanelRight），收起时向左（PanelLeft） */}
+              {treeCollapsed ? (
+                <PanelLeft className="h-4 w-4" />
+              ) : (
+                <PanelRight className="h-4 w-4" />
               )}
-            </div>
-            {searchQ.isFetching && (
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ink-faint" />
-            )}
-          </div>
-
-          <div className="flex min-h-0 flex-1">
-          {/* 左侧目录树：收起时退化为细条 + 展开按钮 */}
-          {treeCollapsed ? (
-            <div className="flex w-9 shrink-0 flex-col items-center rounded-xl bg-panel py-2">
+            </button>
+            {onToggleChat && (
               <button
                 type="button"
-                onClick={() => setTreeCollapsed(false)}
-                title="展开目录"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                onClick={onToggleChat}
+                title={chatCollapsed ? "展开对话" : "收起对话"}
+                className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
               >
-                <PanelLeft className="h-4 w-4" />
+                {/* 对话区：展开时向左（PanelLeft），收起时向右（PanelRight） */}
+                {chatCollapsed ? (
+                  <PanelRight className="h-4 w-4" />
+                ) : (
+                  <PanelLeft className="h-4 w-4" />
+                )}
               </button>
-            </div>
-          ) : (
+            )}
+          </div>
+          <div className="flex min-h-0 min-w-0 flex-1">
+          {/* 左侧目录树：收起时不占位（收起/展开按钮在展示区左上角那一行） */}
+          {treeCollapsed ? null : (
             <>
               <div
                 className="flex shrink-0 flex-col overflow-hidden rounded-xl bg-panel"
                 style={{ width: treeWidth }}
               >
-            <div className="flex items-center gap-1 px-2 py-1.5 text-[12px] font-medium text-ink-muted">
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-brand" />
-              <span className="truncate" title={path}>{basename(path)}</span>
-              <div className="ml-auto flex items-center gap-0.5">
+            {/* 目录功能区：只留操作按钮（目录名与名字左边的图标不展示了），靠左排。
+                高度刻意跟右侧搜索框区一样（10 + 36 + 4 = 50px），
+                两栏的内容才落在同一条水平线上。 */}
+            <div className="flex items-center gap-1 px-2 pb-1 pt-2.5">
+              <div className="flex h-9 w-full items-center justify-start gap-1">
                 <button
                   type="button"
                   onClick={() => doOpen(path, true)}
                   title="在文件管理器中打开"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
                 >
-                  <FolderOpen className="h-3.5 w-3.5" />
+                  <FolderOpen className="h-[17px] w-[17px]" />
                 </button>
                 <button
                   type="button"
                   onClick={doPickUpload}
                   title="上传文件到此处"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
                 >
-                  <Upload className="h-3.5 w-3.5" />
+                  <Upload className="h-[17px] w-[17px]" />
                 </button>
                 <button
                   type="button"
                   onClick={() => doMkdir(uploadTargetDir)}
                   title="在此新建文件夹"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
                 >
-                  <FolderPlus className="h-3.5 w-3.5" />
+                  <FolderPlus className="h-[17px] w-[17px]" />
                 </button>
                 <button
                   type="button"
                   onClick={refreshTree}
                   title="刷新目录（列出外部新增的文件）"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
                 >
                   {treeLoadingKey === path ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <Loader2 className="h-[17px] w-[17px] animate-spin" />
                   ) : (
-                    <RefreshCw className="h-3.5 w-3.5" />
+                    <RefreshCw className="h-[17px] w-[17px]" />
                   )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTreeCollapsed(true)}
-                  title="收起目录"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
-                >
-                  <PanelLeft className="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
@@ -1597,6 +1592,46 @@ export default function UserSpacePage() {
 
           {/* 右侧内容预览 / 搜索结果 */}
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-panel">
+            {/* 搜索框：属于「文件展示区」，宽度跟着这一区走——
+                搜出来的结果也展示在这一区，放一起才对得上。
+                bg-surface：面板本身是 bg-panel（白），输入框得比面板深一档才看得出是个框。
+                聚焦时不描蓝边（focus:border-brand 太扎眼），改成中性灰描边。 */}
+            <div className="px-3 pb-1 pt-2.5">
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
+                <input
+                  value={kw}
+                  onChange={(e) => setKw(e.target.value)}
+                  onKeyDown={(e) => {
+                    // 输入法拼字中：回车是确认候选词，不是提交
+                    if (isComposingKey(e)) return;
+                    if (e.key === "Enter") {
+                      setDebouncedKw(kw.trim());
+                      setView("results");
+                    }
+                  }}
+                  placeholder="搜索「我的空间」里的文件…"
+                  /* min-w-0：input 有默认的固有宽度（约 20 字符），不让它缩的话
+                     窗口变窄时它不肯跟着缩，框会顶破容器。 */
+                  className="h-9 w-full min-w-0 rounded-lg border border-line-soft bg-surface pl-8 pr-14 text-[13px] text-ink shadow-card outline-none placeholder:text-ink-faint focus:border-line"
+                />
+                {/* 搜索中的转圈：放在框里（绝对定位），不占布局宽度——
+                    否则它一出现，搜索框就缩掉 24px，框里的文字跟着跳。 */}
+                {searchQ.isFetching && (
+                  <Loader2 className="absolute right-8 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-ink-faint" />
+                )}
+                {kw && (
+                  <button
+                    type="button"
+                    onClick={() => setKw("")}
+                    title="清空"
+                    className="absolute right-2 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-ink-faint transition-colors hover:bg-panel hover:text-ink-strong"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-muted">
               {view === "results" ? (
                 <span className="flex min-w-0 items-center gap-1.5 truncate">

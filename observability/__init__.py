@@ -47,7 +47,6 @@ from .recording import (
 )
 from .stats import (
     _blank_usage,
-    _bucket_start,
     ask_rate,
     capability_stats,
     duplicate_calls,

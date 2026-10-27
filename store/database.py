@@ -647,6 +647,26 @@ async def _migrate_llm_profile_prices(conn) -> None:
             )
 
 
+async def _migrate_llm_call_cost(conn) -> None:
+    """llm_calls 补成本列（存量库升级）。
+
+    成本改成**调用返回时就按当时的单价算好、随 token 一起落库**（见
+    ``observability/recording.py``）。存量行一律 NULL —— 没有当时的单价快照，
+    就不去反推一个可能错误的金额（用户已确认历史数据不追溯）。
+    """
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(llm_calls)")).fetchall()
+    existing = {r[1] for r in rows}
+    for col, decl in (
+        ("cost", "FLOAT"),
+        ("currency", "VARCHAR(8)"),
+        ("price_snapshot", "TEXT"),
+    ):
+        if col not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE llm_calls ADD COLUMN {col} {decl}"
+            )
+
+
 async def _migrate_llm_profile_preset(conn) -> None:
     """移除早期版本给模型预设加的「出处」几列（存量库升级）。
 
@@ -888,6 +908,7 @@ async def init_db(url: str | None = None) -> None:
         await _migrate_session_message_mentions(conn)
         await _migrate_task_time_range(conn)
         await _migrate_llm_call_reasoning(conn)
+        await _migrate_llm_call_cost(conn)
         await _migrate_model_price_time_range(conn)
         await _migrate_model_price_weekdays(conn)
         await _migrate_tool_call_args_hash(conn)

@@ -162,6 +162,13 @@ def search(conn, embedder, query, top_k=10, filters=None, mode=None, alpha=None,
         results = [r for r in results if r["score"] >= min_score]
         return results[:top_k]
 
+    if embedder is None:
+        # 调用方（service）已经会把不可用的情况降级成 keyword；走到这里说明
+        # 有人绕过那层直接调了——给一句人话，别抛 AttributeError。
+        raise RuntimeError(
+            "向量检索不可用：向量模型未下载或 litert-lm 未安装。"
+            "可改用 mode='keyword'（纯关键词检索，无需模型）。"
+        )
     qvec = embedder.embed_query(query)
 
     if mode == "vector":

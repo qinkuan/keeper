@@ -4,7 +4,9 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Download,
+  Eye,
   Loader2,
   RefreshCw,
   Search as SearchIcon,
@@ -21,9 +23,11 @@ import {
   apiSearchQuery,
   apiSearchSaveConfig,
   apiSearchStatus,
+  apiSearchVectorBackfill,
 } from "../api/client";
 import type { SearchHit } from "../api/types";
 import { Hint, PageHeader, Section, Stack } from "../components/ui/Page";
+import { Modal } from "../components/ui/Modal";
 import { SegmentedControl } from "../components/ui/Segmented";
 import { Stat } from "../components/ui/Stat";
 import { Table, type Column } from "../components/ui/Table";
@@ -96,6 +100,8 @@ function IndexTab() {
   const stats = status?.stats;
   const idx = status?.index;
   const sync = status?.sync;
+  /** 向量索引现状（有没有向量、缺多少、要不要补建） */
+  const vecState = status?.vector;
 
   // 「索引配置」区块：读当前生效值 → 本地草稿 → 保存
   const cfgQ = useQuery({
@@ -145,7 +151,8 @@ function IndexTab() {
   });
 
   const indexM = useMutation({
-    mutationFn: (force: boolean) => apiSearchIndex({ force }),
+    mutationFn: (v: { force?: boolean; kinds?: "auto" | "keyword" }) =>
+      apiSearchIndex({ force: v.force, index_kinds: v.kinds ?? "auto" }),
     onSuccess: (res) => {
       // 自动同步正在跑时内核会回 already_running —— 别谎报"已开始"
       if (res?.status === "already_running") {
@@ -156,6 +163,26 @@ function IndexTab() {
       invalidate();
     },
     onError: (e: Error) => toast.error("建索引失败：" + e.message),
+  });
+
+  /**
+   * 补建向量索引：只补**缺向量**的文档。
+   *
+   * 典型场景：用户先建了关键词索引（那时还没下载向量模型），后来下载了模型——
+   * 索引里的向量还是空的，而文档没变，普通增量扫描会跳过它们。点这个按钮
+   * 把语义检索补回来。
+   */
+  const backfillM = useMutation({
+    mutationFn: () => apiSearchVectorBackfill(),
+    onSuccess: (res) => {
+      if (res?.status === "already_running") {
+        toast.info("已有索引任务在跑，本次跳过");
+      } else {
+        toast.success("已开始补建向量索引（后台进行）");
+      }
+      invalidate();
+    },
+    onError: (e: Error) => toast.error("补建向量索引失败：" + e.message),
   });
 
   const clearM = useMutation({
@@ -187,6 +214,20 @@ function IndexTab() {
 
   const modelReady = model?.ready ?? false;
   const modelUsable = model?.available ?? false;
+  /** 「索引库」详情弹窗 */
+  const [dbInfoOpen, setDbInfoOpen] = useState(false);
+
+  /** 复制索引库路径 */
+  const copyDbPath = async () => {
+    const p = stats?.db_path ?? "";
+    if (!p) return;
+    try {
+      await navigator.clipboard.writeText(p);
+      toast.success("索引库路径已复制");
+    } catch {
+      toast.error("复制失败，请手动选中路径复制");
+    }
+  };
 
   return (
     <Stack>
@@ -215,6 +256,17 @@ function IndexTab() {
           </button>
         }
       >
+        {/* 这个模型是干什么的 —— 不说清楚，用户只会以为"下完就能搜得更好"，
+            不知道关键词检索本来就不需要它、也不知道改了模型要重建索引。 */}
+        <p className="mb-3 text-[12px] leading-5 text-ink-muted">
+          用于把文档切片转成向量，支持
+          <span className="font-medium text-ink-strong">语义检索</span>
+          ——能搜到「意思相近、用词不同」的内容。关键词检索不需要它。
+          <span className="text-ink-faint">
+            下载或更新模型后需要重建索引才会生效。
+          </span>
+        </p>
+
         <div className="grid gap-3 sm:grid-cols-3">
           <Stat
             label="模型状态"
@@ -268,9 +320,38 @@ function IndexTab() {
         {!modelUsable && (
           <div className="mt-3">
             <Hint tone="warn" title="向量通道不可用">
-              没装 <code className="font-mono">litert-lm</code>，只能做**纯关键词检索**
-              （mode=keyword）。想要语义召回，先装它再下载模型：
-              <code className="ml-1 font-mono">pip install litert-lm==0.18.0</code>
+              {model?.unavailable_reason || "向量模型未就绪"} —— 只能做
+              <span className="font-medium">纯关键词检索</span>（mode=keyword）。
+              {model?.unavailable_reason?.includes("litert-lm") ? (
+                <>
+                  想要语义召回，先装它：
+                  <code className="ml-1 font-mono">pip install litert-lm==0.18.0</code>
+                </>
+              ) : null}
+            </Hint>
+          </div>
+        )}
+
+        {/* 模型在、但向量索引还没建全 —— 语义检索实际上是关着的，
+            却容易被"模型已就绪"掩盖过去。这里明确说出来，并给一键补建。 */}
+        {modelReady && vecState?.needs_backfill && (
+          <div className="mt-3">
+            <Hint tone="warn" title="向量索引还没建全">
+              模型已就绪，但还有 {vecState.missing} 个片段没有向量，语义检索暂时用不上。
+              补建只处理缺向量的片段，不重扫全库。
+              <button
+                type="button"
+                className="ml-2 inline-flex items-center gap-1 rounded-md border border-line-soft bg-panel px-2 py-0.5 text-[12px] text-ink-muted transition-colors hover:border-brand/40 hover:text-brand disabled:opacity-50"
+                disabled={backfillM.isPending || idx?.running}
+                onClick={() => backfillM.mutate()}
+              >
+                {backfillM.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3" />
+                )}
+                补建向量索引
+              </button>
             </Hint>
           </div>
         )}
@@ -285,7 +366,8 @@ function IndexTab() {
               type="button"
               className={BTN}
               disabled={indexM.isPending || idx?.running}
-              onClick={() => indexM.mutate(false)}
+              onClick={() => indexM.mutate({ force: false })}
+              title="有向量模型就建关键词+向量索引，没有就只建关键词索引"
             >
               <RefreshCw className={idx?.running ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
               建立索引
@@ -294,7 +376,16 @@ function IndexTab() {
               type="button"
               className={BTN}
               disabled={indexM.isPending || idx?.running}
-              onClick={() => indexM.mutate(true)}
+              onClick={() => indexM.mutate({ force: false, kinds: "keyword" })}
+              title="只建关键词索引，不加载向量模型（快，无需下载模型）"
+            >
+              仅关键词
+            </button>
+            <button
+              type="button"
+              className={BTN}
+              disabled={indexM.isPending || idx?.running}
+              onClick={() => indexM.mutate({ force: true })}
               title="忽略内容哈希，强制重新嵌入（慢）"
             >
               强制重建
@@ -302,11 +393,50 @@ function IndexTab() {
           </div>
         }
       >
-        <div className="grid gap-3 sm:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-5">
           <Stat label="已索引文档" value={stats?.documents ?? 0} />
           <Stat label="片段总数" value={stats?.chunks ?? 0} sub={`叶子 ${stats?.leaves ?? 0} · 父块 ${stats?.parents ?? 0}`} />
           <Stat label="关键词条目" value={stats?.keywords ?? 0} />
-          <Stat label="索引库" value={<span className="text-[13px]">SQLite</span>} sub={stats?.db_path ?? ""} />
+          <Stat
+            label="向量索引"
+            value={
+              vecState?.state === "full"
+                ? "已建全"
+                : vecState?.state === "partial"
+                  ? "不完整"
+                  : "未建立"
+            }
+            tone={
+              vecState?.state === "full"
+                ? "success"
+                : vecState?.state === "partial"
+                  ? "warn"
+                  : undefined
+            }
+            sub={
+              vecState
+                ? `有向量 ${vecState.with_vector} / 共 ${vecState.leaves}${
+                    vecState.missing ? ` · 缺 ${vecState.missing}` : ""
+                  }`
+                : ""
+            }
+          />
+          {/* 索引库路径很长（~/.keeper/search/search.db），直接铺在卡片里会
+              撑破卡片、把整行挤歪。改成「查看」：点开看完整路径 + 说明。 */}
+          <Stat
+            label="索引库"
+            value={<span className="text-[13px]">SQLite</span>}
+            sub={
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded text-[11px] text-brand transition-colors hover:underline"
+                onClick={() => setDbInfoOpen(true)}
+              >
+                <Eye className="h-3 w-3" />
+                查看
+              </button>
+            }
+          />
         </div>
 
         <div className="mt-3 text-[12px] text-ink-muted">
@@ -504,6 +634,44 @@ function IndexTab() {
           })}
         />
       </Section>
+
+      {/* 索引库详情：路径长，放弹窗里看（还能一键复制） */}
+      <Modal
+        open={dbInfoOpen}
+        onClose={() => setDbInfoOpen(false)}
+        title="索引库"
+        width={520}
+        footer={
+          <>
+            <button type="button" className={BTN} onClick={copyDbPath}>
+              <Copy className="h-3.5 w-3.5" />
+              复制路径
+            </button>
+            <button
+              type="button"
+              className={BTN_PRIMARY}
+              onClick={() => setDbInfoOpen(false)}
+            >
+              知道了
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <div>
+            <div className="mb-1 text-[11.5px] text-ink-faint">文件位置</div>
+            <div className="select-all break-all rounded-lg border border-line-soft bg-surface px-3 py-2 font-mono text-[12px] leading-5 text-ink-strong">
+              {stats?.db_path ?? "—"}
+            </div>
+          </div>
+          <p className="text-[12px] leading-5 text-ink-muted">
+            索引库是一个 SQLite 文件：里面是 <code>documents</code> /{" "}
+            <code>chunks</code> 两张业务表，加上 <code>chunks_fts</code>
+            （FTS5 关键词索引）与向量列。备份这一个文件就等于备份整个索引；
+            删掉它索引会重新建（要重新切片与嵌入，慢）。
+          </p>
+        </div>
+      </Modal>
     </Stack>
   );
 }

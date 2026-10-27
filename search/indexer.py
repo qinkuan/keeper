@@ -67,7 +67,13 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
             and dbmod.doc_embed_version(conn, existing["id"])
                 == config.EMBED_FORMAT_VERSION
             and dbmod.doc_chunk_version(conn, existing["id"])
-                == config.CHUNK_FORMAT_VERSION):
+                == config.CHUNK_FORMAT_VERSION
+            # 有向量模型时，向量也得齐全才能跳过：文档是"先有关键词索引、
+            # 后来才下载的模型"这种情况，向量还是空的，得留给补建。
+            # 没有 embedder（没模型）时不要求向量——否则每次扫描都要把所有
+            # 文档重切一遍，纯属白费力气。
+            and (embedder is None
+                 or dbmod.doc_missing_vectors(conn, existing["id"]) == 0)):
         return "skipped"
 
     chash = known_hash if known_hash else detect.compute_hash(path)
@@ -85,7 +91,9 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
             and dbmod.doc_embed_version(conn, existing["id"])
                 == config.EMBED_FORMAT_VERSION
             and dbmod.doc_chunk_version(conn, existing["id"])
-                == config.CHUNK_FORMAT_VERSION):
+                == config.CHUNK_FORMAT_VERSION
+            and (embedder is None
+                 or dbmod.doc_missing_vectors(conn, existing["id"]) == 0)):
         # 内容没变 **且** 嵌入格式版本也没变 → 真的可以跳过。
         # （版本变了说明 embed_text 的构造方式变了，旧向量是过期的，
         #   必须继续往下走：重新切片 + 重新嵌入。）
@@ -148,31 +156,70 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
         # 「能搜字面词」不该被「装不装得动几百 MB 的模型」卡住。
         pass
     else:
-        dim = int(embedder.dimension)      # 当前模型的向量维度
-        # numpy 延迟导入（同 db.py）：只在向量路径需要
-        np = require_numpy()
-        for c in leaves:
-            prev = state.get(c.chunk_id)
-            # 复用旧向量的前提：内容没变 **且** 维度与当前模型一致
-            # （换过 embedding 模型时维度会变，必须重新嵌入，否则检索时会被静默跳过）
-            # **且** 嵌入文本格式版本一致（embed_text 的构造方式变了，
-            # 比如把文件名加进去 —— content_hash 只算正文，看不到这个变化，
-            # 不校验版本就会「改了格式等于没改」）。
-            # force=True 表示「强制重建」：一律重新嵌入，不复用任何旧向量。
-            if (not force
-                    and prev and prev[0] == c.content_hash and prev[1] is not None
-                    and prev[2] == config.EMBED_FORMAT_VERSION
-                    and len(prev[1]) == dim * 4):
-                vectors[c.chunk_id] = np.frombuffer(prev[1], dtype=np.float32)
-            else:
-                to_embed.append(c)
-        if to_embed:
-            embs = embedder.embed_documents([c.embed_text for c in to_embed])
-            for c, e in zip(to_embed, embs):
-                vectors[c.chunk_id] = e
+        # 向量段：**任何一步失败都只降级为"只建关键词索引"，不让整个索引任务
+        # 挂掉**。以前这里是裸的 `embedder.dimension`——模型没下载 / litert-lm
+        # 没装时会直接抛，整批文件一个都索引不了（连关键词都没有）。
+        # 现在：关键词照写，向量留空，等模型就绪后再补建（见 service.backfill_vectors）。
+        dim = None
+        try:
+            dim = int(embedder.dimension)      # 当前模型的向量维度
+            # numpy 延迟导入（同 db.py）：只在向量路径需要
+            np = require_numpy()
+            for c in leaves:
+                prev = state.get(c.chunk_id)
+                # 复用旧向量的前提：内容没变 **且** 维度与当前模型一致
+                # （换过 embedding 模型时维度会变，必须重新嵌入，否则检索时会被静默跳过）
+                # **且** 嵌入文本格式版本一致（embed_text 的构造方式变了，
+                # 比如把文件名加进去 —— content_hash 只算正文，看不到这个变化，
+                # 不校验版本就会「改了格式等于没改」）。
+                # force=True 表示「强制重建」：一律重新嵌入，不复用任何旧向量。
+                if (not force
+                        and prev and prev[0] == c.content_hash and prev[1] is not None
+                        and prev[2] == config.EMBED_FORMAT_VERSION
+                        and len(prev[1]) == dim * 4):
+                    vectors[c.chunk_id] = np.frombuffer(prev[1], dtype=np.float32)
+                else:
+                    to_embed.append(c)
+            if to_embed:
+                embs = embedder.embed_documents([c.embed_text for c in to_embed])
+                for c, e in zip(to_embed, embs):
+                    vectors[c.chunk_id] = e
+        except Exception as e:  # noqa: BLE001 —— 缺模型 / 推理炸了都不该中断索引
+            logger.warning(
+                "向量化失败，本次只建关键词索引（%s）：%s（%s）",
+                path, type(e).__name__, e,
+            )
+            # **别把已有的向量抹掉**：写回时 vector 列会被覆盖，写成 NULL 等于
+            # 把之前算好的向量删了（用户还得再等一次重算）。所以这里把旧向量
+            # 原样带回，让"向量失败"只影响新增的那部分。
+            vectors = {}
+            try:
+                np = require_numpy()
+            except Exception as np_err:  # noqa: BLE001 numpy 都没有 → 只能不动库
+                logger.warning("numpy 不可用，本次不更新该文档的索引：%s", np_err)
+                return "skipped"
+            for c in leaves:
+                prev = state.get(c.chunk_id)
+                if prev and prev[1] is not None:
+                    try:
+                        vectors[c.chunk_id] = np.frombuffer(prev[1], dtype=np.float32)
+                    except Exception:  # noqa: BLE001 坏数据就当它没有
+                        pass
 
     # 父块不参与向量化（vector 保持 NULL）
     dbmod.sync_chunks(conn, doc_id, chunks, vectors)
+
+    # 记下"这个索引现在有哪些通道"与向量元信息 —— 界面上"要不要补建向量索引"
+    # 就是靠这些字段判断的（模型下载完但向量还是空的，得提示用户补建）。
+    kinds = set(dbmod.index_kinds(conn))
+    kinds.add("keyword")
+    if vectors:
+        kinds.add("vector")
+        dbmod.set_meta(conn, "embed_model", config.MODEL_REPO or "")
+        dbmod.set_meta(conn, "embed_dim", str(dim or 0))
+        dbmod.set_meta(conn, "last_vector_at", str(int(time.time())))
+    dbmod.set_meta(conn, "index_kinds", ",".join(sorted(kinds)))
+    conn.commit()
     return "indexed"
 
 

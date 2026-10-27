@@ -7,8 +7,10 @@ doc/observability-design.md。
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Optional, Tuple
 
 from sqlalchemy import select
 
@@ -24,6 +26,62 @@ from ._context import _ctx
 from ._guard import note_if_bug
 
 logger = logging.getLogger(__name__)
+
+
+async def _price_this_call(
+    llm: Any,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: Optional[int],
+) -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """给**这一次**调用定价：返回 ``(成本, 币种, 价格快照 JSON)``。
+
+    为什么在落库时算，而不是展示时再算
+    ----------------------------------
+    成本是「这次调用的属性」，和 token 一样是既成事实。落库之后：
+
+    - 换模型、解绑 agent、删掉模型预设 —— 历史金额**纹丝不动**；
+    - 改价 / 删价段 —— 也不再回头改写已经发生过的账。
+
+    而"展示时现算"会有两个真实的坑：删预设会连带删掉价段，历史调用匹配不到
+    单价 → 金额从有值变成「—」；改价段则会让同一段历史悄悄变成另一个数。
+
+    单价按**调用发生时刻**匹配（错峰时段、星期、生效时间窗都按那一刻算），
+    与 ``observability/pricing.py`` 的取价规则完全一致——那里怎么算，这里就
+    怎么算，两条路径不会给出不同的数。
+
+    取不到有效单价时返回 ``None``（不是 0）：0 意味着"这次调用免费"，而事实是
+    "当时没配价"，两者不能混。
+    """
+    from .pricing import _cost_of, _price_for
+
+    try:
+        at = datetime.now(timezone.utc)
+        price = await _price_for(
+            getattr(llm, "profile_id", None),
+            getattr(llm, "model_name", None),
+            getattr(llm, "provider", None),
+            at=at,
+        )
+        cost = _cost_of(prompt_tokens, completion_tokens, cached_tokens, price)
+        currency = price[3] if price else None
+        snapshot = None
+        if price is not None:
+            snapshot = json.dumps(
+                {
+                    "input": price[0],
+                    "cached": price[1],
+                    "output": price[2],
+                    "currency": price[3],
+                    "priced_at": at.isoformat(),
+                },
+                ensure_ascii=False,
+            )
+        return cost, currency, snapshot
+    except Exception as e:  # noqa: BLE001 —— 定价失败不该影响记账
+        note_if_bug(e, "计算调用成本")
+        logger.debug("计算调用成本失败: %s", e)
+        return None, None, None
 
 
 async def record_llm_call(
@@ -54,6 +112,14 @@ async def record_llm_call(
             "react_step" if ctx.get("step_seq") is not None else kind
         )
 
+        # 先定价（独立连接，别和下面那次写事务嵌套），再和 token 一起落库
+        cost, currency, snapshot = await _price_this_call(
+            llm,
+            prompt_tokens or 0,
+            completion_tokens or 0,
+            cached_tokens,
+        )
+
         factory = get_session_factory()
         async with factory() as db:
             db.add(
@@ -80,6 +146,9 @@ async def record_llm_call(
                     is_stream=is_stream,
                     ok=ok,
                     error=error,
+                    cost=cost,
+                    currency=currency,
+                    price_snapshot=snapshot,
                 )
             )
             await db.commit()

@@ -686,9 +686,15 @@ export default function App() {
           )}
           {route.page === "user-spaces" && (
             <div className="flex h-full animate-fade-up">
-              {/* 左：我的空间（文件树 + 预览） */}
-              <div className="min-w-0 flex-1 overflow-auto px-7 py-6">
-                <UserSpacePage />
+              {/* 左：我的空间（文件树 + 预览）。顶部留白压到最小——
+                  上面那一行只放「收/展目录」「收/展对话」两个按钮。 */}
+              <div className="min-w-0 flex-1 overflow-auto px-7 pb-6 pt-1">
+                <UserSpacePage
+                  /* 对话区不再有自己的顶栏，也不再留一条竖边：
+                     收/展对话的按钮就放在文件展示区的右上角。 */
+                  onToggleChat={() => setChatCollapsed((v) => !v)}
+                  chatCollapsed={chatCollapsed}
+                />
               </div>
               {/* 右：常驻对话面板——可拖宽、可整体收起（仿侧栏「隐藏菜单」）。
                   收起时不卸载，只把宽度置 0 + overflow-hidden 隐藏，从而保留对话现场。 */}
@@ -701,17 +707,6 @@ export default function App() {
                 }
                 style={{ width: chatCollapsed ? 0 : chatWidth }}
               >
-                <div className="flex h-9 shrink-0 items-center border-b border-line-soft px-3 text-[13px] font-medium text-ink-strong">
-                  对话
-                  <button
-                    type="button"
-                    onClick={() => setChatCollapsed(true)}
-                    title="收起对话"
-                    className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
-                  >
-                    <PanelLeft className="h-3.5 w-3.5" />
-                  </button>
-                </div>
                 <div className="min-h-0 flex-1">
                   {coreAgentId ? (
                     <ChatPage agentId={coreAgentId} />
@@ -722,18 +717,6 @@ export default function App() {
                   )}
                 </div>
               </div>
-              {chatCollapsed && (
-                <div className="flex w-9 shrink-0 flex-col items-center border-l border-line-soft py-2">
-                  <button
-                    type="button"
-                    onClick={() => setChatCollapsed(false)}
-                    title="展开对话"
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface hover:text-ink-strong"
-                  >
-                    <MessageSquare className="h-4 w-4" />
-                  </button>
-                </div>
-              )}
             </div>
           )}
           {route.page === "observability" && (

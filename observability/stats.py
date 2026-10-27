@@ -23,7 +23,6 @@ from ..store import (
 )
 from ._context import _resolve_round_anchor
 from ._guard import raise_if_bug, warn_bug_only
-from .pricing import _cost_of, _price_for
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +255,9 @@ async def usage_by_messages(message_ids: List[str]) -> Dict[str, Any]:
                 func.sum(LLMCall.duration_ms),
                 func.count(LLMCall.id),
                 func.count(LLMCall.cached_tokens),
-                func.min(LLMCall.created_at),  # 该轮时间：匹配当时的单价
+                # 成本：调用返回时就按当时单价算好落库，这里只加总
+                func.sum(LLMCall.cost),
+                func.max(LLMCall.currency),
             )
             .where(LLMCall.message_id.in_(message_ids))
             .group_by(
@@ -285,7 +286,8 @@ async def usage_by_messages(message_ids: List[str]) -> Dict[str, Any]:
         dur,
         n,
         n_cached,
-        first_at,
+        s_cost,
+        s_currency,
     ) in rows:
         acc = out.setdefault(mid, _blank_usage())
         prompt = int(p or 0)
@@ -298,11 +300,10 @@ async def usage_by_messages(message_ids: List[str]) -> Dict[str, Any]:
         acc["duration_ms"] += int(dur or 0)
         if int(n_cached or 0) > 0:
             acc["cached_reported"] = True
-        price = await _price_for(pid, model, provider, at=first_at)
-        cost = _cost_of(prompt, completion, int(cached or 0) if n_cached else None, price)
-        if cost is not None:
-            acc["cost"] = (acc["cost"] or 0.0) + cost
-            acc["cost_currency"] = price[3] if price else acc["cost_currency"]
+        # 成本已落库，直接加总（NULL = 当时没配价，不计入）
+        if s_cost is not None:
+            acc["cost"] = (acc["cost"] or 0.0) + float(s_cost)
+            acc["cost_currency"] = s_currency or acc["cost_currency"]
 
     for acc in out.values():
         acc["total_tokens"] = acc["prompt_tokens"] + acc["completion_tokens"]
@@ -315,17 +316,6 @@ async def usage_by_messages(message_ids: List[str]) -> Dict[str, Any]:
             acc["cost"] = round(acc["cost"], 6)
     return out
 
-
-
-def _bucket_start(bucket: str, granularity: str) -> Optional[datetime]:
-    """桶字符串 → 该桶起始时刻（UTC），用于「按桶取当时生效的单价」。"""
-    fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m-%d %H:00"
-    try:
-        return datetime.strptime(bucket, fmt).replace(tzinfo=timezone.utc)
-    except Exception as e:  # noqa: BLE001
-        # 桶字符串来自 DB，格式本就该对；解析不了只当这一桶没有数据。
-        warn_bug_only(e, "解析时间桶")
-        return None
 
 
 async def usage_timeseries(
@@ -379,6 +369,9 @@ async def usage_timeseries(
                         func.sum(LLMCall.duration_ms),
                         func.count(LLMCall.id),
                         func.count(LLMCall.cached_tokens),
+                        # 成本：调用返回时就按当时单价算好落库，这里只加总
+                        func.sum(LLMCall.cost),
+                        func.max(LLMCall.currency),
                     )
                     .where(*conds)
                     .group_by(
@@ -398,16 +391,25 @@ async def usage_timeseries(
     # 二次聚合：同一桶内不同 model 各自计价后合并成一个点
     acc: Dict[str, Dict[str, Any]] = {}
     currency: Optional[str] = None
-    for bucket, model, provider, pid, p, c, cached, dur, n, n_cached in rows:
+    for (
+        bucket,
+        model,
+        provider,
+        pid,
+        p,
+        c,
+        cached,
+        dur,
+        n,
+        n_cached,
+        s_cost,
+        s_currency,
+    ) in rows:
         if not bucket:
             continue
         prompt = int(p or 0)
         completion = int(c or 0)
-        cached_n = int(cached or 0) if n_cached else None
-        price = await _price_for(
-            pid, model, provider, at=_bucket_start(bucket, granularity)
-        )
-        cost = _cost_of(prompt, completion, cached_n, price)
+        cost = s_cost
         item = acc.setdefault(
             bucket,
             {
@@ -426,8 +428,8 @@ async def usage_timeseries(
         item["cached_tokens"] += int(cached or 0)
         item["duration_ms"] += int(dur or 0)
         if cost is not None:
-            item["cost"] = (item["cost"] or 0.0) + cost
-            currency = currency or (price[3] if price else None)
+            item["cost"] = (item["cost"] or 0.0) + float(cost)
+            currency = currency or s_currency
 
     points = [acc[k] for k in sorted(acc)]
     for it in points:

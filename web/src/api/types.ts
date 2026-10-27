@@ -1737,6 +1737,32 @@ export interface SearchModelState {
   warmed?: boolean;
   /** litert-lm 装了没——决定向量通道能不能用（没装只有关键词检索） */
   available: boolean;
+  /** 向量通道不可用的原因（空串 = 可用），界面上直接显示 */
+  unavailable_reason?: string;
+}
+
+/** 向量索引现状（"要不要补建向量索引"就看它）。 */
+export interface SearchVectorState {
+  /** none（还没向量）/ partial（缺一部分）/ full（齐全） */
+  state: "none" | "partial" | "full";
+  /** 叶子块总数 */
+  leaves: number;
+  /** 已有向量的叶子块数 */
+  with_vector: number;
+  /** 还缺向量的叶子块数 */
+  missing: number;
+  /** 写向量时用的模型 */
+  model: string;
+  /** 向量维度 */
+  dim: number;
+  /** 当前索引里有哪些通道：keyword / vector */
+  kinds: string[];
+  /** 最后一次写入向量的时间戳（unix 秒） */
+  last_vector_at: number;
+  /** 模型文件是否已在本地 */
+  model_ready: boolean;
+  /** 需要补建向量索引（模型在，但还有叶子块没向量） */
+  needs_backfill: boolean;
 }
 
 /** 索引统计。 */
@@ -1747,6 +1773,20 @@ export interface SearchStats {
   parents: number;
   keywords: number;
   db_path: string;
+  /** 已有向量的叶子块数 */
+  vectors: number;
+  /** 还缺向量的叶子块数 */
+  vectors_missing: number;
+  /** 向量索引状态：none / partial / full */
+  vector_index: "none" | "partial" | "full";
+  /** 当前索引里有哪些通道 */
+  index_kinds: string[];
+  /** 写向量时用的模型 */
+  embed_model: string;
+  /** 向量维度 */
+  embed_dim: number;
+  /** 最后一次写入向量的时间戳 */
+  last_vector_at: number;
 }
 
 /** 一次索引任务的统计。 */
@@ -1832,6 +1872,8 @@ export interface SearchStatus {
   model: SearchModelState;
   stats: SearchStats;
   index: SearchIndexState;
+  /** 向量索引现状（要不要补建向量索引） */
+  vector: SearchVectorState;
   sync: SearchSyncState;
   config: SearchConfig;
 }

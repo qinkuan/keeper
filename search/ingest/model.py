@@ -16,11 +16,14 @@
 1. HuggingFace 镜像（默认 ``https://hf-mirror.com``）
 2. 魔搭 ModelScope（备源，主源失败时回退）
 """
+import logging
 import threading
 import time
 from pathlib import Path
 
 from .. import config
+
+logger = logging.getLogger(__name__)
 
 # 单进程内共享的下载状态
 _state = {
@@ -120,10 +123,33 @@ def download_model(source: str = "auto") -> None:
 
         if is_model_ready(model_dir):
             _set_state("done", "模型已就绪", source)
+            _notify_ready()
         else:
             _set_state("error", "下载完成但模型文件不完整", source)
     except Exception as e:
         _set_state("error", f"下载失败：{e}", source)
+
+
+def _notify_ready() -> None:
+    """模型刚就绪 → 触发一次索引同步（后台线程）。
+
+    为什么需要这一步：用户常见的顺序是"先建关键词索引、后来才下载模型"。
+    这时索引里的向量还是空的，而文档本身没变——普通增量扫描原来会认为
+    "没变过"直接跳过，于是语义检索一直是关着的（界面上却显示模型已就绪）。
+    现在跳过条件会看"向量齐不齐"，缺向量的文档会被重新处理、顺带补上向量；
+    这里再主动触发一次扫描，用户就不用干等下一个同步周期。
+    """
+    def _work() -> None:
+        try:
+            from .. import sync
+
+            stats = sync.scan_once()
+            if stats:
+                logger.info("模型就绪后已同步索引：%s", stats)
+        except Exception as e:  # noqa: BLE001 补建失败不影响模型本身可用
+            logger.warning("模型就绪后同步索引失败（不影响使用）：%s", e)
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def start_download(source: str = "auto") -> None:

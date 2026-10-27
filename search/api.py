@@ -110,6 +110,9 @@ class IndexRequest(BaseModel):
     force: bool = False
     doc_type: Optional[str] = None
     paths: Optional[List[str]] = None
+    #: 建哪种索引：``auto``（默认——有向量模型就关键词+向量，没有就只关键词）
+    #: / ``keyword``（明确只建关键词，不碰模型）。
+    index_kinds: str = "auto"
 
 
 class QueryRequest(BaseModel):
@@ -191,9 +194,45 @@ def _model_state() -> Dict[str, Any]:
         "gpu_probe": _gpu_probe(),
         # 模型是否已经加载并预热过（启动时后台预热的标）
         "warmed": _warmed(),
-        # 没装 litert-lm 时，向量通道整个不可用（但关键词通道照常）
+        # 没装 litert-lm / 模型没下载时，向量通道整个不可用（但关键词通道照常）
         "available": _shared_embedder() is not None,
+        # 不可用的原因（一句话，界面上直接显示，别让用户猜）
+        "unavailable_reason": _embedder_unavailable_reason(),
     }
+
+
+def _embedder_unavailable_reason() -> str:
+    """向量通道不可用的原因（空串 = 可用）。"""
+    try:
+        from .ingest.embed import unavailable_note
+
+        return unavailable_note()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _vector_state() -> Dict[str, Any]:
+    """向量索引现状：有没有建全、缺多少、要不要补建。
+
+    「模型已就绪但向量还是空的」是**必须让用户知道**的状态——那意味着语义
+    检索实际上是关着的（界面却显示"已就绪"）。这里给它一个可查询的出口。
+    """
+    from .store import db as dbmod
+
+    svc = _service()
+    try:
+        st = dbmod.vector_index_state(svc.connect())
+    except Exception as e:  # noqa: BLE001 索引库还没建时不该整页报错
+        logger.debug("读向量索引状态失败：%s", e)
+        st = {"state": "none", "leaves": 0, "with_vector": 0, "missing": 0,
+              "model": "", "dim": 0, "kinds": [], "last_vector_at": 0.0}
+    finally:
+        svc.close()
+    ready = modelmod.is_model_ready()
+    st["model_ready"] = ready
+    # 需要补建 = 模型在，但还有叶子块没向量
+    st["needs_backfill"] = bool(ready and st.get("missing", 0) > 0)
+    return st
 
 
 def _active_backend() -> str:
@@ -236,7 +275,8 @@ def _index_status() -> Dict[str, Any]:
     return dict(_index_state)
 
 
-def _run_index(roots: Optional[List[str]], force: bool, doc_type: Optional[str]) -> None:
+def _run_index(roots: Optional[List[str]], force: bool, doc_type: Optional[str],
+               index_kinds: str = "auto") -> None:
     """后台建索引。**绝不抛到请求线程**——异常只记进状态里。"""
     from . import sync
     from pathlib import Path
@@ -259,9 +299,10 @@ def _run_index(roots: Optional[List[str]], force: bool, doc_type: Optional[str])
                          stage="pending", pct=0.0)
         # 走 sync 的全局锁：定时扫描、手动建索引、文件监听回调三选一，
         # 拿不到锁就跳过这一轮（不排队——迟到的旧索引没有价值）。
+        want_vector = None if (index_kinds or "auto") == "auto" else False
         stats = sync.try_run_index(
             lambda: svc.index(roots=roots, force=force, doc_type=doc_type,
-                              on_progress=on_progress)
+                              want_vector=want_vector, on_progress=on_progress)
         )
         if stats is None:
             _set_index_state(running=False, finished_at=time.time(),
@@ -341,6 +382,8 @@ def status() -> Dict[str, Any]:
         "model": _model_state(),
         "stats": stats,
         "index": _index_status(),
+        # 向量索引现状：界面据此提示"模型已就绪但向量还没建/需要补建"
+        "vector": _vector_state(),
         "sync": sync.status(),
         "config": {
             "db_path": str(config.DB_PATH),
@@ -381,6 +424,52 @@ def model_download(req: DownloadRequest, background: BackgroundTasks) -> Dict[st
 # ---------------------------------------------------------------- 索引
 
 
+@router.post("/vector/backfill")
+def vector_backfill(background: BackgroundTasks) -> Dict[str, Any]:
+    """**补建向量索引**（只补缺向量的文档，不全量重建）。
+
+    什么时候用：用户先有关键词索引、后来才下载向量模型——这时索引里的向量
+    还是空的，但文档没变，普通增量扫描会跳过它们，永远补不上。这个接口专门
+    把缺向量的文档挑出来补一遍。
+    """
+    from . import sync
+
+    if _index_state.get("running") or sync.index_running():
+        return {"status": "already_running"}
+    background.add_task(_run_backfill)
+    return {"status": "backfill_started"}
+
+
+def _run_backfill() -> None:
+    """后台补建向量索引（进度同样写进 ``_index_state``）。"""
+    from pathlib import Path
+
+    def on_progress(done: int, total: int, path: str, stage: str) -> None:
+        _set_index_state(
+            total=total,
+            current=done,
+            current_path=path,
+            current_name=Path(path).name if path else "",
+            stage=stage,
+            pct=(done / total * 100.0) if total else 0.0,
+        )
+
+    svc = _service()
+    try:
+        _set_index_state(running=True, error="", started_at=time.time(),
+                         finished_at=0.0, stats=None,
+                         total=0, current=0, current_path="", current_name="",
+                         stage="pending", pct=0.0)
+        stats = svc.backfill_vectors(on_progress=on_progress)
+        _set_index_state(running=False, stats=stats, finished_at=time.time(),
+                         stage="done")
+    except Exception as e:  # noqa: BLE001
+        logger.exception("补建向量索引失败")
+        _set_index_state(running=False, error=str(e), finished_at=time.time())
+    finally:
+        svc.close()
+
+
 @router.post("/index")
 def index(req: IndexRequest, background: BackgroundTasks) -> Dict[str, Any]:
     """建索引（**后台跑**）。
@@ -397,7 +486,8 @@ def index(req: IndexRequest, background: BackgroundTasks) -> Dict[str, Any]:
     if req.paths:
         background.add_task(_run_index_paths, req.paths, req.force, req.doc_type)
     else:
-        background.add_task(_run_index, req.roots, req.force, req.doc_type)
+        background.add_task(_run_index, req.roots, req.force, req.doc_type,
+                            req.index_kinds)
     return {"status": "indexing_started"}
 
 
