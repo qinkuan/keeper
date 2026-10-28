@@ -13,12 +13,12 @@
     {
       "name": "installer",
       "summary": "插件安装器：从 GitHub / 直链下载并校验后装入插件库，或卸载、列出已装插件",
-      "command": "${PLUGIN_ROOT}/bin/installer",
+      "command": "${PLUGIN_ROOT}/bin/installer.py",
       "timeout": 300,
       "tools": [
         {
           "name": "preview",
-          "description": "预览一个待安装插件：下载到临时区并返回名字/版本/能力类型/文件数/体积/目标路径，不写入插件库。install 之前必须先 preview，并把结果摆给用户、得到明确确认。支持 GitHub 仓库、直链归档、npm 包（npm:包名）三类来源。",
+          "description": "预览一个待安装插件：下载到临时区并返回名字/版本/能力类型/文件数/体积/目标路径，不写入插件库。install 之前必须先 preview，并把结果摆给用户、得到明确确认。支持 GitHub 仓库、直链归档、npm 包（npm:包名）三类来源。会预告 Windows 兼容处理（给无后缀的 Python 脚本补 .py 后缀并改写清单与文档里的路径）。",
           "parameters": {
             "type": "object",
             "properties": {

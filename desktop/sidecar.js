@@ -187,6 +187,15 @@ function prepareRuntimeBin(kernel) {
       `#!/bin/sh\n# keeper 内置的 Node（Electron 自带的运行时）\nexport ELECTRON_RUN_AS_NODE=1\nexec ${JSON.stringify(process.execPath)} "$@"\n`
     );
   }
+  if (!fs.existsSync(bundledNode)) {
+    // 说清楚退化到什么程度：Electron 自带的 node 能跑 .js/.mjs（内核按后缀或
+    // shebang 选解释器时 KEEPER_NODE 指向的就是它），但**没有 npm/npx**——
+    // 跑 npx 形态的 MCP server 会失败。别让它静悄悄退化。
+    console.warn(
+      '[desktop] 没找到随包带的 node（' + bundledNode + '）：改用 Electron 自带的 node。' +
+        '能跑 .js/.mjs 脚本，但没有 npm/npx。'
+    );
+  }
 
   /* --- 内置 POSIX shell（Windows 用 busybox 的 sh.exe）---------------- */
   let bundledSh = null;

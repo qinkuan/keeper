@@ -267,6 +267,149 @@ def agent_runtime_paths(agent_id: str) -> Dict[str, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Windows：脚本怎么启动
+# ---------------------------------------------------------------------------
+#
+# Windows 没有 shebang。内核起子进程走 CreateProcess，**只认真可执行文件**
+# （PE / .exe / .com），文本脚本一律起不来——报「不是有效的 Win32 应用程序」。
+# mac/Linux 靠 shebang 兜底，所以这类问题在开发态完全看不出来，一到 Windows
+# 打包版就集体炸。
+#
+# 桌面壳把内置运行时通过环境变量指过来：
+#   KEEPER_PYTHON → 内置 python3（打包形态下是内核 exe 的副本，自带全部依赖，
+#                    插件 import openpyxl / docx 才不会缺）
+#   KEEPER_NODE   → 内置 node（Windows 上是随包带的真 node.exe）
+#
+# 所以启动脚本时按「后缀 → shebang」判定它是什么脚本，再挑对应解释器：
+#   .py/.pyw            → python
+#   .js/.mjs/.cjs       → node
+#   无后缀但 shebang 是 python / node → 同上（第三方包最常见的写法）
+#
+# 判定不了就**不插手**：让调用方照旧直接执行，错误信息（"不是有效的 Win32
+# 应用程序"）比我们自己猜错更直白。
+
+#: 后缀 → 脚本类型
+_SCRIPT_EXT_KIND = {
+    ".py": "python",
+    ".pyw": "python",
+    ".js": "node",
+    ".mjs": "node",
+    ".cjs": "node",
+}
+
+#: 找不到内置运行时时的系统兜底（按顺序找 PATH 上的）
+_SYSTEM_INTERPRETERS = {
+    "python": ("python3", "python"),
+    "node": ("node", "nodejs"),
+}
+
+#: shebang 里认得的解释器名（正则，含 python3 / python3.13 / node）
+_SHEBANG_RE = re.compile(r"\b(python[\d.]*|node)\b", re.I)
+
+
+def is_windows() -> bool:
+    """当前是不是 Windows。
+
+    抽成函数而不是到处写 ``os.name == "nt"``：这样测试能用 mock 替换它，
+    在 mac 上把 Windows 分支跑一遍（判定逻辑是平台相关的，但不该只能在
+    Windows 上才验证得了）。
+    """
+    return os.name == "nt"
+
+
+def script_kind(path: str) -> str:
+    """判断这个文件是 python 还是 node 脚本：``""`` / ``"python"`` / ``"node"``。
+
+    判据顺序：后缀 → shebang。shebang 是 mac/Linux 认出无后缀脚本的唯一依据，
+    Windows 上只能靠读文件头——所以**读文件**是这里的关键动作。
+    """
+    p = Path(path)
+    kind = _SCRIPT_EXT_KIND.get(p.suffix.lower())
+    if kind:
+        return kind
+    try:
+        with open(p, "rb") as f:
+            head = f.readline(256)
+    except OSError:
+        return ""
+    if not head.startswith(b"#!"):
+        return ""
+    line = head.decode("utf-8", "replace")
+    m = _SHEBANG_RE.search(line)
+    if not m:
+        return ""
+    token = m.group(1).lower()
+    return "python" if token.startswith("python") else "node"
+
+
+def _bundled_interpreter(kind: str) -> str:
+    """桌面壳注入的内置解释器路径（打包形态下自带全部依赖）。"""
+    env = "KEEPER_PYTHON" if kind == "python" else "KEEPER_NODE"
+    return (os.environ.get(env) or "").strip()
+
+
+def _system_interpreter(kind: str) -> str:
+    """系统里的解释器（内置的没有时兜底）。"""
+    for name in _SYSTEM_INTERPRETERS.get(kind, ()):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+def _interpreter_launcher(interp: str) -> Tuple[str, List[str]]:
+    """把解释器路径变成 (可执行文件, 它自己的前置参数)。
+
+    ``.cmd`` / ``.bat`` 不是可执行文件，CreateProcess 不认，得借 ``cmd.exe /c``
+    跑——app 装在 Program Files（只读）时，内置 python 的副本就是这种 shim。
+    """
+    if interp.lower().endswith((".cmd", ".bat")):
+        return (os.environ.get("COMSPEC") or "cmd.exe"), ["/c", interp]
+    return interp, []
+
+
+def windows_script_interpreter(
+    command: str, *, windows: Optional[bool] = None
+) -> Optional[Tuple[str, List[str]]]:
+    """Windows 上启动一个脚本需要用什么来起。
+
+    返回 ``(可执行文件, 前置参数)``；调用方拼成
+    ``[可执行文件, *前置参数, 脚本路径, *额外参数]``。``None`` 表示**不需要
+    特殊处理**——非 Windows、不是脚本文件、或找不到解释器（这时让调用方照旧
+    直接执行，错误信息更直白）。
+
+    两种情况：
+    - 文本脚本（.py / .js / 无后缀但有 shebang）→ 对应解释器；
+    - ``.cmd`` / ``.bat`` → 它们本身也不是可执行文件，借 ``cmd.exe /c`` 跑。
+
+    ``windows`` 参数只为测试存在：判定逻辑是平台相关的，但不该只能在
+    Windows 上才能验证。
+    """
+    if windows is None:
+        windows = is_windows()
+    if not windows:
+        return None
+    if not command:
+        return None
+    p = Path(command)
+    if not p.is_file():
+        return None
+    # .cmd / .bat：CreateProcess 不认，得借 cmd.exe /c
+    if p.suffix.lower() in (".cmd", ".bat"):
+        return (os.environ.get("COMSPEC") or "cmd.exe"), ["/c"]
+    kind = script_kind(str(p))
+    if not kind:
+        return None
+    for cand in (_bundled_interpreter(kind), _system_interpreter(kind)):
+        if not cand:
+            continue
+        exe, extra = _interpreter_launcher(cand)
+        if exe:
+            return exe, extra
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 下载 / 解包（供 provision 拉取 agent 业务依赖用，非运行时）
 # ---------------------------------------------------------------------------
 def _download_and_extract(

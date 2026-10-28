@@ -109,8 +109,8 @@ Windows 上能跑，但有 4 个真坎（不是「换个平台打个包」）。
 
 | 原来的坎 | 现在的做法 | 代码位置 |
 |---|---|---|
-| 插件 bin 的 `#!/usr/bin/env python3` 在 Windows 上不成立（没有 shebang） | Windows 上遇到 `.py` 插件用解释器启动：`[python3.exe, 脚本]` | `tools/subprocess_tool.py` 的 `build_argv` |
-| `create_subprocess_shell` 在 Windows 上等于 `cmd.exe /c`，管道/`&&`/`$VAR`/glob 语义全变 | **显式选 shell**：POSIX 用 `/bin/sh -c`；Windows 用随包内置的 busybox `sh.exe -c`（真 POSIX）→ 系统的 Git Bash/MSYS2 → 兜底 `cmd.exe /c`。内核把选好的结果用 `KEEPER_SHELL` / `KEEPER_SHELL_FLAG` 告诉插件，插件拿不到就退回老行为 | `framework/shell.py`（新增）+ `plugins/bash/bin/bash_server` |
+| 插件 bin 的 `#!/usr/bin/env python3` 在 Windows 上不成立（没有 shebang） | Windows 上按「后缀 → shebang」选内置解释器：`.py` → `python3.exe`、`.js`/`.mjs` → `node.exe`、无后缀则读文件头认 shebang；`.cmd`/`.bat` 借 `cmd.exe /c`。bin 与 MCP 两条启动路共用同一份判定 | `framework/runtime.py`（新增 `script_kind` / `windows_script_interpreter`）+ `tools/subprocess_tool.py` 的 `build_argv` + `mcp/launcher.py` |
+| `create_subprocess_shell` 在 Windows 上等于 `cmd.exe /c`，管道/`&&`/`$VAR`/glob 语义全变 | **显式选 shell**：POSIX 用 `/bin/sh -c`；Windows 用随包内置的 busybox `sh.exe -c`（真 POSIX）→ 系统的 Git Bash/MSYS2 → 兜底 `cmd.exe /c`。内核把选好的结果用 `KEEPER_SHELL` / `KEEPER_SHELL_FLAG` 告诉插件，插件拿不到就退回老行为 | `framework/shell.py`（新增）+ `plugins/bash/bin/bash_server.py` |
 | 插件绑定用符号链接，Windows 上要开发者模式/管理员 → 普通用户 PermissionError | **junction**（`mklink /J`，同卷即可、不需要特权）；文件用硬链接；跨卷才退回符号链接 | `framework/linkutil.py`（新增）+ `plugin/lib.py`、`chat/api.py`、`zonefilesystem/session_link.py` |
 | 用户机器上没有 python3/node | 与 mac 同构：`python3` 是内核 exe 的**同目录副本**（靠文件名切解释器模式，PyInstaller 的 bootloader 按 exe 所在目录找 `_internal`，所以副本必须挨着内核）；`node` 用 Electron 自带的（Windows 上另外带一份真 node，见下） | `packaging/launcher.py` + `desktop/sidecar.js` |
 

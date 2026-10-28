@@ -5,7 +5,7 @@
 
 ## 组件
 
-- `bin/bash_server`：可执行文件，严格遵循 keeper 的 bin 协议
+- `bin/bash_server.py`：可执行文件，严格遵循 keeper 的 bin 协议
   （stdin 收一行 JSON，stdout **最后一行**回 JSON）。
 - `skills/SKILL.md`：知识组件，告诉 agent「写完必须自运行验证，直到通过」。
 

@@ -7,7 +7,7 @@
     {
       "name": "excel",
       "summary": "Excel(.xlsx) 读取与编辑：读表、写单元格/区域/公式、追加行、增删改工作表",
-      "command": "${PLUGIN_ROOT}/bin/excel",
+      "command": "${PLUGIN_ROOT}/bin/excel.py",
       "timeout": 120,
       "tools": [
         {

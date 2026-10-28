@@ -32,12 +32,19 @@ tools: [bash__run]
 my-plugin/
 ├── keeper-plugin.json     【必需】清单，唯一入口说明书
 ├── mcp/                   【可选】MCP server 可执行文件
-│   └── my-server
+│   └── my-server          （Python 写的要叫 my-server.py，见下）
 ├── bin/                   【可选】脚本 / CLI
-│   └── my-tool
+│   └── my-tool.py         （Python 写的**必须**带 .py 后缀，见下）
 └── skills/                【可选】知识
     └── SKILL.md
 ```
+
+> **`bin/` 与 `mcp/` 里的 Python 脚本建议带 `.py` 后缀**（`my-tool.py` 而不是 `my-tool`）。
+> 原因：Windows 上没有 shebang，内核起子进程只认真可执行文件。内核现在会按
+> 「后缀 → shebang」选解释器（`framework/runtime.py` 的 `script_kind`），所以
+> 无后缀脚本也能起得来；但那是兜底——**显式命名更稳**（不依赖内核能读到文件头，
+> 清单里的路径也与文件一一对应）。node 脚本同理：`.js`/`.mjs` 或 `#!/usr/bin/env node`
+> 都能被认出来。编译好的二进制（`.exe`）不用管后缀。
 
 `skills/` 是**自动发现**的，命名规则（名字必须唯一，否则互相覆盖）：
 
@@ -98,7 +105,7 @@ keeper **原生兼容、零改装**：这样的目录原样丢进插件库即生
     "graph": {
       "summary": "代码库知识图谱：索引仓库、查符号定义与调用关系、评估改动影响面",  // 见下文
       "transport": "stdio",         // 默认 stdio
-      "command": "${PLUGIN_ROOT}/mcp/my-server",
+      "command": "${PLUGIN_ROOT}/mcp/my-server.py",   // Python 写的要带 .py 后缀
       "args": ["--verbose"],
       "env": { "CBM_CACHE_DIR": "${AGENT_SPACE}/my-plugin" },
       "timeout": 300                // 秒
@@ -110,7 +117,7 @@ keeper **原生兼容、零改装**：这样的目录原样丢进插件库即生
     {
       "name": "deploy",             // 可选，仅用于日志标识
       "summary": "部署相关：打包、灰度、回滚",   // 可选，覆盖这一组工具的一句话说明
-      "command": "${PLUGIN_ROOT}/bin/my-tool",
+      "command": "${PLUGIN_ROOT}/bin/my-tool.py",   // Python 写的要带 .py 后缀
       "args": [],                   // 可选，固定附加参数
       "cwd": "${PLUGIN_ROOT}",      // 可选，默认包根
       "timeout": 60,
@@ -171,7 +178,13 @@ keeper **原生兼容、零改装**：这样的目录原样丢进插件库即生
   前面允许打日志（所以取最后一行）。
 - 非零退出码 / 超时 / 输出不是 JSON，都算调用失败。
 
-最小可跑的 bin 脚本（Python）：
+**Windows 上还有一条约束**：脚本文件名建议带 `.py` 后缀（`bin/my-tool.py`）。
+Windows 没有 shebang，内核按「后缀 → shebang」选解释器（`.py` → 内置 python、
+`.js`/`.mjs` → 内置 node、无后缀则读文件头的 shebang），所以无后缀脚本也起得来；
+但显式命名不依赖这些前提，**发布给别人时就把名字写对**。
+（`plugin-installer` 在装第三方包时会自动补这个后缀，那是兜底，不是常态。）
+
+最小可跑的 bin 脚本（Python，文件名 `bin/my-tool.py`）：
 
 ```python
 #!/usr/bin/env python3
@@ -232,6 +245,9 @@ tools: [bash__run]     # 可选：本技能擅长的工具（软标注，不控�
 
 - [ ] `keeper-plugin.json` 在包根、JSON 合法（解析失败整个插件被跳过）
 - [ ] 所有内部路径用 `${PLUGIN_ROOT}`，没有硬编码绝对路径
+- [ ] **`bin/` 与 `mcp/` 里的 Python 脚本都带 `.py` 后缀**（Windows 上没有 shebang；
+      内核虽有 shebang 兜底，显式命名更稳）
+- [ ] 清单里的 `command` 与实际文件名**逐字一致**（含后缀）
 - [ ] `bin` 工具的可执行文件有 `+x` 权限
 - [ ] bin 脚本的 stdout **最后一行**是 JSON，前面没有多余输出
 - [ ] 清单 `parameters` 与脚本实际读取的参数名一致
@@ -250,6 +266,7 @@ tools: [bash__run]     # 可选：本技能擅长的工具（软标注，不控�
 | 工具一个都没出现 | 目录有内容但清单没声明 | 补 `mcpServers` / `bin` |
 | 装载期告警「跳过」 | 可执行文件不存在或没有 `+x` | `chmod +x` |
 | 调用报「不是 JSON」 | 脚本前面打了日志但最后一行不是 JSON | 把 JSON 放最后一行输出 |
+| **Windows 上报「不是有效的 Win32 应用程序」** | Python 脚本没带 `.py` 后缀（mac/Linux 有 shebang 兜底，开发态看不出） | 文件改名成 `xxx.py`，清单的 `command` 同步改 |
 | skill 没生效 | 名字重复被覆盖 / 文件不在 `skills/` 下 | 改目录名或清单显式声明 |
 | 模型调错工具 | SKILL.md 里写的是短名 | 改写成全名 |
 | 装了插件却像没装 | 工具被折叠成一行，模型看不出这组干嘛、不敢调 | 补 `summary`，并在 SKILL.md 说明用途与参数 |

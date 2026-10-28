@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..chat.context import current_workspace
+from ..framework import runtime
 from .base import ProcessorTool
 
 logger = logging.getLogger(__name__)
@@ -82,17 +83,19 @@ def build_argv(command: str, args: Optional[List[str]]) -> List[str]:
     只有它既不是已存在的文件、也不在 PATH 里、却含空格时，才按
     ``"python x.py"`` 这种整串写法拆开——兼顾两种习惯又不误伤带空格的路径。
 
-    **Windows 上没有 shebang**：插件的 ``bin/xxx`` 是 ``#!/usr/bin/env python3``
-    的文本脚本，直接 CreateProcess 会失败（不是 PE 文件）。所以 Windows 上遇到
-    脚本要显式用解释器启动（``[python3.exe, 脚本]``）——解释器取 KEEPER_PYTHON
-    指向的那个（打包形态下是内核自带的副本，带全部依赖）。
+    **Windows 上没有 shebang**：文本脚本（``.py`` / ``.js`` / 无后缀）不能被
+    CreateProcess 直接拉起（报「不是有效的 Win32 应用程序」），必须显式选
+    解释器。判定（后缀 → shebang）与解释器选择（内置运行时优先，缺依赖时
+    兜底系统 PATH）在 ``framework.runtime`` 里——bin 与 MCP 两条启动路共用
+    同一份逻辑。
     """
     extra = [str(a) for a in (args or [])]
     p = Path(command)
-    if os.name == "nt" and p.suffix.lower() in (".py", ".pyw"):
-        interp = (os.environ.get("KEEPER_PYTHON") or "").strip()
-        if interp and os.path.exists(interp):
-            return [interp, str(p), *extra]
+    if runtime.is_windows():
+        interp = runtime.windows_script_interpreter(command)
+        if interp:
+            exe, pre = interp
+            return [exe, *pre, str(p), *extra]
     if p.is_file() or p.is_absolute() or shutil.which(command):
         return [command, *extra]
     parts = shlex.split(command)

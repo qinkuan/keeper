@@ -11,7 +11,7 @@
   "skill": "skills/SKILL.md",
   "bin": [
     {
-      "command": "${PLUGIN_ROOT}/bin/bash_server",
+      "command": "${PLUGIN_ROOT}/bin/bash_server.py",
       "tools": [
         {
           "name": "run",

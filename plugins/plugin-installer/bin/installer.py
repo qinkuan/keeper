@@ -556,6 +556,201 @@ def _fix_exec_bits(pkg):
     return fixed
 
 
+# ── Windows 兼容：给无后缀的 Python 脚本补 .py 后缀 ──────────────────────
+#
+# 为什么需要这一步
+# ----------------
+# Windows 上**没有 shebang**：内核起子进程走 CreateProcess，只认真可执行文件。
+# 内核现在会按「后缀 → shebang」选解释器（framework/runtime.py 的
+# script_kind），所以无后缀脚本其实也起得来——但那依赖内核能读到文件头，
+# 且不同内核版本行为可能不同。把包**规范化**成带后缀，是让包在任何环境下
+# 都不依赖这些前提的稳妥做法（也让清单里的路径与文件一一对应）。
+#
+# 只动**清单引用到的**命令
+# ----------------------
+# 不扫目录无脑改名：包里没被清单引用的文件，用户可能自己要用，也可能被插件内部
+# 脚本互相调用——改名会打断那些引用。只处理清单里 bin[].command 与
+# mcpServers[].command 指向的文件。
+#
+# 同步改掉包内文档里的路径引用
+# --------------------------
+# 模型是照着 SKILL.md / README 里写的路径去找文件的。文档还写着 bin/xxx 而文件
+# 已经叫 bin/xxx.py，模型就会扑空——所以文档里的引用一并改写。
+#
+# node 脚本不用改
+# --------------
+# 内核认 .js / .mjs / .cjs，也会读 shebang 里的 node——所以 node 脚本原样
+# 保留，只在结果里提一句「这个包需要 node 运行时」。
+
+_SHEBANG_PY = re.compile(rb"^#!\s*/usr/bin/env\s+python[\d.]*\b", re.I)
+_SHEBANG_NODE = re.compile(rb"^#!\s*/usr/bin/env\s+node\b", re.I)
+
+# Windows 上内核能直接执行的（真 PE / 批处理），不用动
+_WIN_EXEC_EXTS = {".exe", ".com", ".cmd", ".bat"}
+
+
+def _script_kind(path):
+    """看文件头判断它是不是脚本：'python' / 'node' / ''（二进制或不是脚本）。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.readline(200)
+    except OSError:
+        return ""
+    if _SHEBANG_PY.match(head):
+        return "python"
+    if _SHEBANG_NODE.match(head):
+        return "node"
+    return ""
+
+
+def _rel_command_path(command):
+    """从 command 字符串里取出包内相对路径。
+
+    清单里通常写 ``${PLUGIN_ROOT}/bin/xxx``；也有的把参数直接跟在后面
+    （``${PLUGIN_ROOT}/bin/xxx --flag``）。返回 (相对路径, 余下的参数部分)。
+    """
+    s = (command or "").strip()
+    if not s:
+        return "", ""
+    s = s.replace("${PLUGIN_ROOT}/", "").replace("${PLUGIN_ROOT}", "")
+    parts = s.split(None, 1)
+    rel = parts[0] if parts else ""
+    rest = (" " + parts[1]) if len(parts) > 1 else ""
+    return rel, rest
+
+
+def _manifest_commands(manifest):
+    """清单里所有会被当命令执行的条目：bin[].command 与 mcpServers[].command。"""
+    out = []
+    for b in manifest.get("bin") or []:
+        if isinstance(b, dict) and b.get("command"):
+            out.append(("bin", b))
+    for name, m in (manifest.get("mcpServers") or {}).items():
+        if isinstance(m, dict) and m.get("command"):
+            out.append(("mcp", m))
+    return out
+
+
+def _scan_script_commands(pkg):
+    """扫清单里引用的命令，返回 [(相对路径, 'python'/'node')]。
+
+    只认**无已知可执行后缀**且文件头有 shebang 的——那是脚本；
+    有 .exe / .cmd 的是真可执行文件，.py 的本来就对，都不动。
+    """
+    pkg = Path(pkg)
+    manifest, err = read_manifest(pkg)
+    if err or not manifest:
+        return []
+    found = []
+    seen = set()
+    for _kind, entry in _manifest_commands(manifest):
+        rel, _rest = _rel_command_path(entry.get("command"))
+        if not rel or rel in seen:
+            continue
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        target = pkg / rel
+        if not target.is_file():
+            continue
+        ext = target.suffix.lower()
+        if ext in _WIN_EXEC_EXTS or ext in (".py", ".pyw"):
+            continue
+        k = _script_kind(target)
+        if k:
+            seen.add(rel)
+            found.append((rel, k))
+    return found
+
+
+def _write_manifest(pkg, manifest):
+    """按包的格式把清单写回去（保持 2 空格缩进的风格）。"""
+    fmt = package_format(pkg)
+    if not fmt:
+        return
+    path = Path(pkg) / (MARKER_KEEPER if fmt == "keeper" else MARKER_CLAUDE)
+    try:
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as e:  # noqa: BLE001
+        log("清单回写失败 %s：%s" % (path, e))
+
+
+def _rewrite_doc_refs(pkg, rename_map):
+    """把包内文档（*.md）里提到的旧路径改成新路径。
+
+    用占位符做两段替换：直接 replace 会把 "bin/xxx" 在 "bin/xxx.py" 里再匹配一次，
+    变成 "bin/xxx.py.py"。正则则额外守住边界——前面不能是单词字符（避免 "mybin/xxx"
+    被误伤），后面不能紧跟 ".py" 或单词字符。
+    """
+    changed = []
+    for md in sorted(Path(pkg).rglob("*.md")):
+        if not md.is_file():
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        new = text
+        for i, old in enumerate(rename_map):
+            pattern = r"(?<![\w.-])" + re.escape(old) + r"(?!\.py\b)(?!\w)"
+            new = re.sub(pattern, "\x00%d\x00" % i, new)
+        for i, new_rel in enumerate(rename_map.values()):
+            new = new.replace("\x00%d\x00" % i, new_rel)
+        if new != text:
+            try:
+                md.write_text(new, encoding="utf-8")
+                changed.append(str(md.relative_to(pkg)))
+            except OSError as e:  # noqa: BLE001
+                log("文档改写失败 %s：%s" % (md, e))
+    return changed
+
+
+def _compat_windows_scripts(pkg):
+    """给清单里引用的无后缀 Python 脚本补 .py 后缀，并同步改写清单与文档。
+
+    返回 (renamed: [(旧相对路径, 新相对路径)], node_scripts: [相对路径])。
+    """
+    pkg = Path(pkg)
+    manifest, err = read_manifest(pkg)
+    if err or not manifest:
+        return [], []
+    renamed = []
+    node_scripts = []
+    for _kind, entry in _manifest_commands(manifest):
+        rel, rest = _rel_command_path(entry.get("command"))
+        if not rel or rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        target = pkg / rel
+        if not target.is_file():
+            continue
+        ext = target.suffix.lower()
+        if ext in _WIN_EXEC_EXTS or ext in (".py", ".pyw"):
+            continue
+        k = _script_kind(target)
+        if k == "node":
+            # 内核认 .js/.mjs，也会读 node 的 shebang → 不用改名，
+            # 只记下来提醒「这个包要 node 运行时」。
+            node_scripts.append(rel)
+            continue
+        if k != "python":
+            continue
+        new_rel = rel + ".py"
+        if (pkg / new_rel).exists():
+            continue
+        try:
+            target.rename(pkg / new_rel)
+        except OSError as e:  # noqa: BLE001
+            log("改名失败 %s：%s" % (rel, e))
+            continue
+        entry["command"] = "${PLUGIN_ROOT}/" + new_rel + rest
+        renamed.append((rel, new_rel))
+    if renamed:
+        _write_manifest(pkg, manifest)
+        _rewrite_doc_refs(pkg, {old: new for old, new in renamed})
+    return renamed, node_scripts
+
+
 # ── 工具实现 ──────────────────────────────────────────────────────────────
 
 
@@ -582,6 +777,20 @@ def tool_preview(args, ctx):
             lines.append(
                 "注意：这是散装技能包（没有 keeper 清单），安装时会自动生成一份 "
                 "keeper-plugin.json 壳，包内文件原样不动"
+            )
+        # Windows 兼容预告：装的时候会改包内文件（补 .py 后缀 + 改清单/文档），
+        # 得让用户在 preview 阶段就知道，别装完才发现被动过。
+        scripts = _scan_script_commands(pkg)
+        py_scripts = [r for r, k in scripts if k == "python"]
+        node_scripts = [r for r, k in scripts if k == "node"]
+        if py_scripts:
+            lines.append(
+                "Windows 兼容：安装时会给这些无后缀 Python 脚本补 .py 后缀并改写"
+                "清单与文档里的路径（%s）" % "、".join(py_scripts)
+            )
+        if node_scripts:
+            lines.append(
+                "注意：%s 是 node 脚本，这个包需要 node 运行时" % "、".join(node_scripts)
             )
         lines.append(
             "目标：%s（%s）"
@@ -631,6 +840,7 @@ def tool_install(args, ctx):
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     fixed = _fix_exec_bits(target)
+    renamed, node_scripts = _compat_windows_scripts(target)
     lines = [
         "已安装：%s%s（%s 格式，能力：%s）"
         % (
@@ -648,6 +858,18 @@ def tool_install(args, ctx):
         )
     if fixed:
         lines.append("已补可执行位：%s" % "、".join(fixed))
+    if renamed:
+        lines.append(
+            "已做 Windows 兼容处理：给无后缀的 Python 脚本补了 .py 后缀（%s），"
+            "并同步改了清单与包内文档里的路径——Windows 上没有 shebang，"
+            "内核靠后缀判断要用解释器启动脚本。"
+            % "、".join("%s → %s" % (a, b) for a, b in renamed)
+        )
+    if node_scripts:
+        lines.append(
+            "注意：%s 是 node 脚本，这个包需要 node 运行时（桌面版自带；"
+            "裸内核部署要确保 PATH 上有 node）" % "、".join(node_scripts)
+        )
     lines.append(
         "还没生效：工具是装配期读取的，请用户在「智能体 → 插件」勾选绑定，"
         "实例重建后工具才出现（可用 list 核验库内现状）。"

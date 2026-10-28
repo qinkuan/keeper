@@ -145,3 +145,34 @@ try {
 Write-Host ""
 Write-Host "==> 完成" -ForegroundColor Green
 Get-ChildItem (Join-Path $Root "desktop\release\*.exe") | ForEach-Object { Write-Host "    $($_.Name)  $([math]::Round($_.Length/1MB))MB" }
+
+# ── 4) 产物自检：内置运行时真的进包了吗 ──────────────────────────────────
+#
+# 为什么要有这一步：node 与 busybox 是**下载**来的（nodejs.org / GitHub），
+# 下载失败只写一条 warning、不会中断构建 → 产物 quietly 缺文件，等用户在别的
+# 机器上跑才发现「npm/npx 不可用」「命令语法不对」，那时已经晚了。
+# 所以打包后再核一遍产物。
+Write-Step "[4/4] 产物自检（内置运行时）"
+$Unpacked = Join-Path $Root "desktop\release\win-unpacked"
+if (-not (Test-Path $Unpacked)) {
+  Write-Warning "找不到 win-unpacked 目录，跳过自检（若产物已清理可忽略）"
+} else {
+  $NodeExe = Join-Path $Unpacked "resources\runtime\node\node.exe"
+  $ShExe = Join-Path $Unpacked "resources\runtime\sh\sh.exe"
+  $KernelExe = Join-Path $Unpacked "resources\kernel\keeper-kernel.exe"
+  if (Test-Path $NodeExe) {
+    Write-Host "    OK 内置 node：resources\runtime\node\node.exe" -ForegroundColor Green
+  } else {
+    Write-Warning "产物里没有内置 node（resources\runtime\node\node.exe）。node 脚本会退化成用 Electron 自带的 node（能跑 .js/.mjs，但没有 npm/npx）。多半是构建时 nodejs.org 下载失败。"
+  }
+  if (Test-Path $ShExe) {
+    Write-Host "    OK 内置 POSIX shell：resources\runtime\sh\sh.exe" -ForegroundColor Green
+  } else {
+    Write-Warning "产物里没有 busybox sh.exe：命令会退回 Git Bash，然后 cmd.exe（管道/&&/glob 语义与 POSIX 不同）"
+  }
+  if (Test-Path $KernelExe) {
+    Write-Host "    OK 内核：resources\kernel\keeper-kernel.exe" -ForegroundColor Green
+  } else {
+    Write-Warning "产物里没有内核可执行文件（resources\kernel\keeper-kernel.exe）"
+  }
+}

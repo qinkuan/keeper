@@ -1,6 +1,6 @@
 """pypdf 噪音降噪自测。
 
-验证：内核侧（``keeper.log.noise``）与插件侧（``plugins/pdf/bin/pdf``）都能把
+验证：内核侧（``keeper.log.noise``）与插件侧（``plugins/pdf/bin/pdf.py``）都能把
 "``Ignoring wrong pointing object``" 这类噪音压掉，而真正的 ERROR 不受影响。
 
 跑法：``python tests/test_log_noise.py``
@@ -70,8 +70,8 @@ def test_kernel_side() -> None:
 
 
 def test_plugin_side() -> None:
-    print("2) 插件侧：plugins/pdf/bin/pdf")
-    plugin = ROOT / "plugins" / "pdf" / "bin" / "pdf"
+    print("2) 插件侧：plugins/pdf/bin/pdf.py")
+    plugin = ROOT / "plugins" / "pdf" / "bin" / "pdf.py"
     src = plugin.read_text(encoding="utf-8")
     check(
         'logging.getLogger("pypdf").setLevel(logging.ERROR)' in src,
@@ -86,8 +86,8 @@ def test_plugin_side() -> None:
         "import importlib.util, logging, sys",
         "from importlib.machinery import SourceFileLoader",
         "logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(name)s | %(message)s')",
-        # 插件脚本没有扩展名，spec_from_file_location 会返回 None loader，
-        # 得显式给 SourceFileLoader（否则脚本根本没被加载，测试会假通过）。
+        # 插件脚本是 .py（Windows 上内核靠后缀识别"这是脚本，要用解释器跑"），
+        # 但用 SourceFileLoader 显式加载更稳（不依赖 sys.path 与工作目录）。
         f"loader = SourceFileLoader('pdfplug', {str(plugin)!r})",
         "spec = importlib.util.spec_from_loader('pdfplug', loader)",
         "m = importlib.util.module_from_spec(spec)",

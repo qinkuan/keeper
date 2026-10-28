@@ -71,6 +71,10 @@ numpy>=1.24
 # ---- Office AI 编辑工具（tools/builtin/office.py：excel_edit / pdf_edit）----
 openpyxl>=3.1          # Excel(.xlsx) 读写
 pypdf>=4.0             # PDF 合并/拆分/旋转/删页/抽文字（纯 Python，无平台二进制）
+python-docx>=1.2       # Word(.docx) 读写（plugins/word：生成报告/合同/方案 + 回读）
+                      # 依赖 lxml（C 扩展）：打包时必须在 packaging/keeper-kernel.spec
+                      # 里收 lxml 的原生库 + python-docx 的默认模板，否则打包版里
+                      # 插件 import docx 直接失败（开发态却正常）。
 
 # ---- PDF 页面渲染（pdfpage/render.py）：把某一页整页渲染成 PNG 给 agent 看----
 # pypdfium2 = PDFium（Google）的 Python 绑定。

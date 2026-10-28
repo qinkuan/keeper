@@ -7,7 +7,7 @@
     {
       "name": "pdf",
       "summary": "PDF 读取与编辑：抽文字、合并、拆分取页、旋转、删页",
-      "command": "${PLUGIN_ROOT}/bin/pdf",
+      "command": "${PLUGIN_ROOT}/bin/pdf.py",
       "timeout": 120,
       "tools": [
         {

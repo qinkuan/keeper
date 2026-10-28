@@ -129,6 +129,65 @@ try:
 except Exception as e:  # noqa: BLE001 没装 litert-lm 不该让构建失败
     print(f"[spec] litert-lm not available, skipping vector-search runtime: {e}")
 
+# ---- 插件依赖（excel / pdf / word）：子进程的 import 静态分析看不见 ----
+# 插件 bin 是**另起的子进程**（keeper 用解释器拉起），PyInstaller 的 Analysis
+# 只看得到内核自己的 import，看不到插件脚本里的 `import openpyxl`。
+# 于是这些依赖必须**点名**收进 bundle，否则打包版里插件一调用就
+# "ModuleNotFoundError"（开发态却完全正常——最容易被漏掉的那种坑）。
+try:
+    import os as _os
+
+    from PyInstaller.utils.hooks import collect_submodules as _collect_sub
+
+    # 纯 Python 的依赖：点名即可
+    hiddenimports += [
+        # excel 插件：读写 .xlsx
+        "openpyxl",
+        # pdf 插件：抽文字 / 合并 / 拆分（纯 Python，无平台二进制）
+        "pypdf",
+        # word 插件：生成与回读 .docx（子包一并收：dml / drawing / opc / oxml …）
+        "docx",
+        "lxml.etree",
+    ]
+    hiddenimports += _collect_sub("docx")
+    print("[spec] plugin deps collected (openpyxl / pypdf / docx / lxml)")
+except Exception as e:  # noqa: BLE001 缺依赖只该让对应插件不可用
+    print(f"[spec] plugin deps not fully available: {e}")
+
+# lxml 的 C 扩展是**子模块**里的 .so / .pyd / .dylib（lxml 包本身的 __init__
+# 是纯 Python），所以 collect_dynamic_libs("lxml") 收不到——实测返回空。
+# 这里显式扫目录补齐：少了它，冻结产物里 import lxml.etree 直接失败，
+# 而 word 插件正是靠 lxml 解析 OOXML。
+try:
+    import glob as _glob
+    import os as _os2
+
+    import lxml as _lxml
+
+    _ldir = _os2.path.dirname(_lxml.__file__)
+    _n = 0
+    for _pat in ("*.so", "*.pyd", "*.dylib"):
+        for _p in _glob.glob(_os2.path.join(_ldir, _pat)):
+            binaries.append((_p, "lxml"))
+            _n += 1
+    print(f"[spec] lxml native modules collected: {_n}")
+except Exception as e:  # noqa: BLE001
+    print(f"[spec] lxml native modules not collected: {e}")
+
+# python-docx 的**默认模板**是数据文件（docx/templates/default.docx）：
+# 少了它，Document() 会抛 "Package not found"。这类资源必须显式收。
+try:
+    import os as _os3
+
+    import docx as _docx
+
+    _tpl = _os3.path.join(_os3.path.dirname(_docx.__file__), "templates")
+    if _os3.path.isdir(_tpl):
+        datas.append((_tpl, "docx/templates"))
+        print("[spec] python-docx default template collected")
+except Exception as e:  # noqa: BLE001
+    print(f"[spec] python-docx template not collected: {e}")
+
 a = Analysis(
     [str(ROOT / "packaging" / "launcher.py")],
     pathex=[str(PROJECT_ROOT)],

@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from ..framework import runtime
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,15 @@ def connection_config(name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     # StdioServerParameters。
     if cfg.get("cwd"):
         out["cwd"] = cfg["cwd"]
+    # Windows 上没有 shebang：文本脚本型的 server（.py / .js / 无后缀）不能被
+    # CreateProcess 直接拉起，得显式选解释器（框架 runtime 里的同一份判定）。
+    # 只改 stdio 型——http 型根本不拉进程。
+    if runtime.is_windows() and kind == "stdio" and cfg.get("command"):
+        interp = runtime.windows_script_interpreter(str(cfg["command"]))
+        if interp:
+            exe, pre = interp
+            out["command"] = exe
+            out["args"] = [*pre, str(cfg["command"]), *(cfg.get("args") or [])]
     return out
 
 

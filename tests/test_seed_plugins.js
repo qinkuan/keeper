@@ -59,39 +59,39 @@ function main() {
   const dest = path.join(tmp, 'dest');
 
   console.log('1) 首次安装');
-  write(path.join(src, 'pdf', 'bin', 'pdf'), 'v1');
+  write(path.join(src, 'pdf', 'bin', 'pdf.py'), 'v1');
   write(path.join(src, 'pdf', 'keeper-plugin.json'), '{}');
-  write(path.join(src, 'bash', 'bin', 'bash_server'), 'v1');
+  write(path.join(src, 'bash', 'bin', 'bash_server.py'), 'v1');
   let r = installBuiltinPlugins(src, dest);
   check(r.installed === 3, '3 个文件都装上了');
-  check(fs.existsSync(path.join(dest, 'pdf', 'bin', 'pdf')), 'pdf 插件在用户目录里');
+  check(fs.existsSync(path.join(dest, 'pdf', 'bin', 'pdf.py')), 'pdf 插件在用户目录里');
   check(fs.existsSync(path.join(dest, '.builtin-manifest.json')), '写了哈希清单');
   check(manifestOf(dest).version === 2, '清单是 v2 格式');
   check(
-    manifestOf(dest).files['pdf/bin/pdf'].shipped ===
-      manifestOf(dest).files['pdf/bin/pdf'].local,
+    manifestOf(dest).files['pdf/bin/pdf.py'].shipped ===
+      manifestOf(dest).files['pdf/bin/pdf.py'].local,
     'v2 清单里 shipped / local 都记了'
   );
 
   console.log('2) 升级：用户没改过 → 换成新版');
-  write(path.join(src, 'pdf', 'bin', 'pdf'), 'v2');
-  write(path.join(src, 'bash', 'bin', 'bash_server'), 'v2');
+  write(path.join(src, 'pdf', 'bin', 'pdf.py'), 'v2');
+  write(path.join(src, 'bash', 'bin', 'bash_server.py'), 'v2');
   r = installBuiltinPlugins(src, dest);
   check(r.updated === 2, '2 个文件升级了');
-  check(read(path.join(dest, 'pdf', 'bin', 'pdf')) === 'v2', 'pdf 插件内容是新版');
+  check(read(path.join(dest, 'pdf', 'bin', 'pdf.py')) === 'v2', 'pdf 插件内容是新版');
 
   console.log('3) 升级：用户改过 → 保留（而且下一轮也不能被冲掉）');
-  write(path.join(dest, 'pdf', 'bin', 'pdf'), '用户自己改的');
-  write(path.join(src, 'pdf', 'bin', 'pdf'), 'v3');
+  write(path.join(dest, 'pdf', 'bin', 'pdf.py'), '用户自己改的');
+  write(path.join(src, 'pdf', 'bin', 'pdf.py'), 'v3');
   r = installBuiltinPlugins(src, dest);
-  check(read(path.join(dest, 'pdf', 'bin', 'pdf')) === '用户自己改的', '用户改过的文件没被动');
+  check(read(path.join(dest, 'pdf', 'bin', 'pdf.py')) === '用户自己改的', '用户改过的文件没被动');
   check(r.kept === 1, '计入"保留用户改动"');
   // 再升一轮：这是以前记账方式漏掉的地方——shipped 被写成新版哈希之后，
   // 用户改动会被当成"过期内容"冲掉。
-  write(path.join(src, 'pdf', 'bin', 'pdf'), 'v4');
+  write(path.join(src, 'pdf', 'bin', 'pdf.py'), 'v4');
   r = installBuiltinPlugins(src, dest);
   check(
-    read(path.join(dest, 'pdf', 'bin', 'pdf')) === '用户自己改的',
+    read(path.join(dest, 'pdf', 'bin', 'pdf.py')) === '用户自己改的',
     '再升一轮，用户改过的文件仍然没被动'
   );
 
@@ -110,37 +110,37 @@ function main() {
 
   console.log('6) 没有清单（老版本装的）→ 备份后覆盖成新版');
   const dest2 = path.join(tmp, 'dest2');
-  write(path.join(dest2, 'pdf', 'bin', 'pdf'), '老版本装的老内容');
+  write(path.join(dest2, 'pdf', 'bin', 'pdf.py'), '老版本装的老内容');
   r = installBuiltinPlugins(src, dest2);
   check(
-    read(path.join(dest2, 'pdf', 'bin', 'pdf')) === 'v4',
+    read(path.join(dest2, 'pdf', 'bin', 'pdf.py')) === 'v4',
     '来源不明的旧文件被覆盖成新版（升级不能被卡死）'
   );
   check(
-    read(path.join(dest2, '.user-backup', 'pdf', 'bin', 'pdf')) === '老版本装的老内容',
+    read(path.join(dest2, '.user-backup', 'pdf', 'bin', 'pdf.py')) === '老版本装的老内容',
     '覆盖前那份留了备份'
   );
   check(r.backedUp === 1, '计入"备份旧文件"');
 
   console.log('7) 执行位：bin/* 必须可执行');
   const dest3 = path.join(tmp, 'dest3');
-  write(path.join(src, 'bash', 'bin', 'bash_server'), 'v5');
-  fs.chmodSync(path.join(src, 'bash', 'bin', 'bash_server'), 0o755);
+  write(path.join(src, 'bash', 'bin', 'bash_server.py'), 'v5');
+  fs.chmodSync(path.join(src, 'bash', 'bin', 'bash_server.py'), 0o755);
   installBuiltinPlugins(src, dest3);
-  const mode = fs.statSync(path.join(dest3, 'bash', 'bin', 'bash_server')).mode & 0o777;
+  const mode = fs.statSync(path.join(dest3, 'bash', 'bin', 'bash_server.py')).mode & 0o777;
   check((mode & 0o111) !== 0, '装过去的 bin 保留了执行位');
 
   console.log('8) 旧版清单（v1）迁移');
   // 8a) v1 记的正好是磁盘上这一份 → 用户没动过 → 直接升级，不备份
   const dest4 = path.join(tmp, 'dest4');
-  write(path.join(dest4, 'pdf', 'bin', 'pdf'), 'v1');
+  write(path.join(dest4, 'pdf', 'bin', 'pdf.py'), 'v1');
   write(
     path.join(dest4, '.builtin-manifest.json'),
-    JSON.stringify({ 'pdf/bin/pdf': hashOf(path.join(dest4, 'pdf', 'bin', 'pdf')) })
+    JSON.stringify({ 'pdf/bin/pdf.py': hashOf(path.join(dest4, 'pdf', 'bin', 'pdf.py')) })
   );
-  write(path.join(src, 'pdf', 'bin', 'pdf'), 'v9');
+  write(path.join(src, 'pdf', 'bin', 'pdf.py'), 'v9');
   r = installBuiltinPlugins(src, dest4);
-  check(read(path.join(dest4, 'pdf', 'bin', 'pdf')) === 'v9', 'v1 清单对得上 → 升级了');
+  check(read(path.join(dest4, 'pdf', 'bin', 'pdf.py')) === 'v9', 'v1 清单对得上 → 升级了');
   check(
     !fs.existsSync(path.join(dest4, '.user-backup')),
     'v1 清单对得上 → 不用备份（那份是内置旧版，不是用户写的）'
@@ -149,15 +149,15 @@ function main() {
   // 8b) v1 记的跟磁盘上那份对不上（老版本的记账 bug：它记的是仓库新版哈希）
   //     → 当成来源不明 → 备份 + 覆盖，升级不被卡死
   const dest5 = path.join(tmp, 'dest5');
-  write(path.join(dest5, 'pdf', 'bin', 'pdf'), '老版本装的老内容');
+  write(path.join(dest5, 'pdf', 'bin', 'pdf.py'), '老版本装的老内容');
   write(
     path.join(dest5, '.builtin-manifest.json'),
-    JSON.stringify({ 'pdf/bin/pdf': hashOf(path.join(src, 'pdf', 'bin', 'pdf')) })
+    JSON.stringify({ 'pdf/bin/pdf.py': hashOf(path.join(src, 'pdf', 'bin', 'pdf.py')) })
   );
   r = installBuiltinPlugins(src, dest5);
-  check(read(path.join(dest5, 'pdf', 'bin', 'pdf')) === 'v9', 'v1 清单对不上 → 也升级了');
+  check(read(path.join(dest5, 'pdf', 'bin', 'pdf.py')) === 'v9', 'v1 清单对不上 → 也升级了');
   check(
-    read(path.join(dest5, '.user-backup', 'pdf', 'bin', 'pdf')) === '老版本装的老内容',
+    read(path.join(dest5, '.user-backup', 'pdf', 'bin', 'pdf.py')) === '老版本装的老内容',
     '覆盖前那份留了备份'
   );
 
