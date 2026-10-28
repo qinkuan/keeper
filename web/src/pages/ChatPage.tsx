@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { DragEvent } from "react";
 
 import {
   ArrowUp,
+  Folder,
   List,
   ListChecks,
   Loader2,
@@ -40,7 +41,14 @@ import {
   type MentionConfig,
   type MentionItem,
 } from "../lib/mention";
-import { ADD_QUOTE_EVENT, type ChatQuote } from "../lib/quote";
+import {
+  ADD_QUOTE_EVENT,
+  type ChatQuote,
+  getPendingFileRefs,
+  subscribePendingFileRefs,
+  removePendingFileRef,
+  clearPendingFileRefs,
+} from "../lib/quote";
 import type { UsageSummary } from "../api/types";
 
 
@@ -499,6 +507,16 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     window.addEventListener(ADD_QUOTE_EVENT, onAdd);
     return () => window.removeEventListener(ADD_QUOTE_EVENT, onAdd);
   }, []);
+  // 「我的空间」文件树右键「添加到对话」进来的文件引用：只登记绝对路径，
+  // 内容由 agent 按路径自己读（文件可能很大，甚至是文件夹，前端不替它读）。
+  //
+  // 存在**模块级暂存**里而不是本组件的 state：右侧 dock 的对话面板可能此刻
+  // 还没挂载，事件式投递会把引用丢掉；暂存后谁挂载谁立刻看到（见 lib/quote）。
+  const pendingRefs = useSyncExternalStore(
+    subscribePendingFileRefs,
+    getPendingFileRefs,
+    getPendingFileRefs
+  );
   /** 附件上传中：按钮转圈，并挡住重复点击（同一次会话只让一个在上传） */
   const [uploading, setUploading] = useState(false);
   /** 整块聊天面板是否正处于「拖文件悬停」态（用于显示高亮遮罩） */
@@ -1413,19 +1431,47 @@ export default function ChatPage({ agentId }: { agentId: string }) {
           .map((qq) => `文件的绝对路径: ${qq.path}\n内容: ${qq.text}`)
           .join("\n\n")
       : "";
-    const sendText = (q + (q ? "\n\n" : "") + quoteBlock).trim();
+    // 文件引用（右键「添加到对话」）：同样只登记绝对路径，内容让 agent 自己去读
+    const refBlock = pendingRefs.length
+      ? pendingRefs
+          .map((r) => `${r.isDir ? "文件夹" : "文件"}的绝对路径: ${r.path}`)
+          .join("\n")
+      : "";
+    const sendText = (
+      q +
+      (q ? "\n\n" : "") +
+      [quoteBlock, refBlock].filter(Boolean).join("\n\n")
+    ).trim();
     // 气泡展示用：把 @标签 连同它解析出的内容（如绝对路径）一起存下来，供 ChatBubble 渲染成 chip
     const mentionRanges = computeMentions(rawInput);
     const userSpacePath = mySpacePath || "";
     const sessionPath = mentionCfg.root + (activeSessionId || "");
-    const mentions = mentionRanges.map((r) => ({
-      label: r.item.label,
-      resolved: resolveSnippet(r.item.snippet, { sessionPath, userSpacePath }),
+    // 文件引用在气泡里也渲染成 chip：显示文本追加 `@文件名` 记号 + 一条
+    // {label, resolved} 元数据，复用 @ 快捷项的展示链路（后端原样存，刷新后仍在）。
+    const refMentions = pendingRefs.map((r) => ({
+      label: r.name,
+      resolved: r.path,
     }));
-    const mentionRaw = mentionRanges.length ? rawInput : undefined;
-    // 仅发附件（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
-    // 这种消息 q 为空，但 pendingFiles 非空，应当照常发出。
-    if ((!q && pendingFiles.length === 0 && pendingQuotes.length === 0) || sending) return;
+    const refTokens = pendingRefs.map((r) => `@${r.name}`).join(" ");
+    const mentions = [
+      ...mentionRanges.map((r) => ({
+        label: r.item.label,
+        resolved: resolveSnippet(r.item.snippet, { sessionPath, userSpacePath }),
+      })),
+      ...refMentions,
+    ];
+    const displayRaw = [refTokens, rawInput.trim()].filter(Boolean).join("\n");
+    const mentionRaw = mentions.length ? displayRaw : undefined;
+    // 仅发附件 / 引用（不打字）时也允许：去掉了输入框里的「【文件：name】」占位后，
+    // 这种消息 q 为空，但 pendingFiles / pendingQuotes / pendingRefs 非空，应当照常发出。
+    if (
+      (!q &&
+        pendingFiles.length === 0 &&
+        pendingQuotes.length === 0 &&
+        pendingRefs.length === 0) ||
+      sending
+    )
+      return;
 
     /**
      * 这一轮要发到**哪个会话**：视图当前所在的会话。
@@ -1441,6 +1487,12 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     const targetSid = activeSessionId;
 
     setInput("");
+    /* 文件引用**按下发送就清**：它的路径已经拼进这一轮的正文里发出去了，
+       继续挂在输入框上方只会让人以为"没发出去"（早先清在 finally 里，
+       于是要等模型答完才消失——反馈很差）。
+       附件（pendingFiles）不一样：它是独立上传的载体，file_id 还攥在手里，
+       失败重发时还要靠它，所以仍旧等到收尾再清。 */
+    clearPendingFileRefs();
 
     // 本次运行的标识 + 可中断的 fetch：点「停止」时前端立即断流、后端尽快收尾
     const runId = newRunId();
@@ -1699,6 +1751,9 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       //  比让一个来路不明的旧附件混进下一轮更可预期。）
       setPendingFiles([]);
       setPendingQuotes([]);
+      // 文件引用在**发送那一刻**就清了（见上面 setInput("") 处）；这里再兜一次
+      // 是为了失败路径——它幂等，清空状态不会变。
+      clearPendingFileRefs();
       // 本轮产生了新用量：刷新整会话累计
       qc.invalidateQueries({ queryKey: ["session-usage", activeSessionId] });
       // 侧栏会话列表也要刷：**首条用户消息落库后后端会自动派生出标题**，
@@ -2110,6 +2165,34 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 ))}
               </div>
             )}
+            {/* 待发送的文件引用（右键「添加到对话」）：文件图标 + 名称，点 ✕ 一次即移除。
+                只登记路径不发内容，悬停可看完整绝对路径。 */}
+            {pendingRefs.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {pendingRefs.map((r) => (
+                  <div
+                    key={r.path}
+                    className="group flex max-w-[300px] items-center gap-1.5 rounded-full border border-brand/20 bg-brand/10 py-1 pl-1.5 pr-1 text-[12px] text-ink"
+                    title={r.path}
+                  >
+                    {r.isDir ? (
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-brand" />
+                    ) : (
+                      <FileTypeIcon name={r.name} size="xs" />
+                    )}
+                    <span className="truncate">{r.name}</span>
+                    <button
+                      type="button"
+                      title="移除"
+                      onClick={() => removePendingFileRef(r.path)}
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/10 hover:text-ink dark:hover:bg-white/20"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* 正文输入：无边无底色，融进浮块 */}
             {/* @ 快捷项弹出：出现在输入框上方（bottom-full），不挡住正在输入的光标 */}
             {mention && filteredMentions.length > 0 && (
@@ -2285,11 +2368,15 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                   <button
                     type="button"
                     onClick={() => send()}
-                    disabled={!expandMentions(input).trim() && pendingQuotes.length === 0}
+                    disabled={
+                      !expandMentions(input).trim() &&
+                      pendingQuotes.length === 0 &&
+                      pendingRefs.length === 0
+                    }
                     title="发送（Enter）"
                     className={cn(
                       "flex h-[30px] w-[30px] items-center justify-center rounded-full transition-all duration-150 ease-apple active:scale-95",
-                      input.trim()
+                      input.trim() || pendingQuotes.length > 0 || pendingRefs.length > 0
                         ? "bg-brand-gradient text-white shadow-brand hover:brightness-110"
                         : "cursor-not-allowed bg-black/[0.06] text-ink-faint dark:bg-white/[0.08]"
                     )}

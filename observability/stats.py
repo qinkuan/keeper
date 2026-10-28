@@ -20,6 +20,7 @@ from ..store import (
     ReactParseStat,
     ToolCall,
     get_session_factory,
+    utc_iso,
 )
 from ._context import _resolve_round_anchor
 from ._guard import raise_if_bug, warn_bug_only
@@ -483,7 +484,7 @@ async def slowest_calls(
     return [
         {
             "id": r.id,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "created_at": utc_iso(r.created_at),
             "model": r.model,
             "kind": r.kind,
             "prompt_tokens": int(r.prompt_tokens or 0),
@@ -606,8 +607,8 @@ async def error_breakdown(
             item = acc.setdefault(key, {"count": 0, "last_at": None})
             item["count"] += 1
             at = row[-1]
-            if at and (item["last_at"] is None or at.isoformat() > item["last_at"]):
-                item["last_at"] = at.isoformat()
+            if at and (item["last_at"] is None or utc_iso(at) > item["last_at"]):
+                item["last_at"] = utc_iso(at)
         groups = [
             {**{"key": k}, **v}
             for k, v in sorted(acc.items(), key=lambda kv: -kv[1]["count"])

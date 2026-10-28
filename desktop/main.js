@@ -294,6 +294,7 @@ if (!app.requestSingleInstanceLock()) {
         resolve(action || null);
       };
       const items = [
+        { label: '添加到对话', click: () => finish('add-to-chat') },
         { label: '在文件管理器中打开', click: () => finish('open') },
         { type: 'separator' },
         { label: '复制', click: () => finish('copy') },

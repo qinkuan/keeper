@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { cn, isComposingKey } from "../lib/utils";
+import { parseServerTime } from "../lib/time";
 import {
   apiDeleteSession,
   apiRenameSession,
@@ -134,12 +135,12 @@ export default function SessionList({
 
   const fmt = (s?: string | null) =>
     s
-      ? new Date(s).toLocaleString("zh-CN", {
+      ? parseServerTime(s)?.toLocaleString("zh-CN", {
           month: "2-digit",
           day: "2-digit",
           hour: "2-digit",
           minute: "2-digit",
-        })
+        }) ?? ""
       : "";
 
   const kw2 = kw.trim().toLowerCase();
@@ -459,13 +460,15 @@ function SessionRow({
 /** 短时间戳：抽屉宽度有限，秒没用还占地方。 */
 function fmtTime(iso?: string | null): string {
   if (!iso) return "";
-  return new Date(iso).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
+  return (
+    parseServerTime(iso)?.toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }) ?? ""
+  );
 }
 
 

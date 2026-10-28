@@ -23,7 +23,7 @@ import logging
 from sqlalchemy import func, select
 
 from ..store import AgentMessage, A2AOutboundTask, Thread, get_session_factory
-from ..store.models import new_id
+from ..store.models import new_id, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ class PeerService:
                     "thread_id": r.thread_id,
                     "local_session_id": r.local_session_id,
                     "state": r.state,
-                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                    "updated_at": utc_iso(r.updated_at),
                 }
                 for r in rows
             ]
@@ -655,7 +655,7 @@ class PeerService:
                 "in_reply_to": m.in_reply_to,
                 "content": m.content,
                 "task_id": m.task_id,
-                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "created_at": utc_iso(m.created_at),
             }
             for m in items
         ]

@@ -37,6 +37,7 @@ from .models import (
     TaskItem,
     Thread,
     new_id,
+    utc_iso,
 )
 
 __all__ = [
@@ -71,4 +72,6 @@ __all__ = [
     "ReactParseStat",
     "SchemaDoc",
     "new_id",
+    # 时间序列化：出口统一补 UTC 时区标记（见 models.utc_iso）
+    "utc_iso",
 ]

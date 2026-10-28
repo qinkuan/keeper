@@ -43,7 +43,7 @@ export interface SpaceApi {
   pickFolder(): Promise<string | null>;
   /** 原生选文件对话框，multi=true 可多选，返回绝对路径数组。 */
   pickFile(multi?: boolean): Promise<string[]>;
-  /** 右键菜单：弹原生 Menu，返回用户选中动作（open/download/copy/rename/delete/mkdir/paste），取消返回 null。 */
+  /** 右键菜单：弹原生 Menu，返回用户选中动作（add-to-chat/open/download/copy/rename/delete/mkdir/paste），取消返回 null。 */
   contextMenu(
     key: string,
     isDir: boolean,

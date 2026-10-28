@@ -45,6 +45,32 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """把库里的时间列序列化成**带时区标记**的 ISO 串（空值原样返回 None）。
+
+    为什么必须显式补时区
+    --------------------
+    所有时间列都按 UTC 写入（见 :func:`_utcnow`），但 SQLite 的 ``DATETIME``
+    **不保存 tzinfo**——存进去的 tz 被丢掉，读回来是 naive datetime，直接
+    ``dt.isoformat()`` 得到的是 ``2026-10-27T22:11:10.682795`` 这种没有
+    时区后缀的串。
+
+    JS 的 ``new Date(s)`` 对「有 T、无时区后缀」的串按**本地时间**解析
+    （ES2015 起的规定），于是这个 UTC 时刻被当成本地时间显示，凭空快了
+    一整个时区偏移（UTC+8 下就是 8 小时）。表现就是：消息刚返回时前端本地
+    生成的 ``created_at`` 是对的，刷新页面读历史后时间就"漂移"了。
+
+    统一在出口补 ``+00:00``，前端才能换算到本机时区；已经带 tz 的值
+    （``datetime.now(timezone.utc)`` 这种）保持原样，不做二次转换。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # 库里的 naive 值一律是 UTC（写入侧由 _utcnow 保证），补上它的真实时区
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 class Base(DeclarativeBase):
     pass
 

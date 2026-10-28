@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import distinct, func, select
 
-from ..store import LLMCall, ToolCall, get_session_factory
+from ..store import LLMCall, ToolCall, get_session_factory, utc_iso
 from ._context import _resolve_round_anchor
 from ._guard import note_if_bug, raise_if_bug
 from .budget import aggregate
@@ -258,7 +258,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
                         "output_size": 0,
                         "raw_output_size": 0,
                         "truncated": False,
-                        "created_at": c.created_at.isoformat() if c.created_at else None,
+                        "created_at": utc_iso(c.created_at),
                         "input_text": "",
                         "output_text": "",
                         "input_chars": 0,
@@ -294,7 +294,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
                 "output_size": 0,
                 "raw_output_size": 0,
                 "truncated": False,
-                "created_at": c["created_at"].isoformat() if c["created_at"] else None,
+                "created_at": utc_iso(c["created_at"]),
                 "input_text": "",
                 "output_text": "",
                 "input_chars": 0,
@@ -364,7 +364,7 @@ async def message_timeline(message_id: str) -> Dict[str, Any]:
                     "raw_output_size": raw_size,
                     # 原始返回 > 实际进上下文：超内联上限，被换引用或截断了
                     "truncated": bool(raw_size and out_size and raw_size > out_size),
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "created_at": utc_iso(r.created_at),
                     # 具体内容：input = 本步的思考（+ 工具入参），output = 工具返回
                     # （观测，会原样进下一轮 prompt）。真正的完整 prompt（system +
                     # 历史消息）没有落库——只统计了 token，故这里给的是步骤级内容。

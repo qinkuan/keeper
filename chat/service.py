@@ -165,7 +165,7 @@ from ..store import (
     Thread,
     get_session_factory,
 )
-from ..store.models import new_id
+from ..store.models import new_id, utc_iso
 
 
 default_initiator_id = 9999
@@ -1442,8 +1442,8 @@ class ChatService:
                 "thinking": bool(s.thinking),
                 "reasoning_effort": s.reasoning_effort or "low",
                 "mode": s.mode or "normal",
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                "created_at": utc_iso(s.created_at),
+                "updated_at": utc_iso(s.updated_at),
             }
             for s in items
         ]
@@ -1703,7 +1703,7 @@ class ChatService:
                 "seq": m.seq,
                 "role": m.role,
                 "content": m.content,
-                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "created_at": utc_iso(m.created_at),
                 "artifacts": self._public_artifacts(
                     json.loads(m.artifacts) if m.artifacts else []
                 ),

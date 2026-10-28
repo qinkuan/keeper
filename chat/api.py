@@ -1240,7 +1240,7 @@ from ..store import (
     TaskItem,
     get_session_factory,
 )  # noqa: E402
-from ..store.models import ReactStep, SessionMessage  # noqa: E402
+from ..store.models import ReactStep, SessionMessage, utc_iso  # noqa: E402
 
 user_space_router = APIRouter(prefix="/user-spaces", tags=["user-spaces"])
 
@@ -2207,8 +2207,8 @@ def _item_out(it: TaskItem) -> Dict[str, Any]:
         "status": it.status,
         "conclusion": it.conclusion,
         "artifacts": _json_arr(it.artifacts),
-        "started_at": it.started_at.isoformat() if it.started_at else None,
-        "finished_at": it.finished_at.isoformat() if it.finished_at else None,
+        "started_at": utc_iso(it.started_at),
+        "finished_at": utc_iso(it.finished_at),
     }
 
 
@@ -2234,8 +2234,8 @@ def _task_out(t: Task, items: Optional[Any] = None) -> Dict[str, Any]:
         "review_feedback": t.review_feedback,
         "result_summary": t.result_summary,
         "artifacts": _json_arr(t.artifacts),
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        "created_at": utc_iso(t.created_at),
+        "updated_at": utc_iso(t.updated_at),
         "items": None if items is None else [_item_out(i) for i in items],
     }
 
@@ -3502,9 +3502,9 @@ def _session_out(
         "agent_name": agent_name or row.agent_id,
         "kind": row.kind,
         "message_count": message_count,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
+        "created_at": utc_iso(row.created_at),
+        "updated_at": utc_iso(row.updated_at),
+        "deleted_at": utc_iso(row.deleted_at),
     }
 
 

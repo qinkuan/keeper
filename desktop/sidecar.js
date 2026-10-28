@@ -129,7 +129,11 @@ function prepareRuntimeBin(kernel) {
     const copy = path.join(kernel.dir, isWin ? 'python3.exe' : 'python3');
     try {
       fs.copyFileSync(kernel.pythonRunner, copy);
-      fs.chmodSync(copy, 0o755);
+      // chmod 单独兜一层：Windows 上它只管只读位，个别环境（只读卷 / 受限
+      // 目录）会抛错——但文件已经拷好了，不该因此整体退化成 .cmd shim。
+      try {
+        fs.chmodSync(copy, 0o755);
+      } catch (_) {}
       python3 = copy;
       // 内核目录（含副本）进 PATH：python3 在任何 shell 下都能解析到
       pathEntries.push(kernel.dir);
@@ -238,9 +242,48 @@ function runtimePath(entries) {
 function resolveKernel() {
   if (app.isPackaged) {
     const dir = path.join(process.resourcesPath, 'kernel');
-    const exe = path.join(dir, 'keeper-kernel');
-    if (!fs.existsSync(exe)) {
-      throw new Error(`打包产物里没有内核可执行文件：${exe}`);
+    /* 内核可执行文件的名字**随平台变**：Windows 上 PyInstaller 产出
+     * `keeper-kernel.exe`，mac/Linux 上是 `keeper-kernel`。
+     * 早先这里写死了无后缀的名字，于是 Windows 包一启动就报
+     * 「打包产物里没有内核可执行文件：…\resources\kernel\keeper-kernel」——
+     * 目录里明明有 keeper-kernel.exe，只是差一个后缀。
+     * 两个名字都试一遍，换平台构建也不用改代码。 */
+    const names =
+      process.platform === 'win32'
+        ? ['keeper-kernel.exe', 'keeper-kernel']
+        : ['keeper-kernel', 'keeper-kernel.exe'];
+    let exe = null;
+    for (const n of names) {
+      const p = path.join(dir, n);
+      if (fs.existsSync(p)) {
+        exe = p;
+        break;
+      }
+    }
+    if (exe && !/\.exe$/i.test(exe) && process.platform === 'win32') {
+      // Windows 上没有 .exe 后缀的多半是**别平台冻出来的产物**（在 mac 上交叉
+      // 打包 win 时就会这样）。先提醒一句：直接跑会报「不是有效的 Win32 应用程序」。
+      console.warn(
+        '[desktop] 内核可执行文件没有 .exe 后缀：' +
+          exe +
+          '（若是 mac/Linux 产物，Windows 包需在 Windows 上重新构建）'
+      );
+    }
+    if (!exe) {
+      // 报错时把目录内容列出来：最常见的原因是**拿错了平台的产物**
+      // （在 mac 上交叉打包 win，resources/kernel 里塞的是 mac 的二进制）。
+      let listing = [];
+      try {
+        listing = fs.readdirSync(dir);
+      } catch (_) {}
+      throw new Error(
+        `打包产物里没有内核可执行文件：${path.join(dir, names[0])}\n` +
+          (listing.length
+            ? `该目录实际有：${listing.join('、')}`
+            : `目录不存在或为空：${dir}`) +
+          '\nWindows 安装包必须在 Windows 上构建（packaging/build_windows.ps1）：' +
+          'PyInstaller 不能交叉编译，mac 上冻出来的内核在 Windows 上跑不了。'
+      );
     }
     // 前端产物冻在 bundle 内（<kernel>/_internal/keeper/web/dist）；
     // 也允许桌面壳用外挂资源指路（KEEPER_WEB_DIST）。

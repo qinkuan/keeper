@@ -36,6 +36,22 @@ _RECENT_INDEX: dict[str, float] = {}
 #: 抑制窗口（秒）。
 _RECENT_TTL = 5.0
 
+#: 「已知没有可索引正文」的文件：路径 -> (mtime, size, CHUNK_FORMAT_VERSION)。
+#:
+#: 为什么需要它：切不出块的文件**不写 documents 表**（见下面 ``index_path`` 里
+#: 的 ``return "empty"``），也就没有 ``existing`` 记录可供下一轮 stat 预筛——
+#: 于是每轮周期同步都要重新读一遍全文、再跑一次 PDF 解析，而解析恰恰是这批
+#: 文件里最贵的一步。扫描件越多，同步越慢，日志还每轮重刷一遍。
+#:
+#: 为什么不落库：这只是**省一次注定失败的解析**的加速缓存，不是业务状态。
+#: 落库就得定义状态语义、处理迁移、还得从前端文档计数里排除掉——为一个优化
+#: 引入一整套状态管理不划算。所以放内存：进程重启即失效，重启后第一轮重新
+#: 全量扫描一遍，结果自愈（扫错了最多慢一轮，不会错）。
+_EMPTY_CACHE: dict[str, tuple] = {}
+#: 缓存上限，超了整体清空。正常语料远达不到这个量；设它是防病态场景（某个
+#: 临时目录被反复生成无正文文件）下无界增长。
+_EMPTY_CACHE_MAX = 20_000
+
 
 def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False,
                known_hash=None):
@@ -106,7 +122,15 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
     # 按文件类型分派切片器：
     # - Markdown：读全文 → 标题树切片
     # - PDF：读大纲 + 逐页文本 → 大纲标题树切片（扫描件会切不出东西 → 跳过）
-    if detect.is_pdf(path):
+    source_kind = "pdf" if detect.is_pdf(path) else "markdown"
+    # 指纹里带上切片格式版本：切片方式变了（比如 CHUNK_MIN_CHARS 调低），
+    # 同一个文件可能就切得出块了，此时缓存必须失效。
+    sig = (mtime, size, config.CHUNK_FORMAT_VERSION)
+    if not force and _EMPTY_CACHE.get(str(path)) == sig:
+        # 文件自上次判定后没动过，而「没有文字层」不会自己变出来 → 跳过解析。
+        logger.debug("命中「已知无正文」缓存，跳过解析：%s", path)
+        chunks = []
+    elif source_kind == "pdf":
         try:
             chunks = pdf.chunk_pdf(
                 path,
@@ -119,7 +143,6 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
         except Exception as e:  # noqa: BLE001 坏文件 / 加密 / 没装 pypdf
             logger.warning("PDF 解析失败，跳过：%s（%s）", path, e)
             chunks = []
-        source_kind = "pdf"
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
         chunks = chunk.chunk_markdown(
@@ -130,15 +153,23 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
             max_chars=config.CHUNK_MAX_CHARS,
             parent_max_chars=config.PARENT_MAX_CHARS,
         )
-        source_kind = "markdown"
 
     if not chunks:
         if source_kind == "pdf":
             # 扫描件 / 纯图片 PDF：正文是图，没有文字层可抽 → 切不出块。
-            # 静默跳过会让人以为"索引坏了"，所以说清楚是哪一类问题。
-            logger.info(
+            #
+            # 走 debug 而不是 info：全量扫描时这类文件往往成百上千（一个扫描
+            # 件资料库就是一整批），逐条 info 会把日志刷满，真正要看的报错
+            # 反而被淹掉。批量层（index_roots / index_paths）会在收尾时按
+            # stats["empty"] 汇总出一条，既保留"索引没坏、只是这些文件没正文"
+            # 的信息，又不刷屏；要查具体是哪些文件，开 DEBUG 即可。
+            logger.debug(
                 "PDF 没有可索引的正文（多半是扫描件 / 纯图片 PDF），跳过：%s", path
             )
+        # 记进内存缓存：下一轮只要文件没变，就别再解析一遍了。
+        if len(_EMPTY_CACHE) >= _EMPTY_CACHE_MAX:
+            _EMPTY_CACHE.clear()
+        _EMPTY_CACHE[str(path)] = sig
         if existing:
             dbmod.delete_document(conn, existing["id"])
         return "empty"
@@ -212,6 +243,9 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
                     except Exception:  # noqa: BLE001 坏数据就当它没有
                         pass
 
+    # 切出块了 → 清掉「已知无正文」的旧条目，免得以后被缓存误跳过
+    _EMPTY_CACHE.pop(str(path), None)
+
     # 父块不参与向量化（vector 保持 NULL）
     dbmod.sync_chunks(conn, doc_id, chunks, vectors)
 
@@ -227,6 +261,22 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
     dbmod.set_meta(conn, "index_kinds", ",".join(sorted(kinds)))
     conn.commit()
     return "indexed"
+
+
+def _log_empty_summary(stats: dict) -> None:
+    """把「本轮有多少文件没有可索引正文」汇成一条日志。
+
+    逐条打印在语料里有一批扫描件时会直接刷屏（见 ``index_path`` 里的注释），
+    所以明细留在 DEBUG，这里只给计数。文案不写死"扫描件"——markdown 文件
+    是空的也会归到 ``empty``，一并说清楚，免得误导排查方向。
+    """
+    n = stats.get("empty", 0)
+    if n > 0:
+        logger.info(
+            "本轮跳过 %d 个没有可索引正文的文件（PDF 无文字层，如扫描件 / 纯图片；"
+            "或文件本身为空）；具体文件名需开 DEBUG 日志查看",
+            n,
+        )
 
 
 def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
@@ -287,6 +337,7 @@ def index_roots(conn, embedder, roots=None, force=False, doc_type=None,
 
     if on_progress:
         on_progress(done=total, total=total, path="", stage="done")
+    _log_empty_summary(stats)
     return stats
 
 
@@ -346,4 +397,5 @@ def index_paths(conn, embedder, paths, force=False, doc_type=None,
 
     if on_progress:
         on_progress(done=total, total=total, path="", stage="done")
+    _log_empty_summary(stats)
     return stats

@@ -10,6 +10,7 @@ import {
   FolderOpen,
   FolderPlus,
   Loader2,
+  MessageSquarePlus,
   PanelLeft,
   PanelRight,
   Pencil,
@@ -28,7 +29,7 @@ import { Hint } from "../components/ui/Page";
 import { toast } from "../components/ui/Toast";
 import { cn, isComposingKey } from "../lib/utils";
 import MarkdownView from "../components/MarkdownView";
-import { addQuoteToChat } from "../lib/quote";
+import { addQuoteToChat, addPendingFileRef } from "../lib/quote";
 import ImageViewer from "../components/ImageViewer";
 import Editor from "@monaco-editor/react";
 import { applyKeeperTheme, KEEPER_THEME } from "../monacoTheme";
@@ -1375,6 +1376,17 @@ export default function UserSpacePage({
     e.preventDefault();
     const act = await space.contextMenu(key, isDir, canPaste);
     switch (act) {
+      case "add-to-chat": {
+        // 树节点的 key 是绝对路径（spaceFs.list 返回的 item.path 就是 full），
+        // 直接交给对话侧，agent 拿到即可读。
+        addPendingFileRef({
+          path: key,
+          name: key.split("/").pop() || key,
+          isDir,
+        });
+        toast.success(isDir ? "文件夹已添加到对话" : "文件已添加到对话");
+        break;
+      }
       case "open":
         doOpen(key, isDir);
         break;
@@ -1660,6 +1672,27 @@ export default function UserSpacePage({
                   >
                     <ArrowLeft className="h-3 w-3" />
                     搜索结果
+                  </button>
+                )}
+                {view === "browse" && selectedFile && (
+                  /* 「添加到对话」：把当前预览的文件挂进聊天输入框。
+                     与目录树右键「添加到对话」走同一条路（模块级暂存），
+                     两处都只是登记绝对路径，内容由 agent 自己读。 */
+                  <button
+                    type="button"
+                    onClick={() => {
+                      addPendingFileRef({
+                        path: selectedFile,
+                        name: selectedFile.split("/").pop() || selectedFile,
+                        isDir: false,
+                      });
+                      toast.success("已添加到对话");
+                    }}
+                    title="把这个文件挂进聊天输入框"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                  >
+                    <MessageSquarePlus className="h-3.5 w-3.5" />
+                    添加到对话
                   </button>
                 )}
                 {view === "browse" && selectedFile && fileMode.editable && (

@@ -12,6 +12,7 @@ import { toast } from "./ui/Toast";
 import { CollapseItem } from "./ui/Collapse";
 import MarkdownView from "./MarkdownView";
 import { cn } from "../lib/utils";
+import { formatShortTime } from "../lib/time";
 import { attachmentUrl } from "../api/client";
 
 /**
@@ -89,20 +90,6 @@ function MsgAction({
   );
 }
 
-/** 时间戳：今天显示 HH:mm，更早显示 MM-DD HH:mm */
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
-}
-
 /**
  * 单条消息气泡。
  *
@@ -173,7 +160,7 @@ function ChatBubble({
   onRegenerate?: (messageId: string) => void;
 }) {
   const isUser = msg.role === "user";
-  const timeText = msg.created_at ? formatTime(msg.created_at) : "";
+  const timeText = formatShortTime(msg.created_at);
   /** 「自主规划过程」的展开态：由这里持有，才好在流式结束时按需变化 */
   const [stepsOpen, setStepsOpen] = useState(false);
 
