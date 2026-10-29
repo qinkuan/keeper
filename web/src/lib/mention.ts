@@ -16,6 +16,18 @@ export interface MentionItem {
   label: string;
   /** 选中后插入到消息里的文本；可含 `{session_path}` 占位符 */
   snippet: string;
+  /**
+   * 文件类候选才有：「我的空间」里的文件。
+   *
+   * 快捷项插入的是**短语**（@我的空间 → 一句提示词），文件插入的是**引用**
+   * （@方案.docx → 这个文件的绝对路径）。两类东西的展开方式不同，所以分开标记：
+   * 快捷项在发送时展开成短语，文件则把绝对路径追加给模型。
+   */
+  filePath?: string;
+  /** 文件类候选的相对路径（同名文件用它消歧，弹窗里当副标题显示） */
+  fileRel?: string;
+  /** 文件类候选是不是目录 */
+  isDir?: boolean;
 }
 
 export interface MentionConfig {

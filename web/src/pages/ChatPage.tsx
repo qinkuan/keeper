@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { DragEvent } from "react";
 
 import {
@@ -33,6 +33,8 @@ import PromptDumpModal from "../components/PromptDumpModal";
 import { UsageTag, fmtTokens } from "../components/UsageTag";
 import MentionPicker from "../components/MentionPicker";
 import FileTypeIcon from "../components/FileTypeIcon";
+import { apiSearchQuery, apiSearchStats } from "../api/client";
+import type { SearchHit } from "../api/types";
 import {
   loadMention,
   resolveSnippet,
@@ -43,6 +45,7 @@ import {
 } from "../lib/mention";
 import {
   ADD_QUOTE_EVENT,
+  addPendingFileRef,
   type ChatQuote,
   getPendingFileRefs,
   subscribePendingFileRefs,
@@ -210,9 +213,22 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     window.addEventListener(MENTION_EVENT, onUpd);
     return () => window.removeEventListener(MENTION_EVENT, onUpd);
   }, []);
-  const filteredMentions = mention
-    ? filterMentionItems(mentionCfg.items, mention.query)
-    : [];
+  /* @ 后面有字 → 用**内核的检索能力**搜「我的空间」里的文件。
+   *
+   * 为什么复用内容页那套检索，而不是前端遍历目录：
+   *   - 索引本来就在跑（settings 的 search.sync_enabled），还带向量语义；
+   *   - 遍历目录要一次 IO 扫全树，大空间上卡；查索引是现成的；
+   *   - 同一套召回逻辑，输入框与内容页给用户的预期一致。
+   *
+   * 输入停 250ms 才发请求：中文输入法拼字过程中不该一直打后端。 */
+  const [mentionQuery, setMentionQuery] = useState("");
+  useEffect(() => {
+    const t = setTimeout(
+      () => setMentionQuery(mention?.query.trim() ?? ""),
+      250
+    );
+    return () => clearTimeout(t);
+  }, [mention?.query]);
 
   // 输入框 `/` 唤出「未加载插件」：动态把库里有但未 link 给本 agent 的插件激活到会话
   // （激活态存服务端 ChatSession.activated_plugins，仅本对话有效）。
@@ -356,6 +372,22 @@ export default function ChatPage({ agentId }: { agentId: string }) {
     }
     const el = textareaRef.current;
     const caret = el?.selectionStart ?? input.length;
+    if (item.filePath) {
+      /* 文件候选：**直接挂上**，跟「我的空间」右键「添加到对话」完全一样——
+       * 成为待发送的文件引用（输入框上方出现 chip，可点 ✕ 移除），
+       * 并把刚敲的「@查询」文本清掉（不然同一个文件既在 chip 里、又在
+       * 文字里出现两遍）。 */
+      const name = item.filePath.replace(/\/+$/, "").split("/").pop() || item.label;
+      addPendingFileRef({ path: item.filePath, name, isDir: false });
+      setInput(input.slice(0, mention.start) + input.slice(caret));
+      setMention(null);
+      const pos = mention.start;
+      requestAnimationFrame(() => {
+        el?.focus();
+        el?.setSelectionRange(pos, pos);
+      });
+      return;
+    }
     const insert = "@" + item.label;
     const next = input.slice(0, mention.start) + insert + input.slice(caret);
     setInput(next);
@@ -712,6 +744,100 @@ export default function ChatPage({ agentId }: { agentId: string }) {
   // 「我的空间」路径（来自 settings.yaml，单空间）：@我的空间 mention 解析用
   const mySpaceQ = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
   const mySpacePath = mySpaceQ.data?.path ?? "";
+
+  /* @ 文件检索：走内核的 /search/query（索引在 Python 侧，FTS5 + 向量）。
+   *
+   * top_k 给 20 而不是 5：检索返回的是**片段**，同一个文件可能占好几条——
+   * 聚合到文件级再截 5 个，才能真的给出 5 个不同的文件。 */
+  const mentionSearchQ = useQuery({
+    queryKey: ["chat-mention-search", mentionQuery],
+    queryFn: async () => {
+      try {
+        const r = await apiSearchQuery({
+          query: mentionQuery,
+          top_k: 20,
+          mode: "hybrid",
+        });
+        return { hits: r.results || [], degraded: false };
+      } catch (e) {
+        // embedding 模型没就绪时退回纯关键词（关键词通道不需要模型），
+        // 总比整个搜索不可用强——与内容页同一套降级。
+        const r = await apiSearchQuery({
+          query: mentionQuery,
+          top_k: 20,
+          mode: "keyword",
+        });
+        return { hits: r.results || [], degraded: true };
+      }
+    },
+    enabled: mentionQuery.length > 0,
+    staleTime: 30_000,
+  });
+
+  /* 索引有没有建：没建索引时检索必然是空的，得说清原因而不是显示"没找到"。 */
+  const mentionIdxQ = useQuery({
+    queryKey: ["search-stats"],
+    queryFn: apiSearchStats,
+    staleTime: 30_000,
+    enabled: mentionQuery.length > 0,
+  });
+
+  /* 片段级结果聚合成文件级（同一文件只出现一次，取分数最高的片段），最多 5 个。
+   *
+   * 只做**范围**过滤，不做类型过滤：检索给什么就展示什么，让用户自己挑。
+   * 范围过滤是必要的——索引里可能留着「换过空间」之前的旧路径，那种文件
+   * 展示出来用户一点就报错打不开（与内容页搜索同一套处理）。 */
+  const mentionFiles = useMemo(() => {
+    const hits = mentionSearchQ.data?.hits || [];
+    const root = (mySpacePath || "").replace(/\/+$/, "");
+    const map = new Map<string, { hit: SearchHit; count: number }>();
+    for (const h of hits) {
+      if (!h?.path) continue;
+      if (root && !h.path.startsWith(root)) continue;
+      const cur = map.get(h.path);
+      if (!cur) map.set(h.path, { hit: h, count: 1 });
+      else {
+        cur.count += 1;
+        if ((h.score ?? 0) > (cur.hit.score ?? 0)) cur.hit = h;
+      }
+    }
+    return [...map.values()]
+      .sort((a, b) => (b.hit.score ?? 0) - (a.hit.score ?? 0))
+      .slice(0, 5);
+  }, [mentionSearchQ.data, mySpacePath]);
+
+  /* 文件 → @ 标签：文件名唯一就用文件名，重名用相对路径消歧。 */
+  const mentionFileItems: MentionItem[] = useMemo(() => {
+    const root = (mySpacePath || "").replace(/\/+$/, "");
+    const nameCount = new Map<string, number>();
+    for (const f of mentionFiles) {
+      const n = f.hit.path.replace(/\/+$/, "").split("/").pop() || f.hit.path;
+      nameCount.set(n, (nameCount.get(n) || 0) + 1);
+    }
+    return mentionFiles.map((f) => {
+      const p = f.hit.path;
+      const name = p.replace(/\/+$/, "").split("/").pop() || p;
+      const rel =
+        root && p.startsWith(root) ? p.slice(root.length).replace(/^\//, "") : p;
+      return {
+        key: "file:" + p,
+        label: (nameCount.get(name) || 0) > 1 ? rel : name,
+        // 副标题：命中位置（标题路径 / 页码），比路径更能说明「为什么是它」
+        snippet: f.hit.titlepath || f.hit.locator || rel,
+        filePath: p,
+        fileRel: rel,
+        isDir: false,
+      };
+    });
+  }, [mentionFiles, mySpacePath]);
+
+  /* 候选：**@ 后面没字 → 快捷项（保持现状）；@ 后面有字 → 检索到的文件**。
+   * 文件没搜到时回退到快捷项（按 query 过滤），免得菜单突然消失。 */
+  const filteredMentions: MentionItem[] = useMemo(() => {
+    if (!mention) return [];
+    if (mentionQuery && mentionFileItems.length) return mentionFileItems;
+    return filterMentionItems(mentionCfg.items, mention.query);
+  }, [mention, mentionQuery, mentionFileItems, mentionCfg.items]);
 
   // 部署形态：本机才显示「打开文件夹」（远程部署只支持下载）
   const deployQ = useQuery({
@@ -1431,9 +1557,16 @@ export default function ChatPage({ agentId }: { agentId: string }) {
           .map((qq) => `文件的绝对路径: ${qq.path}\n内容: ${qq.text}`)
           .join("\n\n")
       : "";
-    // 文件引用（右键「添加到对话」）：同样只登记绝对路径，内容让 agent 自己去读
-    const refBlock = pendingRefs.length
-      ? pendingRefs
+    /* 文件引用：只登记绝对路径，内容让 agent 自己去读（文件可能很大，
+     * 前端不替它读）。两个入口汇到同一处 pendingRefs——「我的空间」右键
+     * 「添加到对话」，以及输入框 @ 检索后选中。 */
+    const refFilesUnique = pendingRefs.map((r) => ({
+      label: r.name,
+      path: r.path,
+      isDir: r.isDir,
+    }));
+    const refBlock = refFilesUnique.length
+      ? refFilesUnique
           .map((r) => `${r.isDir ? "文件夹" : "文件"}的绝对路径: ${r.path}`)
           .join("\n")
       : "";
@@ -1468,7 +1601,8 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       (!q &&
         pendingFiles.length === 0 &&
         pendingQuotes.length === 0 &&
-        pendingRefs.length === 0) ||
+        pendingRefs.length === 0 &&
+        refFilesUnique.length === 0) ||
       sending
     )
       return;
@@ -2195,16 +2329,33 @@ export default function ChatPage({ agentId }: { agentId: string }) {
             )}
             {/* 正文输入：无边无底色，融进浮块 */}
             {/* @ 快捷项弹出：出现在输入框上方（bottom-full），不挡住正在输入的光标 */}
-            {mention && filteredMentions.length > 0 && (
-              <div className="absolute bottom-full left-4 right-4 z-50 mb-2">
-                <MentionPicker
-                  items={filteredMentions}
-                  activeIndex={activeMention}
-                  onSelect={selectMention}
-                  onHover={setActiveMention}
-                />
-              </div>
-            )}
+            {/* @ 候选：@ 后没字是快捷项，@ 后有字是「我的空间」的文件搜索。
+                搜不到 / 还在搜时给一句话反馈——否则菜单凭空消失，用户会以为坏了。 */}
+            {mention &&
+              (filteredMentions.length > 0 ||
+                mentionSearchQ.isFetching ||
+                mention.query.trim()) && (
+                <div className="absolute bottom-full left-4 right-4 z-50 mb-2">
+                  {filteredMentions.length > 0 ? (
+                    <MentionPicker
+                      items={filteredMentions}
+                      activeIndex={activeMention}
+                      onSelect={selectMention}
+                      onHover={setActiveMention}
+                    />
+                  ) : (
+                    <div className="w-[min(440px,90vw)] rounded-xl border border-line-soft bg-panel px-3 py-2 text-[12.5px] text-ink-muted shadow-[0_12px_36px_-10px_rgba(0,0,0,0.28)]">
+                      {mentionSearchQ.isFetching
+                        ? "正在搜索「我的空间」…"
+                        : mentionSearchQ.data?.degraded
+                          ? "语义模型未就绪，本次只按字面匹配"
+                          : mentionIdxQ.data && mentionIdxQ.data.documents === 0
+                            ? "还没有索引——到「我的空间 → 搜索」建立索引后才能搜到文件"
+                            : `没有匹配「${mention.query.trim()}」的文件`}
+                    </div>
+                  )}
+                </div>
+              )}
             {/* `/` 未加载插件弹出：与 @ 同款位置（输入框上方）。无会话时给一句提示。 */}
             {slash && (
               <div className="absolute bottom-full left-4 right-4 z-50 mb-2">

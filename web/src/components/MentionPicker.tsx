@@ -1,5 +1,7 @@
+import { Folder } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { MentionItem } from "../lib/mention";
+import FileTypeIcon from "./FileTypeIcon";
 
 /**
  * `@` 快捷项弹出列表：纯展示 + 选中回调，键盘导航由父组件（输入框）接管。
@@ -28,6 +30,7 @@ export default function MentionPicker({
             onSelect(it);
           }}
           onMouseEnter={() => onHover(i)}
+          title={it.filePath || undefined}
           className={cn(
             "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors",
             i === activeIndex
@@ -35,12 +38,31 @@ export default function MentionPicker({
               : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
           )}
         >
-          <span className="shrink-0 rounded-md bg-brand/12 px-1.5 py-0.5 text-[11px] font-medium text-brand">
-            @{it.label}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-muted">
-            {it.snippet}
-          </span>
+          {it.filePath ? (
+            /* 文件类候选：图标 + 名字 + 所在位置（模型与人都要看得出是哪个文件） */
+            <>
+              {it.isDir ? (
+                <Folder className="h-3.5 w-3.5 shrink-0 text-brand" />
+              ) : (
+                <FileTypeIcon name={it.label} size="xs" />
+              )}
+              <span className="shrink-0 text-[12.5px] font-medium text-ink-strong">
+                {it.label}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[12px] text-ink-muted">
+                {it.snippet || it.fileRel || it.filePath}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="shrink-0 rounded-md bg-brand/12 px-1.5 py-0.5 text-[11px] font-medium text-brand">
+                @{it.label}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-muted">
+                {it.snippet}
+              </span>
+            </>
+          )}
         </button>
       ))}
     </div>
