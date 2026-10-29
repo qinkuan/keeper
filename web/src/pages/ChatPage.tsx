@@ -53,6 +53,7 @@ import {
   clearPendingFileRefs,
 } from "../lib/quote";
 import type { UsageSummary } from "../api/types";
+import { requestOpenFile } from "../lib/openFile";
 
 
 /** 可拖拽竖分隔条：拖动时按水平位移回调，由父级调整列宽。 */
@@ -378,7 +379,14 @@ export default function ChatPage({ agentId }: { agentId: string }) {
        * 并把刚敲的「@查询」文本清掉（不然同一个文件既在 chip 里、又在
        * 文字里出现两遍）。 */
       const name = item.filePath.replace(/\/+$/, "").split("/").pop() || item.label;
-      addPendingFileRef({ path: item.filePath, name, isDir: false });
+      /* 落点一起挂上：从 @ 检索里选中的文件带着"命中第几段/第几页"，
+       * 点 chip 就能直接跳过去，发给模型的话里也写明起点。 */
+      addPendingFileRef({
+        path: item.filePath,
+        name,
+        isDir: false,
+        loc: item.fileLoc,
+      });
       setInput(input.slice(0, mention.start) + input.slice(caret));
       setMention(null);
       const pos = mention.start;
@@ -819,14 +827,29 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       const name = p.replace(/\/+$/, "").split("/").pop() || p;
       const rel =
         root && p.startsWith(root) ? p.slice(root.length).replace(/^\//, "") : p;
+      /* 落点：docx 是段序号、markdown 是行号、pdf 是页码——
+       * 选中这个文件就能直接跳到命中的那一段/那一页。 */
+      const isPdf = f.hit.source_kind === "pdf";
+      const loc =
+        isPdf
+          ? { page: f.hit.page ?? undefined, terms: f.hit.matched_terms }
+          : {
+              line: f.hit.start_line || undefined,
+              terms: f.hit.matched_terms,
+            };
       return {
         key: "file:" + p,
         label: (nameCount.get(name) || 0) > 1 ? rel : name,
-        // 副标题：命中位置（标题路径 / 页码），比路径更能说明「为什么是它」
-        snippet: f.hit.titlepath || f.hit.locator || rel,
+        // 副标题：命中位置（标题路径 / 页码 / 段号），比路径更能说明「为什么是它」
+        snippet: isPdf
+          ? f.hit.locator || rel
+          : f.hit.titlepath
+            ? `${f.hit.titlepath}（第 ${f.hit.start_line} 段）`
+            : `第 ${f.hit.start_line} 段`,
         filePath: p,
         fileRel: rel,
         isDir: false,
+        fileLoc: loc,
       };
     });
   }, [mentionFiles, mySpacePath]);
@@ -1564,10 +1587,23 @@ export default function ChatPage({ agentId }: { agentId: string }) {
       label: r.name,
       path: r.path,
       isDir: r.isDir,
+      loc: r.loc,
     }));
+    /* 落点也写进正文：模型知道"从第 245 段看起"，不用自己从头翻 2000 段。
+     * 口径与前端跳转一致（docx=段序号、pdf=页码、markdown=行号）。 */
     const refBlock = refFilesUnique.length
       ? refFilesUnique
-          .map((r) => `${r.isDir ? "文件夹" : "文件"}的绝对路径: ${r.path}`)
+          .map((r) => {
+            const head = `${r.isDir ? "文件夹" : "文件"}的绝对路径: ${r.path}`;
+            const l = r.loc;
+            if (!l) return head;
+            const where = l.page
+              ? `命中位置: 第 ${l.page} 页`
+              : l.line
+                ? `命中位置: 第 ${l.line} 段/行`
+                : "";
+            return where ? `${head}\n${where}` : head;
+          })
           .join("\n")
       : "";
     const sendText = (
@@ -2299,8 +2335,10 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                 ))}
               </div>
             )}
-            {/* 待发送的文件引用（右键「添加到对话」）：文件图标 + 名称，点 ✕ 一次即移除。
-                只登记路径不发内容，悬停可看完整绝对路径。 */}
+            {/* 待发送的文件引用（右键「添加到对话」/ @ 检索选中）：文件图标 + 名称，
+                点 ✕ 一次即移除。只登记路径不发内容，悬停可看完整绝对路径。
+                **点名字**会在「我的空间」里打开这个文件——带落点时（@ 检索命中）
+                直接跳到命中的那一段 / 那一页。 */}
             {pendingRefs.length > 0 && (
               <div className="mb-1.5 flex flex-wrap gap-1.5">
                 {pendingRefs.map((r) => (
@@ -2314,7 +2352,30 @@ export default function ChatPage({ agentId }: { agentId: string }) {
                     ) : (
                       <FileTypeIcon name={r.name} size="xs" />
                     )}
-                    <span className="truncate">{r.name}</span>
+                    <button
+                      type="button"
+                      title={
+                        r.loc
+                          ? `打开并跳到${r.loc.page ? `第 ${r.loc.page} 页` : `第 ${r.loc.line} 段`}`
+                          : "打开这个文件"
+                      }
+                      onClick={() =>
+                        requestOpenFile({
+                          path: r.path,
+                          line: r.loc?.line,
+                          page: r.loc?.page,
+                          terms: r.loc?.terms,
+                        })
+                      }
+                      className="truncate transition-colors hover:text-brand hover:underline"
+                    >
+                      {r.name}
+                    </button>
+                    {r.loc && (
+                      <span className="shrink-0 text-[11px] text-ink-muted">
+                        {r.loc.page ? `第 ${r.loc.page} 页` : `第 ${r.loc.line} 段`}
+                      </span>
+                    )}
                     <button
                       type="button"
                       title="移除"

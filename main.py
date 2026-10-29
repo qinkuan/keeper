@@ -175,6 +175,10 @@ def make_app():
     from keeper.search.api import router as search_router
 
     app.include_router(search_router)
+    # 文档只读渲染：docx → IR（段落/表格/图片），给「我的空间」内联预览用
+    from keeper.docx.api import router as docx_router
+
+    app.include_router(docx_router)
     # 可观测：用量聚合查询（/metrics/...），数据来自 llm_calls 事实表
     app.include_router(metrics_router)
     # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/evals/api.py）

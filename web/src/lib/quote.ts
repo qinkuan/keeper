@@ -34,6 +34,20 @@ export interface ChatFileRef {
   name: string;
   /** 是否文件夹 */
   isDir: boolean;
+  /**
+   * 命中落点（从 @ 检索里选中文件时才有）。
+   *
+   * 有它就能"点 chip 直接跳到命中的那一段/那一页"，发出去的话里也能
+   * 告诉模型"从第几段看起"，省得模型自己从头翻。
+   */
+  loc?: {
+    /** docx：段序号；markdown：行号 */
+    line?: number;
+    /** pdf：页码 */
+    page?: number;
+    /** 命中词 */
+    terms?: string[];
+  };
 }
 
 export const ADD_FILE_REF_EVENT = "keeper:add-file-ref";
@@ -82,7 +96,18 @@ function emitFileRefs() {
 /** 加入一条待发送的文件引用（同一个路径只加一次） */
 export function addPendingFileRef(ref: ChatFileRef) {
   if (!ref?.path) return;
-  if (pendingFileRefs.some((p) => p.path === ref.path)) return;
+  const exist = pendingFileRefs.find((p) => p.path === ref.path);
+  if (exist) {
+    /* 同一个文件再挂一次：只在"原来没有落点、这次有"时补上落点。
+     * （先挂文件、后从检索里挂同一文件并带落点，是很自然的操作顺序。） */
+    if (!exist.loc && ref.loc) {
+      pendingFileRefs = pendingFileRefs.map((p) =>
+        p.path === ref.path ? { ...p, loc: ref.loc } : p
+      );
+      emitFileRefs();
+    }
+    return;
+  }
   pendingFileRefs = [...pendingFileRefs, ref];
   emitFileRefs();
 }

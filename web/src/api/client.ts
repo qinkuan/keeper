@@ -53,6 +53,8 @@ import type {
 
   MySpaceFile,
 
+  DocxDocument,
+
   Task,
 
   TaskItem,
@@ -1936,6 +1938,16 @@ export function apiSetMySpace(path: string) {
 /** 「我的空间」：读取空间内某文件的受限内容（越界会被后端拒绝）。 */
 export function apiMySpaceFile(path: string) {
   return apiGet<MySpaceFile>("/user-spaces/mine/file", { path });
+}
+
+/**
+ * Word(.docx)：解析成可渲染的 IR（段落/表格/图片 + 版面属性）。
+ *
+ * 解析在内核里做（keeper/docx/）：前端只画，不碰 OOXML——换渲染实现时
+ * IR 不用变。路径必须在「我的空间」内（内核会做越界校验）。
+ */
+export function apiGetDocxIr(path: string) {
+  return apiGet<DocxDocument>("/documents/docx", { path });
 }
 
 /** 「我的空间」：在系统文件管理器里打开（定位到）本空间 / 某文件（等同 PyCharm 的 Reveal）。 */

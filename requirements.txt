@@ -75,6 +75,8 @@ python-docx>=1.2       # Word(.docx) 读写（plugins/word：生成报告/合同
                       # 依赖 lxml（C 扩展）：打包时必须在 packaging/keeper-kernel.spec
                       # 里收 lxml 的原生库 + python-docx 的默认模板，否则打包版里
                       # 插件 import docx 直接失败（开发态却正常）。
+lxml>=4.9             # 直接 import lxml 解析 OOXML（docx/：docx → IR 的只读渲染）。
+                      # 此前只是 python-docx 的间接依赖，现在自己要用，就显式写出来。
 
 # ---- PDF 页面渲染（pdfpage/render.py）：把某一页整页渲染成 PNG 给 agent 看----
 # pypdfium2 = PDFium（Google）的 Python 绑定。

@@ -35,6 +35,9 @@ MAX_TABLE_COLS = 60
 MAX_CELL_CHARS = 4000
 MAX_READ_CHARS = 30000
 MAX_TEXT_CHARS = 200000
+# 回写（edit）的限制：一次最多多少个操作、单段最多多少字
+MAX_EDIT_OPS = 200
+MAX_EDIT_CHARS = 20000
 
 # 默认字体：西文 Calibri，中文微软雅黑（Windows 自带；mac 上装了 Office 也有）
 DEFAULT_ASCII_FONT = "Calibri"
@@ -595,6 +598,175 @@ def _read(p: Path, max_chars: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# 改（受限回写：只动段落，**另存副本，绝不覆盖原件**）
+# --------------------------------------------------------------------------
+#
+# 为什么能力要这么窄：
+# - docx 是 zip + OOXML，重建一份会丢样式、编号、域、图片、批注……所以这里
+#   在**原文件**上做最小修改（python-docx 只重写它认识的部分，其余部件原样保留）。
+# - 只支持「段落」这一级：追加一段 / 替换某段的纯文本 / 删掉某段。
+#   表格内部、图片、页眉页脚一律不动——动它们的代价（丢格式、丢关系）远大于收益。
+# - 输出一律是**新文件**：原件是用户的资产，不许被覆盖。
+#
+# 段落序号口径：**正文里的第 N 个段落**（1-based，不含表格里的段落、
+# 不含文本框里的段落）——与 word__read 读出来的顺序一致，模型能对上号。
+
+
+def _copy_para_format(src_p, new_p, style: str | None) -> None:
+    """把模板段落的 pPr / 首个 run 的 rPr 复制到新段（让新段看起来像原文里的段）。"""
+    from copy import deepcopy
+
+    if src_p is not None:
+        ppr = src_p._p.find(_qn("w:pPr"))
+        if ppr is not None:
+            new_p.append(deepcopy(ppr))
+    if style:
+        ppr = new_p.find(_qn("w:pPr"))
+        if ppr is None:
+            ppr = _el("w:pPr")
+            new_p.insert(0, ppr)
+        for old in ppr.findall(_qn("w:pStyle")):
+            ppr.remove(old)
+        ppr.insert(0, _el("w:pStyle", **{"w:val": style.replace(" ", "")}))
+
+
+def _make_para(text: str, src_p, style: str | None):
+    """造一个新段落（w:p），带模板段落的格式。"""
+    from copy import deepcopy
+
+    new_p = _el("w:p")
+    _copy_para_format(src_p, new_p, style)
+    r = _el("w:r")
+    if src_p is not None and src_p.runs:
+        rpr = src_p.runs[0]._r.find(_qn("w:rPr"))
+        if rpr is not None:
+            r.append(deepcopy(rpr))
+    t = _el("w:t")
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t.text = text
+    r.append(t)
+    new_p.append(r)
+    return new_p
+
+
+def _tool_edit(args: dict, ctx: dict) -> str:
+    rel = (args.get("path") or "").strip()
+    if not rel:
+        raise Biz("[缺少 path] 请给出要改的工作区内 .docx 路径")
+    p = _resolve(ctx, rel)
+    if not p.exists():
+        raise Biz(f"[文件不存在] {rel}")
+    if bool(ctx.get("read_only")):
+        raise Biz("[只读工作区] 当前会话绑定的工作区是只读的，不能写文件")
+
+    ops = args.get("ops") or []
+    if not isinstance(ops, list) or not ops:
+        raise Biz("[缺少 ops] ops 必填：要做的改动列表（append / replace / delete）")
+    if len(ops) > MAX_EDIT_OPS:
+        raise Biz(f"[改动太多] 一次最多 {MAX_EDIT_OPS} 个操作，收到 {len(ops)}")
+
+    # 输出路径：默认在原文件名后加 _edited；**永远不是原文件**
+    out_rel = (args.get("out_path") or "").strip()
+    if not out_rel:
+        out_rel = str(Path(rel).with_name(Path(rel).stem + "_edited" + Path(rel).suffix))
+    out = _resolve(ctx, out_rel)
+    if out.resolve() == p.resolve():
+        raise Biz(
+            "[拒绝覆盖原件] 回写一律另存副本，不覆盖原文件。"
+            f"请把 out_path 设成别的名字（如 {out_rel.replace('.docx', '_v2.docx')}）"
+        )
+    if out.exists() and not args.get("overwrite"):
+        raise Biz(f"[文件已存在] {out_rel}。要覆盖这个副本请加 overwrite:true")
+
+    _docx()
+    from docx import Document
+
+    doc = Document(str(p))
+    body = doc.element.body
+    done: list[str] = []
+
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict):
+            raise Biz(f"[ops[{i}] 无效] 每个操作必须是对象")
+        kind = (op.get("op") or op.get("type") or "").strip().lower()
+        paras = doc.paragraphs  # 每次重新取：上一处改动会让序号平移
+
+        if kind == "append":
+            text = str(op.get("text") or "")
+            if not text:
+                raise Biz(f"[ops[{i}] 缺 text] append 必须给 text")
+            if len(text) > MAX_EDIT_CHARS:
+                raise Biz(f"[ops[{i}] 太长] 单段最多 {MAX_EDIT_CHARS} 字")
+            after = op.get("after")
+            style = op.get("style")
+            if after is None:
+                # 追加到正文末尾（sectPr 之前，Word 要求它是最后一个孩子）
+                src = paras[-1] if paras else None
+                new_p = _make_para(text, src, style)
+                sect = body.find(_qn("w:sectPr"))
+                if sect is not None:
+                    sect.addprevious(new_p)
+                else:
+                    body.append(new_p)
+                done.append(f"在文末追加了 1 段")
+            else:
+                k = int(after)
+                if k < 0 or k > len(paras):
+                    raise Biz(f"[ops[{i}] after 越界] after 是第几段（0=最前），收到 {k}，文档共 {len(paras)} 段")
+                src = paras[k - 1] if k >= 1 else (paras[0] if paras else None)
+                new_p = _make_para(text, src, style)
+                if k == 0:
+                    first = body.find(_qn("w:p"))
+                    if first is not None:
+                        first.addprevious(new_p)
+                    else:
+                        body.insert(0, new_p)
+                else:
+                    paras[k - 1]._p.addnext(new_p)
+                done.append(f"在第 {k} 段后追加了 1 段")
+            continue
+
+        if kind == "replace":
+            k = int(op.get("index") or op.get("paragraph") or 0)
+            if k < 1 or k > len(paras):
+                raise Biz(f"[ops[{i}] 段号越界] index 是第几段（1 起），收到 {k}，文档共 {len(paras)} 段")
+            text = str(op.get("text") or "")
+            if len(text) > MAX_EDIT_CHARS:
+                raise Biz(f"[ops[{i}] 太长] 单段最多 {MAX_EDIT_CHARS} 字")
+            para = paras[k - 1]
+            old = (para.text or "")[:40]
+            if para.runs:
+                para.runs[0].text = text
+                for r in list(para.runs[1:]):
+                    r._r.getparent().remove(r._r)
+            else:
+                para.add_run(text)
+            done.append(f"第 {k} 段文本已替换（原：{old!r}）")
+            continue
+
+        if kind == "delete":
+            k = int(op.get("index") or op.get("paragraph") or 0)
+            if k < 1 or k > len(paras):
+                raise Biz(f"[ops[{i}] 段号越界] index 是第几段（1 起），收到 {k}，文档共 {len(paras)} 段")
+            el = paras[k - 1]._element
+            el.getparent().remove(el)
+            done.append(f"第 {k} 段已删除")
+            continue
+
+        raise Biz(f"[ops[{i}] 未知操作] {kind}（可用：append / replace / delete）")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out))
+    size_kb = out.stat().st_size / 1024
+    return (
+        f"已改写并另存为 {out_rel}（{size_kb:.1f} KB），原文件 {rel} 未改动。\n"
+        + "\n".join(done)
+        + f"\n现在共 {len(doc.paragraphs)} 段（不含表格内段落）。"
+        + "需要核对内容可用 word__read 回读。"
+    )
+
+
+# --------------------------------------------------------------------------
 # 工具入口
 # --------------------------------------------------------------------------
 def _tool_create(args: dict, ctx: dict) -> str:
@@ -650,7 +822,9 @@ def handle(tool: str, args: dict, ctx: dict) -> str:
         return _tool_create(args, ctx)
     if tool == "read":
         return _tool_read(args, ctx)
-    raise Biz(f"未知工具 {tool}（本插件提供 create / read）")
+    if tool == "edit":
+        return _tool_edit(args, ctx)
+    raise Biz(f"未知工具 {tool}（本插件提供 create / read / edit）")
 
 
 def main() -> None:

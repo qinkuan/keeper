@@ -1377,6 +1377,130 @@ export interface MySpaceFile {
   text: string;
 }
 
+// ---- Word(.docx) 只读渲染：IR（见 GET /documents/docx）----
+//
+// 这是内核解析出来的**中间表示**，不是 docx 本身：段落/表格/图片 + 版面属性。
+// 前端只按这些字段画，不再碰 OOXML——换渲染方式（HTML → canvas）时 IR 不用变。
+
+/** 一段连续文字（同一套格式）。 */
+export interface DocxRun {
+  text?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  /** 字号（磅）。 */
+  size?: number;
+  /** 西文字体。 */
+  font?: string;
+  /** 中日韩字体（中文文档里真正生效的那个）。 */
+  font_east_asia?: string;
+  color?: string;
+  highlight?: string;
+  /** 1=上标 2=下标。 */
+  vert_align?: number;
+  line_break?: boolean;
+  tab?: boolean;
+  link?: string;
+}
+
+/** 段落级编号（标记文本已算好，如 "1." / "•"）。 */
+export interface DocxNumbering {
+  level?: number;
+  marker?: string;
+  num_id?: number;
+}
+
+export interface DocxImage {
+  data_uri?: string;
+  /** 宽/高（磅）。 */
+  width?: number;
+  height?: number;
+}
+
+/** 一条边框（w:tblBorders / w:tcBorders 的一个子元素）。 */
+export interface DocxBorder {
+  /** w:val：single / dashed / dotted / double / none… */
+  style?: string;
+  /** 粗细（磅）。 */
+  size?: number;
+  /** #RRGGBB。 */
+  color?: string;
+}
+
+/** 制表位（w:tabs/w:tab）。 */
+export interface DocxTab {
+  /** 位置（磅），从左边距算起。 */
+  pos?: number;
+  /** left / right / center / decimal。 */
+  val?: string;
+  /** 前导符：none / dot / hyphen / underscore / middleDot。 */
+  leader?: string;
+}
+
+export interface DocxParagraph {
+  type: "paragraph";
+  runs?: DocxRun[];
+  style_id?: string;
+  style_name?: string;
+  /** 大纲级别（0=一级标题）。 */
+  outline_level?: number;
+  align?: string;
+  indent_left?: number;
+  indent_right?: number;
+  indent_first_line?: number;
+  space_before?: number;
+  space_after?: number;
+  line_height?: number;
+  numbering?: DocxNumbering;
+  images?: DocxImage[];
+  /** 制表位。 */
+  tabs?: DocxTab[];
+}
+
+export interface DocxCell {
+  blocks?: DocxBlock[];
+  colspan?: number;
+  /** 0 = 纵向合并的延续行（渲染时跳过这一格）。 */
+  rowspan?: number;
+  width?: number;
+  shading?: string;
+  valign?: string;
+  /** 有效边框（已合并表格级默认与单元格覆盖）：top/left/bottom/right。 */
+  borders?: Record<string, DocxBorder>;
+}
+
+export interface DocxTable {
+  type: "table";
+  rows?: DocxCell[][];
+  /** 各列宽度（磅）。 */
+  col_widths?: number[];
+  /** 表格级边框（含 insideH/insideV）。 */
+  borders?: Record<string, DocxBorder>;
+}
+
+export type DocxBlock = DocxParagraph | DocxTable;
+
+/** 页面设置（磅）。 */
+export interface DocxPage {
+  width?: number;
+  height?: number;
+  margin_top?: number;
+  margin_right?: number;
+  margin_bottom?: number;
+  margin_left?: number;
+}
+
+export interface DocxDocument {
+  blocks?: DocxBlock[];
+  page?: DocxPage;
+  /** 样式 id → 名称。 */
+  styles?: Record<string, string>;
+  /** 抽取时遇到的不支持特性（前端据此提示"用系统应用看原样"）。 */
+  unsupported?: string[];
+  paragraph_count?: number;
+}
+
 // ---- 模型管理（本地维护的模型预设；agent 通过绑定引用）----
 export interface ModelProfile {
   id: string;

@@ -44,6 +44,7 @@ import { ToastHost } from "./components/ui/Toast";
 import { Pill } from "./components/ui/Pill";
 import { Stat } from "./components/ui/Stat";
 import { useDebug } from "./hooks/useDebug";
+import { subscribeOpenFile } from "./lib/openFile";
 
 /**
  * 侧栏常驻导航。两项，都是"去干活"而不是"去配置"：
@@ -187,13 +188,17 @@ export default function App() {
     });
   };
   const [route, setRoute] = useState<Route>(() => {
-    const agentId = new URLSearchParams(window.location.search).get("agent");
+    const sp = new URLSearchParams(window.location.search);
+    const agentId = sp.get("agent");
+    // 深链 ?file=<绝对路径>：直接落到「我的空间」并打开那个文件。
+    // 网页形态没有原生文件树，没有这个入口就完全打不开某个具体文档。
+    const file = sp.get("file");
     // 落地页 =「对话」（侧栏的主动作），**不是** Keeper 菜单里的「智能体」。
     // 「智能体」是"去装载 / 配置"的地方，不该是启动即落地的界面。
     // agentId 先空着：核心 agent 的 id 要等后端列表回来才知道，拿到后自动补上
     // （见下面的 effect）。对话页会自己恢复上次看的那条会话（ChatPage 的
     // remembered()），所以落地即上次现场，不需要先建一条空会话。
-    return { page: "chat", agentId: agentId ?? undefined };
+    return { page: file ? "user-spaces" : "chat", agentId: agentId ?? undefined };
   });
 
   /* 设置弹窗当前展示哪一段；null = 未打开。设置从侧栏底部齿轮进入，
@@ -220,6 +225,17 @@ export default function App() {
   }, [chatWidth]);
   /* 常驻对话面板是否收起（仿侧栏「隐藏菜单」的折叠交互）。 */
   const [chatCollapsed, setChatCollapsed] = useState(false);
+
+  /* 「打开某个文件（带落点）」的请求：来自对话页的 @ 检索命中。
+   *
+   * 空间页没挂载时（route = chat）没人接这个请求，所以这里负责切路由——
+   * 切过去后 UserSpacePage 挂载，会从 lib/openFile 的暂存里取走目标并打开文件。
+   * 已经挂在空间页时（route = user-spaces），空间页自己会收到，这里切路由是幂等的。 */
+  useEffect(() => {
+    return subscribeOpenFile(() => {
+      setRoute((r) => (r.page === "user-spaces" ? r : { page: "user-spaces" }));
+    });
+  }, []);
 
   /* 核心 agent = 新建会话的默认落点。它的 id 由后端从配置里解析
    （config.yaml 的 core_agent.id，默认 "core"），所以一定有值——除非
@@ -695,6 +711,9 @@ export default function App() {
                      收/展对话的按钮就放在文件展示区的右上角。 */
                   onToggleChat={() => setChatCollapsed((v) => !v)}
                   chatCollapsed={chatCollapsed}
+                  /* 深链 ?file=<绝对路径>：直接打开那个文件（网页形态没有文件树，
+                     没有这个入口就打不开任何具体文档）。 */
+                  initialFile={new URLSearchParams(window.location.search).get("file")}
                 />
               </div>
               {/* 右：常驻对话面板——可拖宽、可整体收起（仿侧栏「隐藏菜单」）。

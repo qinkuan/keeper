@@ -1,12 +1,12 @@
 {
   "name": "word",
   "version": "1.0.0",
-  "description": "生成 Word(.docx) 文档：标题层级、段落、列表、表格、图片、页眉页脚、目录、页码；并可回读文档结构核对内容",
+  "description": "生成 Word(.docx) 文档：标题层级、段落、列表、表格、图片、页眉页脚、目录、页码；可回读结构核对，并可受限改写段落（另存副本）",
   "skill": "skills/SKILL.md",
   "bin": [
     {
       "name": "word",
-      "summary": "Word(.docx) 生成与回读：按结构描述生成规范排版的文档（标题/段落/列表/表格/图片/页眉页脚/目录/页码），以及回读结构核对",
+      "summary": "Word(.docx) 生成、回读与受限改写：按结构描述生成规范排版的文档，回读结构核对内容，或只改段落并另存副本（不覆盖原件）",
       "command": "${PLUGIN_ROOT}/bin/word.py",
       "timeout": 120,
       "tools": [
@@ -16,64 +16,142 @@
           "parameters": {
             "type": "object",
             "properties": {
-              "path": { "type": "string", "description": ".docx 输出路径（工作区内相对路径，如 报告/方案.docx）" },
-              "overwrite": { "type": "boolean", "description": "目标已存在时是否覆盖；默认 false（避免冲掉用户已有文档）" },
+              "path": {
+                "type": "string",
+                "description": ".docx 输出路径（工作区内相对路径，如 报告/方案.docx）"
+              },
+              "overwrite": {
+                "type": "boolean",
+                "description": "目标已存在时是否覆盖；默认 false（避免冲掉用户已有文档）"
+              },
               "doc": {
                 "type": "object",
                 "description": "文档结构描述。blocks 是必填的正文块数组。",
                 "properties": {
-                  "title": { "type": "string", "description": "文档标题（无 cover 时置于正文最前）" },
-                  "subtitle": { "type": "string", "description": "副标题" },
+                  "title": {
+                    "type": "string",
+                    "description": "文档标题（无 cover 时置于正文最前）"
+                  },
+                  "subtitle": {
+                    "type": "string",
+                    "description": "副标题"
+                  },
                   "cover": {
                     "type": "object",
                     "description": "封面页（给了就单独占一页）",
                     "properties": {
-                      "title": { "type": "string" },
-                      "subtitle": { "type": "string" },
-                      "author": { "type": "string" },
-                      "date": { "type": "string" },
-                      "org": { "type": "string" }
+                      "title": {
+                        "type": "string"
+                      },
+                      "subtitle": {
+                        "type": "string"
+                      },
+                      "author": {
+                        "type": "string"
+                      },
+                      "date": {
+                        "type": "string"
+                      },
+                      "org": {
+                        "type": "string"
+                      }
                     }
                   },
                   "page": {
                     "type": "object",
                     "description": "页面设置",
                     "properties": {
-                      "size": { "type": "string", "enum": ["A4", "LETTER", "A3"], "description": "纸张，默认 A4" },
-                      "margin_cm": { "type": "number", "description": "四边页边距（cm），默认 2.5" }
+                      "size": {
+                        "type": "string",
+                        "enum": [
+                          "A4",
+                          "LETTER",
+                          "A3"
+                        ],
+                        "description": "纸张，默认 A4"
+                      },
+                      "margin_cm": {
+                        "type": "number",
+                        "description": "四边页边距（cm），默认 2.5"
+                      }
                     }
                   },
                   "header": {
                     "type": "object",
                     "description": "页眉",
                     "properties": {
-                      "text": { "type": "string" },
-                      "align": { "type": "string", "enum": ["left", "center", "right"] },
-                      "rule": { "type": "boolean", "description": "页眉下横线，默认 true" }
+                      "text": {
+                        "type": "string"
+                      },
+                      "align": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ]
+                      },
+                      "rule": {
+                        "type": "boolean",
+                        "description": "页眉下横线，默认 true"
+                      }
                     }
                   },
                   "footer": {
                     "type": "object",
                     "description": "页脚",
                     "properties": {
-                      "page_numbers": { "type": "boolean", "description": "是否插入页码（PAGE/NUMPAGES 域），默认 true" },
-                      "prefix": { "type": "string", "description": "页码前缀，如「第 」" },
-                      "middle": { "type": "string", "description": "页码中间的连接词，如「 页 / 共 」" },
-                      "total_pages": { "type": "boolean", "description": "是否显示总页数，默认 true" },
-                      "align": { "type": "string", "enum": ["left", "center", "right"] }
+                      "page_numbers": {
+                        "type": "boolean",
+                        "description": "是否插入页码（PAGE/NUMPAGES 域），默认 true"
+                      },
+                      "prefix": {
+                        "type": "string",
+                        "description": "页码前缀，如「第 」"
+                      },
+                      "middle": {
+                        "type": "string",
+                        "description": "页码中间的连接词，如「 页 / 共 」"
+                      },
+                      "total_pages": {
+                        "type": "boolean",
+                        "description": "是否显示总页数，默认 true"
+                      },
+                      "align": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ]
+                      }
                     }
                   },
                   "toc": {
                     "type": "object",
                     "description": "目录（Word 域，打开后按 F9 生成）",
                     "properties": {
-                      "enabled": { "type": "boolean" },
-                      "levels": { "type": "string", "description": "收录层级，如 1-3，默认 1-3" },
-                      "title": { "type": "string", "description": "目录标题，如「目录」" }
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "levels": {
+                        "type": "string",
+                        "description": "收录层级，如 1-3，默认 1-3"
+                      },
+                      "title": {
+                        "type": "string",
+                        "description": "目录标题，如「目录」"
+                      }
                     }
                   },
-                  "font_ea": { "type": "string", "description": "中文字体，默认 Microsoft YaHei（微软雅黑）" },
-                  "font_ascii": { "type": "string", "description": "西文字体，默认 Calibri" },
+                  "font_ea": {
+                    "type": "string",
+                    "description": "中文字体，默认 Microsoft YaHei（微软雅黑）"
+                  },
+                  "font_ascii": {
+                    "type": "string",
+                    "description": "西文字体，默认 Calibri"
+                  },
                   "blocks": {
                     "type": "array",
                     "description": "正文块，按顺序渲染",
@@ -82,33 +160,115 @@
                       "properties": {
                         "type": {
                           "type": "string",
-                          "enum": ["heading", "paragraph", "bullets", "numbers", "table", "image", "code", "quote", "page_break", "spacer", "caption"],
+                          "enum": [
+                            "heading",
+                            "paragraph",
+                            "bullets",
+                            "numbers",
+                            "table",
+                            "image",
+                            "code",
+                            "quote",
+                            "page_break",
+                            "spacer",
+                            "caption"
+                          ],
                           "description": "块类型"
                         },
-                        "text": { "type": "string", "description": "heading/paragraph/code/quote/caption 的正文" },
-                        "level": { "type": "integer", "description": "heading 层级 1-4（1 是一级标题）" },
-                        "items": { "type": "array", "items": { "type": "string" }, "description": "bullets / numbers 的条目" },
-                        "header": { "type": "array", "items": { "type": "string" }, "description": "table 表头" },
-                        "rows": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "table 数据行" },
-                        "widths_cm": { "type": "array", "items": { "type": "number" }, "description": "table 各列宽度（cm），个数需与列数一致" },
-                        "path": { "type": "string", "description": "image 的图片路径（工作区内）" },
-                        "width_cm": { "type": "number", "description": "image 宽度（cm），默认 14" },
-                        "caption": { "type": "string", "description": "table / image 的图题表题" },
-                        "align": { "type": "string", "enum": ["left", "center", "right", "justify"] },
-                        "bold": { "type": "boolean" },
-                        "italic": { "type": "boolean" },
-                        "size": { "type": "number", "description": "字号（pt）" },
-                        "indent": { "type": "number", "description": "左缩进（cm）" },
-                        "page_break_before": { "type": "boolean", "description": "heading 前是否分页" }
+                        "text": {
+                          "type": "string",
+                          "description": "heading/paragraph/code/quote/caption 的正文"
+                        },
+                        "level": {
+                          "type": "integer",
+                          "description": "heading 层级 1-4（1 是一级标题）"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "bullets / numbers 的条目"
+                        },
+                        "header": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "table 表头"
+                        },
+                        "rows": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "description": "table 数据行"
+                        },
+                        "widths_cm": {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          },
+                          "description": "table 各列宽度（cm），个数需与列数一致"
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "image 的图片路径（工作区内）"
+                        },
+                        "width_cm": {
+                          "type": "number",
+                          "description": "image 宽度（cm），默认 14"
+                        },
+                        "caption": {
+                          "type": "string",
+                          "description": "table / image 的图题表题"
+                        },
+                        "align": {
+                          "type": "string",
+                          "enum": [
+                            "left",
+                            "center",
+                            "right",
+                            "justify"
+                          ]
+                        },
+                        "bold": {
+                          "type": "boolean"
+                        },
+                        "italic": {
+                          "type": "boolean"
+                        },
+                        "size": {
+                          "type": "number",
+                          "description": "字号（pt）"
+                        },
+                        "indent": {
+                          "type": "number",
+                          "description": "左缩进（cm）"
+                        },
+                        "page_break_before": {
+                          "type": "boolean",
+                          "description": "heading 前是否分页"
+                        }
                       },
-                      "required": ["type"]
+                      "required": [
+                        "type"
+                      ]
                     }
                   }
                 },
-                "required": ["blocks"]
+                "required": [
+                  "blocks"
+                ]
               }
             },
-            "required": ["path", "doc"]
+            "required": [
+              "path",
+              "doc"
+            ]
           },
           "mutating": true,
           "requires_workspace": true
@@ -119,12 +279,84 @@
           "parameters": {
             "type": "object",
             "properties": {
-              "path": { "type": "string", "description": ".docx 路径（工作区内相对路径）" },
-              "max_chars": { "type": "integer", "description": "最多返回字符数，默认 30000" }
+              "path": {
+                "type": "string",
+                "description": ".docx 路径（工作区内相对路径）"
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "最多返回字符数，默认 30000"
+              }
             },
-            "required": ["path"]
+            "required": [
+              "path"
+            ]
           },
           "mutating": false,
+          "requires_workspace": true
+        },
+        {
+          "name": "edit",
+          "description": "受限改写已有的 .docx：只动**段落**（追加一段 / 替换某段纯文本 / 删掉某段），另存为新文件，**绝不覆盖原件**。段落序号 = 正文里的第 N 个段落（1 起，不含表格内段落），与 word__read 读出的顺序一致。全名 word__edit",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "要改的 .docx 路径（工作区内相对路径）"
+              },
+              "out_path": {
+                "type": "string",
+                "description": "另存为的新文件名（工作区内相对路径）；默认在原名后加 _edited。必须与原文件不同"
+              },
+              "overwrite": {
+                "type": "boolean",
+                "description": "输出副本已存在时是否覆盖它（默认 false；无论如何都不会覆盖原文件）"
+              },
+              "ops": {
+                "type": "array",
+                "description": "要做的改动，按顺序执行（每一步之后的段号会平移）",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "enum": [
+                        "append",
+                        "replace",
+                        "delete"
+                      ],
+                      "description": "操作类型"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "append / replace 的新文本"
+                    },
+                    "index": {
+                      "type": "integer",
+                      "description": "replace / delete 的目标段号（1 起）"
+                    },
+                    "after": {
+                      "type": "integer",
+                      "description": "append 插在第几段之后（0 = 插到最前）；不给 = 追加到文末"
+                    },
+                    "style": {
+                      "type": "string",
+                      "description": "append 的段落样式名，如 Heading 2"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "path",
+              "ops"
+            ]
+          },
+          "mutating": true,
           "requires_workspace": true
         }
       ]

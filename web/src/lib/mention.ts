@@ -28,6 +28,20 @@ export interface MentionItem {
   fileRel?: string;
   /** 文件类候选是不是目录 */
   isDir?: boolean;
+  /**
+   * 文件类候选的**命中落点**（从检索结果来的时候才有）。
+   *
+   * 有了它，选中这个文件就能直接跳到命中的那一段 / 那一页，
+   * 而不是"打开了但要自己找"。
+   */
+  fileLoc?: {
+    /** docx：段序号；markdown：行号 */
+    line?: number;
+    /** pdf：页码 */
+    page?: number;
+    /** 命中词 */
+    terms?: string[];
+  };
 }
 
 export interface MentionConfig {

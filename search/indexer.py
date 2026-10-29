@@ -26,7 +26,7 @@ from typing import Callable, Optional
 from . import config
 
 from .deps import require_numpy
-from .ingest import chunk, detect, pdf
+from .ingest import chunk, detect, docx, pdf
 from .store import db as dbmod
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,13 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
     # 按文件类型分派切片器：
     # - Markdown：读全文 → 标题树切片
     # - PDF：读大纲 + 逐页文本 → 大纲标题树切片（扫描件会切不出东西 → 跳过）
-    source_kind = "pdf" if detect.is_pdf(path) else "markdown"
+    # - Word：docx → IR（标题层级 + 段落）→ 段落级切片
+    if detect.is_pdf(path):
+        source_kind = "pdf"
+    elif detect.is_docx(path):
+        source_kind = "docx"
+    else:
+        source_kind = "markdown"
     # 指纹里带上切片格式版本：切片方式变了（比如 CHUNK_MIN_CHARS 调低），
     # 同一个文件可能就切得出块了，此时缓存必须失效。
     sig = (mtime, size, config.CHUNK_FORMAT_VERSION)
@@ -143,6 +149,17 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
         except Exception as e:  # noqa: BLE001 坏文件 / 加密 / 没装 pypdf
             logger.warning("PDF 解析失败，跳过：%s（%s）", path, e)
             chunks = []
+    elif source_kind == "docx":
+        # docx 走自研解析（keeper/docx/）：标题层级 + 段落级切片。
+        # 坏文件在 chunk_docx 内部已经兜住（返回空列表），这里不用再包一层。
+        chunks = docx.chunk_docx(
+            path,
+            file_path=str(path),
+            doc_type=doc_type,
+            min_chars=config.CHUNK_MIN_CHARS,
+            max_chars=config.CHUNK_MAX_CHARS,
+            parent_max_chars=config.PARENT_MAX_CHARS,
+        )
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
         chunks = chunk.chunk_markdown(
@@ -166,6 +183,9 @@ def index_path(conn, embedder, path, force=False, doc_type=None, prescreen=False
             logger.debug(
                 "PDF 没有可索引的正文（多半是扫描件 / 纯图片 PDF），跳过：%s", path
             )
+        elif source_kind == "docx":
+            # 空文档 / 纯图片的 Word（内容全在图片里）/ 解析失败
+            logger.debug("Word 没有可索引的正文（空文档或纯图片），跳过：%s", path)
         # 记进内存缓存：下一轮只要文件没变，就别再解析一遍了。
         if len(_EMPTY_CACHE) >= _EMPTY_CACHE_MAX:
             _EMPTY_CACHE.clear()

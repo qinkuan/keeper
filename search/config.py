@@ -56,7 +56,10 @@ EMBED_FORMAT_VERSION = 4
 #:
 #: 用途：prescreen 用它判断「能不能只看 mtime+size 就跳过这个文件」——
 #: 版本不一致时不跳过，重新切一遍（不重嵌）。
-CHUNK_FORMAT_VERSION = 1
+#:
+#: 2 = 新增 docx 切片器（docx 的 titlepath / 块序号定位与 markdown/pdf 不同，
+#:     老库里若有 docx 条目，其定位信息是过期的）。
+CHUNK_FORMAT_VERSION = 2
 
 #: **关键词字段格式版本**。改动 ``tokens`` / ``title_tokens`` / ``name_tokens`` /
 #: ``doc_title_tokens`` 的构造方式时必须 +1，否则老库里按旧规则算出来的字段

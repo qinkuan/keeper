@@ -4,6 +4,8 @@ from pathlib import Path
 
 MARKDOWN_EXTS = {".md", ".markdown", ".mdown", ".mkd"}
 PDF_EXTS = {".pdf"}
+#: Word(.docx) 与带宏的 .docm（内部结构相同，都能当 zip 解）
+DOCX_EXTS = {".docx", ".docm"}
 
 
 def is_markdown(path: Path) -> bool:
@@ -14,12 +16,17 @@ def is_pdf(path: Path) -> bool:
     return Path(path).suffix.lower() in PDF_EXTS
 
 
+def is_docx(path: Path) -> bool:
+    return Path(path).suffix.lower() in DOCX_EXTS
+
+
 def is_indexable(path: Path) -> bool:
     """这个文件要不要进检索索引。
 
-    目前两种：Markdown（结构化切片）与 PDF（大纲标题树 + 页级切片）。
+    三种：Markdown（结构化切片）、PDF（大纲标题树 + 页级切片）、
+    Word（标题层级 + 段落级切片，见 ingest/docx.py）。
     """
-    return is_markdown(path) or is_pdf(path)
+    return is_markdown(path) or is_pdf(path) or is_docx(path)
 
 
 def _list_files(root: Path, recursive: bool, predicate):

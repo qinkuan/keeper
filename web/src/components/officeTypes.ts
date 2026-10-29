@@ -1,9 +1,12 @@
 // Office 文档（Word / PowerPoint）的类型判定。
 //
-// 这两个格式**只走「用系统应用打开」**，不做页面内预览：OOXML 的版面信息
-// （字体字号、分栏、浮动定位、动画、图表）远多于文字，只抽文字渲染出来与本地
-// 应用差异大到「根本没法看」；高保真方案（LibreOffice 转 PDF / OnlyOffice）与
-// 这个项目的轻量桌面定位冲突。详见 doc/roadmap.md。
+// 两种格式的待遇**不一样**（2026-10 起）：
+//   docx —— 自研只读渲染（keeper/docx/ 解析成 IR + components/DocxViewer 画）：
+//     段落/表格/图片/编号/样式继承都还原；浮动定位、SmartArt、公式、修订不还原，
+//     渲染器会显式列出并给「用系统应用打开」兜底。
+//   pptx —— 幻灯片靠版式还原，自研性价比太低，仍只提供「用系统应用打开」。
+//
+// 详见 doc/roadmap.md。
 
 /** 属于 Office 文档。含 .docm/.pptm——它们同样只能用系统应用打开。 */
 const OFFICE_EXTS = new Set(["docx", "docm", "pptx", "pptm"]);

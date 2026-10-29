@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type MutableRefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type MutableRefObject, type ReactNode } from "react";
 import {
   ChevronRight,
   ExternalLink,
@@ -11,6 +11,7 @@ import {
   FolderPlus,
   Loader2,
   MessageSquarePlus,
+  Minus,
   PanelLeft,
   PanelRight,
   Pencil,
@@ -22,9 +23,14 @@ import {
   X,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGetMySpace, apiSearchQuery, apiSearchStats, apiSetMySpace } from "../api/client";
+import { apiGetDocxIr, apiGetMySpace, apiSearchQuery, apiSearchStats, apiSetMySpace } from "../api/client";
 import type { MySpaceFile, SearchHit } from "../api/types";
 import { makeSpaceApi, spaceFileUrl, type SpaceApi } from "../api/spaceNative";
+import {
+  subscribeOpenFile,
+  takePendingOpenFile,
+  type OpenFileTarget,
+} from "../lib/openFile";
 import { Hint } from "../components/ui/Page";
 import { toast } from "../components/ui/Toast";
 import { cn, isComposingKey } from "../lib/utils";
@@ -39,6 +45,7 @@ import { officeKindOf } from "../components/officeTypes";
 import { ChartView, MermaidView } from "../components/DiagramView";
 import SheetViewer from "../components/SheetViewer";
 import PdfViewer from "../components/PdfViewer";
+import { DocxViewer, type DocxCtl, type DocxInfo } from "../components/DocxViewer";
 import FileTypeIcon from "../components/FileTypeIcon";
 
 /** 树节点：既能是目录（可展开）也能是文件（叶子）。 */
@@ -145,6 +152,8 @@ interface FileHit {
   end_line: number;
   /** PDF 的起始页码（1-based）；Markdown 为 null */
   page: number | null;
+  /** markdown / pdf / docx —— 决定定位串怎么写（"第 N 行" / "第 N 页" / "第 N 段"） */
+  source_kind: string | null;
   count: number;
   /** 这个文件里实际命中的词（后端分词后给的）——用来高亮 */
   matched: string[];
@@ -171,6 +180,7 @@ function groupByFile(hits: SearchHit[], root: string): FileHit[] {
         start_line: h.start_line,
         end_line: h.end_line,
         page: h.page ?? null,
+        source_kind: h.source_kind ?? null,
         count: 1,
         matched: [...(h.matched_terms ?? [])],
       });
@@ -186,6 +196,7 @@ function groupByFile(hits: SearchHit[], root: string): FileHit[] {
         cur.start_line = h.start_line;
         cur.end_line = h.end_line;
         cur.page = h.page ?? cur.page;
+        cur.source_kind = h.source_kind ?? cur.source_kind;
       }
     }
   }
@@ -235,7 +246,7 @@ function SearchResults({
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-faint">
         <SearchIcon className="h-8 w-8" />
         <div className="text-[13px]">没有匹配的文件</div>
-        <div className="text-[12px]">只有被索引过的文件（Markdown / PDF）能被搜到</div>
+        <div className="text-[12px]">只有被索引过的文件（Markdown / PDF / Word）能被搜到</div>
       </div>
     );
   return (
@@ -250,7 +261,15 @@ function SearchResults({
           key={h.path}
           type="button"
           onClick={() => onOpen(h)}
-          title={h.page ? `打开并跳到第 ${h.page} 页` : h.start_line ? `打开并跳到第 ${h.start_line} 行` : "打开这个文件"}
+          title={
+            h.page
+              ? `打开并跳到第 ${h.page} 页`
+              : h.start_line
+                ? h.source_kind === "docx"
+                  ? `打开并跳到第 ${h.start_line} 段`
+                  : `打开并跳到第 ${h.start_line} 行`
+                : "打开这个文件"
+          }
           className="flex flex-col gap-1.5 rounded-lg border border-line-soft bg-surface px-3 py-2.5 text-left transition-colors hover:border-brand/40 hover:bg-panel"
         >
           <div className="flex items-center gap-2">
@@ -281,7 +300,9 @@ function SearchResults({
               {h.locator
                 ? ` · ${h.locator}`
                 : h.start_line
-                  ? ` · 第 ${h.start_line}-${h.end_line} 行`
+                  ? h.source_kind === "docx"
+                    ? ` · 第 ${h.start_line}-${h.end_line} 段`
+                    : ` · 第 ${h.start_line}-${h.end_line} 行`
                   : ""}
             </div>
           )}
@@ -533,9 +554,14 @@ function SourceOnly({ name, text }: { name: string; text: string }) {
  * 「预览 / 编辑」按钮放在右侧标题栏（文件名右边），但**编辑态与保存逻辑仍归
  * FileViewer 所有**：切文件丢弃草稿、退回预览前落盘这些规则不能散到父组件。
  * 父组件拿这个句柄去触发切换，FileViewer 通过 onModeChange 把状态报回去。
+ *
+ * 缩放（DocxCtl）同理：控件在标题栏，"适宽"的比例由 DocxViewer 实时算，
+ * 两边靠这个句柄 + onModeChange 通信。
  */
-export interface FileViewerCtl {
+export interface FileViewerCtl extends DocxCtl {
   toggleEdit?: () => void;
+  /** 用系统应用打开当前文件（docx / pptx 这类保真兜底） */
+  openWithApp?: () => void;
 }
 
 function FileViewer({
@@ -560,7 +586,15 @@ function FileViewer({
   /** 标题栏用它触发「预览 ↔ 编辑」切换（见 FileViewerCtl） */
   ctl?: MutableRefObject<FileViewerCtl>;
   /** 把编辑态报给标题栏：按钮文案 / 图标 / 禁用态都在那边渲染 */
-  onModeChange?: (m: { editing: boolean; saving: boolean; editable: boolean }) => void;
+  onModeChange?: (m: {
+    editing: boolean;
+    saving: boolean;
+    editable: boolean;
+    /** docx 预览的缩放状态与文档元信息（别的文件类型是 null） */
+    info: DocxInfo | null;
+    /** 「用系统应用打开」按钮的文案（docx → 用 Word 打开，pptx → 用 PowerPoint 打开） */
+    openWithAppLabel?: string;
+  }) => void;
 }) {
   const qc = useQueryClient();
   const fq = useQuery({
@@ -610,10 +644,47 @@ function FileViewer({
    * 「预览/编辑」按钮要不要出现——而标题栏在父组件里，得由这里报上去。 */
   const editable = !!fq.data?.is_text && !fq.data?.too_large;
 
+  /* docx 的页面内渲染：解析在内核（keeper/docx/）里做，这里只取 IR。
+   *
+   * 这个 hook **必须**放在下面那些提前 return 之前：首帧 fq 还在 loading 时直接
+   * 返回（不执行它），数据到达后重渲染才执行——两次渲染的 hook 数量不一致，
+   * React 会抛 #310「Rendered more hooks than during the previous render」，
+   * 整页白屏（症状与文件类型无关，像是"点开任何文件都崩"）。
+   *
+   * officeKind 从 path 算（officeKindOf 取最后一段文件名），不依赖 fq.data，
+   * 所以首帧也能判定；enabled 保证只有 docx 才真的发请求。 */
+  const officeKind = officeKindOf(path);
+  const docxIrQ = useQuery({
+    queryKey: ["docx-ir", path],
+    queryFn: () => apiGetDocxIr(path),
+    enabled: officeKind === "docx",
+    staleTime: 60_000,
+  });
+
+  /* docx 预览报上来的缩放状态与文档元信息（标题栏的缩放组与副标题用它）。
+     切文件时清掉——不然上一个文件的「适宽」标签会留在标题栏上。 */
+  const [docxInfo, setDocxInfo] = useState<DocxInfo | null>(null);
+  useEffect(() => {
+    setDocxInfo(null);
+  }, [path]);
+
   // 把编辑态报给标题栏：按钮文案（编辑/预览）、图标、禁用态都在那边渲染。
   useEffect(() => {
-    onModeChange?.({ editing, saving, editable });
-  }, [editing, saving, editable, onModeChange]);
+    onModeChange?.({
+      editing,
+      saving,
+      editable,
+      info: docxInfo,
+      /* 「用系统应用打开」：docx 交给 Word，pptx 交给 PowerPoint——
+         按钮文案跟着格式走，别让 pptx 也写「用 Word 打开」。 */
+      openWithAppLabel:
+        officeKind === "docx"
+          ? "用 Word 打开"
+          : officeKind === "pptx"
+            ? "用 PowerPoint 打开"
+            : undefined,
+    });
+  }, [editing, saving, editable, docxInfo, officeKind, onModeChange]);
 
   /* 预览 ↔ 编辑切换：进编辑先拿当前内容当草稿；退回预览前把草稿落盘。
    *
@@ -647,6 +718,16 @@ function FileViewer({
     };
   }, [ctl]);
 
+  /* 「用 Word 打开」的命令：标题栏渲染按钮，点它走这里的 openWithApp
+     （保真 100% 的那条路——页面内渲染毕竟还原不全）。 */
+  useEffect(() => {
+    if (!ctl) return;
+    ctl.current.openWithApp = () => void openWithApp(path);
+    return () => {
+      ctl.current.openWithApp = undefined;
+    };
+  }, [ctl, path]);
+
   if (fq.isLoading)
     return (
       <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-muted">
@@ -661,9 +742,6 @@ function FileViewer({
       </div>
     );
   const f: MySpaceFile = fq.data!;
-  // officeKind 从 path 算（officeKindOf 取最后一段文件名），不依赖 f——首帧数据
-  // 还没到时也要能判定这是不是 Office 文档
-  const officeKind = officeKindOf(path);
   // 与「会话 / 工作区」里的文件预览共用同一张分派表（components/viewers.ts），
   // 保证同样的扩展名在两处用同一套展示器：图片 / PDF / 视频 / Markdown / 代码 / HTML。
   const kind = viewerKindOf(f.name);
@@ -711,34 +789,71 @@ function FileViewer({
     }
   };
 
-  // Office 文档（docx/pptx）：**只给「用系统应用打开」**，不做页面内预览。
+  // Office 文档：
+  //   docx → 内核解析成 IR 后在页面里渲染（只读）；pptx → 仍只给「用系统应用打开」。
   //
-  // 为什么不做预览（2026-10 的决策）：OOXML 的版面信息（字体字号、分栏、浮动
-  // 定位、动画、图表）远远多于文字，只抽文字的话渲染出来与本地应用差异大到
-  // 「没法看」；要做高保真只能捆绑 LibreOffice 转 PDF（300MB）或上 OnlyOffice
-  // 那一量级，都与这个项目的轻量桌面定位冲突。而「用系统应用打开」本身就是
-  // 100% 保真的方案，所以把力气花在把它做顺（一键、失败有反馈）上。
-  //
-  // 解析器曾实现过一版内容抽取（desktop/officeDoc.js），已随之撤掉。
+  // docx 渲染是 2026-10 起的自研方案（keeper/docx/ 解析 + DocxViewer 画）：
+  // 目标是「读得懂、读得舒服」，不是 100% 还原版面——浮动定位、文本框精确位置、
+  // SmartArt、公式、修订仍不还原，渲染器会把这类特性列出来提示「用系统应用看原样」。
+  // pptx 是**幻灯片**（一页一张、靠版式），与 docx 的流式排版完全不同，
+  // 自研渲染的性价比很低，先不动。
+  if (officeKind === "docx") {
+    if (docxIrQ.isLoading) {
+      return (
+        <div className="flex h-full items-center justify-center gap-2 text-ink-muted">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          正在解析文档…
+        </div>
+      );
+    }
+    if (docxIrQ.isError || !docxIrQ.data) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
+          <FileTypeIcon name={f.name} size="md" />
+          <div className="text-[13px] text-ink">读不出这个文档</div>
+          <div className="max-w-[440px] text-[12px] leading-[1.7] text-ink-faint">
+            {((docxIrQ.error as Error)?.message ?? "解析失败")}
+            。可以下载后用系统里的 Word 打开。
+          </div>
+          <button
+            type="button"
+            onClick={() => void openWithApp(path)}
+            className="mt-1 flex h-7 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            用系统应用打开
+          </button>
+        </div>
+      );
+    }
+    return (
+      <DocxViewer
+        doc={docxIrQ.data}
+        /* 缩放控件在标题栏：这里只给命令句柄与状态回报的回调 */
+        ctl={ctl}
+        onInfo={setDocxInfo}
+        /* 检索命中的落点：line = 块序号（与内核切片同口径）→ 滚到那一段 */
+        jump={jump}
+      />
+    );
+  }
+
   if (officeKind) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
         <FileTypeIcon name={f.name} size="md" />
-        <div className="text-[13px] text-ink">
-          {officeKind === "docx" ? "Word 文档" : "PowerPoint 演示文稿"}
-        </div>
+        <div className="text-[13px] text-ink">PowerPoint 演示文稿</div>
         <div className="text-[12px] text-ink-muted">
           {f.name} · {fmtSize(f.size)}
         </div>
         <div className="max-w-[440px] text-[12px] leading-[1.7] text-ink-faint">
-          这个格式不做页面内预览——格式还原成本高且容易失真。
-          用系统里的{officeKind === "docx" ? " Word" : " PowerPoint"} 打开看原样，
-          改完保存后回到这里刷新即可看到新内容。
+          这个格式不做页面内预览——幻灯片靠版式还原，成本高且容易失真。
+          用系统里的 PowerPoint 打开看原样，改完保存后回到这里刷新即可看到新内容。
         </div>
         {/* 唯一入口。失败（没装对应应用）要给反馈，不能静默 */}
         <button
           type="button"
-          title={`用系统里的${officeKind === "docx" ? " Word" : " PowerPoint"} 打开`}
+          title="用系统里的 PowerPoint 打开"
           onClick={() => void openWithApp(path)}
           className="mt-1 flex h-7 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
         >
@@ -1005,12 +1120,21 @@ function HResizeBar({ onResize }: { onResize: (dx: number) => void }) {
 export default function UserSpacePage({
   onToggleChat,
   chatCollapsed,
+  initialFile,
 }: {
   /** 收/展右侧对话区。对话区自己的顶栏与那条竖边都没了，
    *  按钮就放在「文件展示区」的右上角。 */
   onToggleChat?: () => void;
   /** 对话区当前是否已收起（决定按钮的提示文案）。 */
   chatCollapsed?: boolean;
+  /**
+   * 深链：初始就选中这个文件（绝对路径）。
+   *
+   * 为什么要它：网页形态没有原生文件树，「我的空间」里没有任何入口能打开
+   * 某个具体文件——只能靠 `?file=<绝对路径>` 直达。桌面形态也用它做"从搜索/
+   * 引用跳到某个文件"的落点。
+   */
+  initialFile?: string | null;
 } = {}) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["my-space"], queryFn: apiGetMySpace });
@@ -1022,13 +1146,21 @@ export default function UserSpacePage({
   const [treeData, setTreeData] = useState<TNode[]>([]);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [treeLoadingKey, setTreeLoadingKey] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(initialFile ?? null);
   /* 「预览 / 编辑」按钮放在右侧标题栏（文件名右边）：
    *   fileMode —— FileViewer 报上来的编辑态（editing/saving/editable）；
    *   fileCtl  —— 反向句柄，标题栏点按钮时用它让 FileViewer 切换。
    * 编辑逻辑仍在 FileViewer 内部，这里只负责渲染按钮。 */
   const fileCtl = useRef<FileViewerCtl>({});
-  const [fileMode, setFileMode] = useState({ editing: false, saving: false, editable: false });
+  const [fileMode, setFileMode] = useState<{
+    editing: boolean;
+    saving: boolean;
+    editable: boolean;
+    /** docx 预览报上来的缩放状态与文档元信息（别的文件类型没有） */
+    info: DocxInfo | null;
+    /** 「用系统应用打开」按钮的文案（docx / pptx 有，别的没有） */
+    openWithAppLabel?: string;
+  }>({ editing: false, saving: false, editable: false, info: null });
   // 跳转目标：从搜索结果点进来时带上（行号 / 页码 / 命中词）。
   // seq 每次 +1 —— 同一个文件同一处连点两次也要重新跳（否则第二次没反应）。
   const [jump, setJump] = useState<{
@@ -1110,12 +1242,64 @@ export default function UserSpacePage({
     onError: (e: any) => toast.error(e?.message || "保存失败"),
   });
 
+  /* 最近一次「打开文件」的目标：空间根还没就绪时先记着，
+   * 就绪后补选一次（否则首帧 path 为空会把选中态清掉）。 */
+  const openTargetRef = useRef<OpenFileTarget | null>(null);
+
+  /* 「打开某个文件（带落点）」的请求：来自对话页的 @ 检索命中。
+   *
+   * 两个来源都要接：
+   * 1. 事件（空间页已挂载时）——立刻打开并跳到落点；
+   * 2. 暂存（事件到达时空间页还没挂载，例如从整页对话切过来）——
+   *    挂载后补做一次。
+   * 两条路都走同一段逻辑，避免"有时跳有时不跳"。 */
+  const applyOpenTarget = useCallback((t: OpenFileTarget) => {
+    openTargetRef.current = t;
+    setSelectedFile(t.path);
+    setView("browse");
+    setJump((prev) => ({
+      path: t.path,
+      line: t.line,
+      page: t.page,
+      terms: t.terms,
+      seq: (prev?.seq ?? 0) + 1,
+    }));
+  }, []);
+
+  useEffect(() => {
+    // 订阅：空间页已挂载时，请求立刻生效
+    const off = subscribeOpenFile((t) => {
+      takePendingOpenFile(); // 已处理，清掉暂存
+      applyOpenTarget(t);
+    });
+    // 补做：请求到达时本页还没挂载（从整页对话切过来）
+    const t = takePendingOpenFile();
+    if (t) applyOpenTarget(t);
+    return off;
+  }, [applyOpenTarget]);
+
   // path 变化时：重置选中，并加载空间根目录的一级子项
   useEffect(() => {
     if (!path) {
       setTreeData([]);
-      setSelectedFile(null);
+      // 深链（?file=）的首帧 path 还没回来——这时**不能**清选中，否则深链被抹掉。
+      // 同理：对话页 @ 命中的落点也在这时候等着，别把它一起清了。
+      if (!initialFile && !openTargetRef.current) setSelectedFile(null);
       return;
+    }
+    /* 深链：把 ?file= 指到的文件选上。
+     *
+     * 为什么需要在这里再选一次：首帧 path 为空 → 上面的分支会走掉（现在不清了），
+     * 但 path 就绪这一刻才是"这个文件确实在空间内"的判定时刻——顺手在这里确认
+     * 一下，避免深链指向空间外的路径时渲染出一个空预览。 */
+    if (initialFile && (initialFile === path || initialFile.startsWith(path + "/"))) {
+      setSelectedFile(initialFile);
+    }
+    /* 对话页 @ 命中的落点：空间根就绪这一刻才是"这文件确实在空间内"的判定时刻，
+     * 顺手补选一次（首帧 path 为空时选中态被清掉了）。 */
+    const ot = openTargetRef.current;
+    if (ot && (ot.path === path || ot.path.startsWith(path + "/"))) {
+      setSelectedFile(ot.path);
     }
     let cancelled = false;
     setTreeLoadingKey(path);
@@ -1148,7 +1332,7 @@ export default function UserSpacePage({
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, initialFile]);
 
   const onToggleDir = async (key: string) => {
     const willOpen = !expandedKeys.has(key);
@@ -1656,9 +1840,16 @@ export default function UserSpacePage({
                   )}
                 </span>
               ) : selectedFile ? (
+                /* 文件名**只在这里出现一次**：预览区自己那条工具条已经撤掉
+                   （原先两处都写文件名，同一个名字前后各出现一遍）。 */
                 <span className="flex min-w-0 items-center gap-1.5 truncate">
                   <FileTypeIcon name={relPath} size="xs" />
                   <span className="truncate font-mono">{relPath}</span>
+                  {fileMode.info?.meta && (
+                    <span className="shrink-0 text-ink-faint">
+                      {fileMode.info.meta}
+                    </span>
+                  )}
                 </span>
               ) : (
                 <span className="text-ink-faint">未选择文件</span>
@@ -1672,6 +1863,58 @@ export default function UserSpacePage({
                   >
                     <ArrowLeft className="h-3 w-3" />
                     搜索结果
+                  </button>
+                )}
+                {view === "browse" && selectedFile && fileMode.info && (
+                  /* 缩放组：默认「适应页宽」（页面比预览区窄时整页等比缩小），
+                     也可以手动放大看原始字号。原先这条控件在预览区自己的工具条上，
+                     跟标题栏的「添加到对话」隔了一行——现在并到同一行。
+                     命令发给 DocxViewer（它才知道"适宽"该是多少），状态由它回报。 */
+                  <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-line bg-panel px-0.5 py-0.5">
+                    <button
+                      type="button"
+                      title="缩小"
+                      disabled={!fileMode.info.canOut}
+                      onClick={() => fileCtl.current.zoomOut?.()}
+                      className="rounded-md p-1 text-ink-muted transition-colors hover:bg-surface hover:text-ink-strong disabled:opacity-35"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      title="适应页宽"
+                      onClick={() => fileCtl.current.zoomFit?.()}
+                      className={
+                        "min-w-[52px] rounded-md px-1.5 py-0.5 text-[11.5px] tabular-nums transition-colors " +
+                        (fileMode.info.zoom === "适宽"
+                          ? "bg-brand/15 text-ink-strong"
+                          : "text-ink-muted hover:bg-surface hover:text-ink-strong")
+                      }
+                    >
+                      {fileMode.info.zoom}
+                    </button>
+                    <button
+                      type="button"
+                      title="放大"
+                      disabled={!fileMode.info.canIn}
+                      onClick={() => fileCtl.current.zoomIn?.()}
+                      className="rounded-md p-1 text-ink-muted transition-colors hover:bg-surface hover:text-ink-strong disabled:opacity-35"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+                {view === "browse" && selectedFile && fileMode.openWithAppLabel && (
+                  /* 「用 Word 打开」：保真 100% 的那条路（页面内渲染还原不全时兜底）。
+                     文案跟着格式走：pptx 是「用 PowerPoint 打开」。 */
+                  <button
+                    type="button"
+                    onClick={() => fileCtl.current.openWithApp?.()}
+                    title="用系统里的应用打开（100% 保真，可编辑）"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2.5 text-[12px] text-ink-muted transition-all duration-150 hover:bg-surface hover:text-ink-strong"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {fileMode.openWithAppLabel}
                   </button>
                 )}
                 {view === "browse" && selectedFile && (
