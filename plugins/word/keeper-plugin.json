@@ -12,7 +12,7 @@
       "tools": [
         {
           "name": "create",
-          "description": "生成 .docx 文档。你只需给出**结构描述**（标题/段落/表格/图片…），排版由插件负责，产出可交付的报告/合同/方案。目录与页码是 Word 域，首次打开需在 Word 里按 F9 更新。全名 word__create",
+          "description": "生成 .docx 文档。你只需给出**结构描述**（标题/段落/表格/图片…），排版由插件负责，产出可交付的报告/合同/方案。用 preset 指定版式（公文/合同/报告/技术文档）。目录与页码是 Word 域，首次打开需在 Word 里按 F9 更新。全名 word__create",
           "parameters": {
             "type": "object",
             "properties": {
@@ -148,6 +148,17 @@
                     "type": "string",
                     "description": "中文字体，默认 Microsoft YaHei（微软雅黑）"
                   },
+                  "preset": {
+                    "type": "string",
+                    "enum": [
+                      "gongwen",
+                      "contract",
+                      "report",
+                      "tech",
+                      "default"
+                    ],
+                    "description": "版式预设（排版规范整套给定，你只说用哪一套）。gongwen=公文（三号仿宋、固定行距 28 磅、首行缩进两字符、版心 156×225mm、页边距 3.7/3.5/2.8/2.6cm）；contract=合同（小四宋体、1.5 倍行距、首行缩进两字符、标题居中 18pt、页边距 2.54/3.17cm）；report=报告（小四宋体、1.5 倍行距、首行缩进两字符、默认带目录）；tech=技术文档（微软雅黑 11pt、行距 1.4、不首行缩进、代码块 10pt）；default=原有默认。也可以直接写中文名：公文/合同/报告/技术文档。预设只是默认值——你显式写 font_ea / page / margin_cm 的话以你的为准。"
+                  },
                   "font_ascii": {
                     "type": "string",
                     "description": "西文字体，默认 Calibri"
@@ -263,6 +274,17 @@
                 "required": [
                   "blocks"
                 ]
+              },
+              "preset": {
+                "type": "string",
+                "enum": [
+                  "gongwen",
+                  "contract",
+                  "report",
+                  "tech",
+                  "default"
+                ],
+                "description": "版式预设（也可以写在 doc.preset 里，效果相同）。公文/合同/报告/技术文档四套；也接受中文名。"
               }
             },
             "required": [

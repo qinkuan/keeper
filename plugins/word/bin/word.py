@@ -43,6 +43,125 @@ MAX_EDIT_CHARS = 20000
 DEFAULT_ASCII_FONT = "Calibri"
 DEFAULT_EA_FONT = "Microsoft YaHei"
 
+# --------------------------------------------------------------------------
+# 版式预设
+# --------------------------------------------------------------------------
+#
+# 为什么要有预设：同一份结构描述（标题/段落/列表…），排出来给人的气质差很远——
+# 公文要三号仿宋、固定行距 28 磅、首行缩进两字符；合同要小四宋体、标题居中；
+# 技术文档不要首行缩进、行距紧一点。这些数字模型记不住也不该记，
+# 所以把"一整套排版规范"命名成 preset，模型只说"按合同版式"。
+#
+# **预设只提供默认值**：cfg 里显式写了 font_ea / page / margin_cm / toc.enabled，
+# 一律以显式值为准——预设是兜底，不是强制。
+#
+# 数值参考：
+# - 公文：GB/T 9704《党政机关公文格式》（版心 156×225mm、三号仿宋、每页 22 行）
+# - 合同/报告：小四宋体、1.5 倍行距、首行缩进两字符
+# - 技术文档：无首行缩进（用空行分段）、行距 1.4、等宽代码块
+PRESETS: dict[str, dict] = {
+    "default": {
+        "label": "默认",
+        "fonts": {"ascii": DEFAULT_ASCII_FONT, "ea": DEFAULT_EA_FONT},
+        "body": {"size": 12, "line": 1.5, "space_after": 6, "indent_cm": 0, "align": "left"},
+        "headings": {
+            "1": {"size": 18, "bold": True},
+            "2": {"size": 16, "bold": True},
+            "3": {"size": 14, "bold": True},
+            "4": {"size": 12, "bold": True},
+        },
+        "title": {"size": 22},
+        "toc": False,
+    },
+    "gongwen": {
+        "label": "公文",
+        "fonts": {"ascii": "Times New Roman", "ea": "仿宋"},
+        "page": {
+            "size": "A4",
+            "margin_cm": {"top": 3.7, "bottom": 3.5, "left": 2.8, "right": 2.6},
+        },
+        # 三号（16pt）仿宋；固定行距 28 磅（公文每页 22 行的由来）
+        "body": {
+            "size": 16, "line_pt": 28, "space_after": 0,
+            "indent_cm": 1.13, "align": "justify",
+        },
+        "headings": {
+            "1": {"size": 16, "bold": False, "ea": "黑体", "before": 0, "after": 0},
+            "2": {"size": 16, "bold": True, "ea": "楷体", "before": 0, "after": 0},
+            "3": {"size": 16, "bold": True, "ea": "仿宋", "before": 0, "after": 0},
+            "4": {"size": 16, "bold": True, "ea": "仿宋", "before": 0, "after": 0},
+        },
+        "title": {"size": 16, "ea": "方正小标宋简体", "align": "center"},
+        "toc": False,
+    },
+    "contract": {
+        "label": "合同",
+        "fonts": {"ascii": "Times New Roman", "ea": "宋体"},
+        "page": {"size": "A4", "margin_cm": {"top": 2.54, "bottom": 2.54, "left": 3.17, "right": 3.17}},
+        "body": {
+            "size": 12, "line": 1.5, "space_after": 6,
+            "indent_cm": 0.74, "align": "justify",
+        },
+        "headings": {
+            "1": {"size": 16, "bold": True, "ea": "黑体", "before": 12, "after": 6},
+            "2": {"size": 14, "bold": True, "ea": "黑体", "before": 10, "after": 6},
+            "3": {"size": 12, "bold": True, "ea": "黑体", "before": 8, "after": 4},
+            "4": {"size": 12, "bold": True, "ea": "楷体", "before": 6, "after": 4},
+        },
+        "title": {"size": 18, "ea": "宋体", "align": "center"},
+        "toc": False,
+    },
+    "report": {
+        "label": "报告",
+        "fonts": {"ascii": "Times New Roman", "ea": "宋体"},
+        "page": {"size": "A4", "margin_cm": {"top": 2.5, "bottom": 2.5, "left": 2.5, "right": 2.5}},
+        "body": {
+            "size": 12, "line": 1.5, "space_after": 6,
+            "indent_cm": 0.74, "align": "justify",
+        },
+        "headings": {
+            "1": {"size": 16, "bold": True, "ea": "黑体", "before": 12, "after": 6},
+            "2": {"size": 14, "bold": True, "ea": "黑体", "before": 10, "after": 6},
+            "3": {"size": 12, "bold": True, "ea": "黑体", "before": 8, "after": 4},
+            "4": {"size": 12, "bold": True, "ea": "楷体", "before": 6, "after": 4},
+        },
+        "title": {"size": 22, "ea": "黑体", "align": "center"},
+        "toc": True,
+    },
+    "tech": {
+        "label": "技术文档",
+        "fonts": {"ascii": "Calibri", "ea": "微软雅黑"},
+        "page": {"size": "A4", "margin_cm": {"top": 2.5, "bottom": 2.5, "left": 2.5, "right": 2.5}},
+        # 技术文档不首行缩进（靠空行分段），行距收紧一点
+        "body": {
+            "size": 11, "line": 1.4, "space_after": 8,
+            "indent_cm": 0, "align": "left",
+        },
+        "headings": {
+            "1": {"size": 18, "bold": True, "ea": "微软雅黑", "before": 16, "after": 8},
+            "2": {"size": 15, "bold": True, "ea": "微软雅黑", "before": 12, "after": 6},
+            "3": {"size": 13, "bold": True, "ea": "微软雅黑", "before": 10, "after": 4},
+            "4": {"size": 11.5, "bold": True, "ea": "微软雅黑", "before": 8, "after": 4},
+        },
+        "title": {"size": 20, "ea": "微软雅黑", "align": "center"},
+        "toc": True,
+        "code_size": 10,
+    },
+}
+
+# 中文名/别名 → 预设 key（模型很可能直接写"按合同版式"）
+PRESET_ALIASES = {
+    "公文": "gongwen", "党政机关公文": "gongwen", "gongwen": "gongwen",
+    "合同": "contract", "协议": "contract", "contract": "contract",
+    "报告": "report", "汇报": "report", "report": "report",
+    "技术文档": "tech", "技术说明书": "tech", "说明书": "tech",
+    "技术": "tech", "tech": "tech", "document": "tech",
+    "默认": "default", "default": "default",
+}
+
+# 工具描述里给模型看的清单
+PRESET_CHOICES = "gongwen（公文）/ contract（合同）/ report（报告）/ tech（技术文档）/ default"
+
 ALIGN_MAP = {
     "left": 0,
     "center": 1,
@@ -131,28 +250,68 @@ def _set_fonts(rpr, ascii_font: str, ea_font: str) -> None:
     rf.set(_qn("w:cs"), ascii_font)
 
 
-def _setup_styles(doc, ascii_font: str, ea_font: str) -> None:
-    """把默认样式调成「中文可交付」的观感。"""
-    styles = doc.styles
-    normal = styles["Normal"]
-    normal.font.size = None  # 交给下面的 sz
-    _set_fonts(normal.element.get_or_add_rPr(), ascii_font, ea_font)
-    # 正文：小四号（12pt）、1.5 倍行距、段后 6pt
-    pf = normal.paragraph_format
-    pf.line_spacing = 1.5
-    pf.space_after = _pt(6)
+def _apply_align(pf, align: str | None) -> None:
+    """对齐（Normal / 标题样式上都用得上）。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    # 标题：黑体系（中易雅黑/雅黑），去掉默认的蓝色主题色
+    m = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT,
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+    }
+    a = (align or "").strip().lower()
+    if a in m:
+        pf.alignment = m[a]
+
+
+def _setup_styles(doc, sty: dict) -> None:
+    """按版式设置 Normal 与 Heading 1-4。
+
+    正文的一切（字号、行距、段后、首行缩进、对齐）都挂在 Normal 样式上——
+    这样每个段落自动继承，不用逐段设；列表/表格里的段落再单独清掉首行缩进。
+    """
+    styles = doc.styles
+    fonts = sty["fonts"]
+    body = sty["body"]
+    normal = styles["Normal"]
+    # 正文字号：之前这里写的是 `size = None`，等于**没设**——正文其实是 Word 默认的
+    # 11pt Calibri，跟文档里"小四宋体"的说法对不上。现在按版式明确给字号。
+    normal.font.size = _pt(body.get("size", 12))
+    _set_fonts(normal.element.get_or_add_rPr(), fonts["ascii"], fonts["ea"])
+    pf = normal.paragraph_format
+    # 行距：给了磅值就是固定行距（公文的 28 磅），否则是倍数
+    pf.line_spacing = _pt(body["line_pt"]) if body.get("line_pt") else body.get("line", 1.5)
+    pf.space_after = _pt(body.get("space_after", 6))
+    pf.space_before = _pt(body.get("space_before", 0))
+    if body.get("indent_cm"):
+        pf.first_line_indent = _cm(body["indent_cm"])
+    else:
+        pf.first_line_indent = None
+    _apply_align(pf, body.get("align"))
+
+    # 标题：字号/字体/加粗按版式；去掉默认的蓝色主题色
     for lvl in range(1, 5):
         name = f"Heading {lvl}"
         try:
             st = styles[name]
         except KeyError:
             continue
+        h = sty["headings"].get(str(lvl), {})
         st.font.color.rgb = None
-        st.font.bold = True
-        st.font.size = _pt({1: 18, 2: 16, 3: 14, 4: 12}.get(lvl, 12))
-        _set_fonts(st.element.get_or_add_rPr(), ascii_font, ea_font)
+        st.font.bold = h.get("bold", True)
+        st.font.size = _pt(h.get("size", 12))
+        _set_fonts(
+            st.element.get_or_add_rPr(),
+            h.get("ascii", fonts["ascii"]),
+            h.get("ea", fonts["ea"]),
+        )
+        hpf = st.paragraph_format
+        hpf.space_before = _pt(h.get("before", 12))
+        hpf.space_after = _pt(h.get("after", 6))
+        hpf.line_spacing = body.get("line", 1.5) if not body.get("line_pt") else _pt(body["line_pt"])
+        hpf.first_line_indent = None  # 标题不缩进
+        _apply_align(hpf, h.get("align"))
 
 
 def _pt(v):
@@ -210,6 +369,15 @@ def _left_bar(paragraph, color: str = "BFBFBF") -> None:
     ppr.append(bdr)
 
 
+def _no_indent(paragraph) -> None:
+    """清掉首行缩进。
+
+    正文的首行缩进来自 Normal 样式（公文/合同/报告要缩进两字符），但列表、
+    表格单元格里再缩进就错了——那里一律归零。
+    """
+    paragraph.paragraph_format.first_line_indent = _cm(0)
+
+
 def _align(paragraph, align: str) -> None:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
@@ -221,18 +389,19 @@ def _align(paragraph, align: str) -> None:
 # --------------------------------------------------------------------------
 # 生成
 # --------------------------------------------------------------------------
-def _build(doc, cfg: dict, ctx: dict) -> None:
-    """按 cfg（结构描述）把文档搭出来。"""
+def _build(doc, cfg: dict, ctx: dict, sty: dict) -> None:
+    """按 cfg（结构描述）+ sty（版式）把文档搭出来。"""
     from docx.shared import Cm
 
-    ascii_font = cfg.get("font_ascii") or DEFAULT_ASCII_FONT
-    ea_font = cfg.get("font_ea") or DEFAULT_EA_FONT
-    _setup_styles(doc, ascii_font, ea_font)
+    fonts = sty["fonts"]
+    ascii_font, ea_font = fonts["ascii"], fonts["ea"]
+    _setup_styles(doc, sty)
 
     # ---- 页面 ----
     page = cfg.get("page") or {}
+    sty_page = sty.get("page") or {}
     sec = doc.sections[0]
-    size = (page.get("size") or "A4").strip().upper()
+    size = (page.get("size") or sty_page.get("size") or "A4").strip().upper()
     if size == "A4":
         sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
     elif size == "LETTER":
@@ -241,11 +410,22 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
         sec.page_width, sec.page_height = Cm(29.7), Cm(42.0)
     else:
         raise Biz(f"[page.size 无效] 支持 A4 / LETTER / A3，收到 {size}")
+    # 页边距：显式 margin_cm（数字=四边 / 字典=逐边）> 版式预设 > 2.5
     margin = page.get("margin_cm")
     if margin is None:
+        margin = sty_page.get("margin_cm")
+    if margin is None:
         margin = 2.5
-    for attr in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
-        setattr(sec, attr, Cm(float(margin)))
+    if isinstance(margin, dict):
+        for attr, key in (
+            ("left_margin", "left"), ("right_margin", "right"),
+            ("top_margin", "top"), ("bottom_margin", "bottom"),
+        ):
+            if key in margin:
+                setattr(sec, attr, Cm(float(margin[key])))
+    else:
+        for attr in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+            setattr(sec, attr, Cm(float(margin)))
 
     # ---- 页眉 / 页脚 ----
     header = cfg.get("header") or {}
@@ -284,6 +464,7 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
             doc.add_paragraph()
         p = doc.add_paragraph()
         _align(p, "center")
+        _no_indent(p)
         r = p.add_run(str(cfg.get("title") or cover.get("title") or ""))
         r.bold = True
         r.font.size = _pt(26)
@@ -291,6 +472,7 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
         if cover.get("subtitle"):
             p = doc.add_paragraph()
             _align(p, "center")
+            _no_indent(p)
             r = p.add_run(str(cover["subtitle"]))
             r.font.size = _pt(14)
             _set_fonts(r._r.get_or_add_rPr(), ascii_font, ea_font)
@@ -298,6 +480,7 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
             if cover.get(key):
                 p = doc.add_paragraph()
                 _align(p, "center")
+                _no_indent(p)
                 r = p.add_run(f"{label}：{cover[key]}")
                 r.font.size = _pt(12)
                 _set_fonts(r._r.get_or_add_rPr(), ascii_font, ea_font)
@@ -305,12 +488,13 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
 
     # ---- 标题（无封面时放在正文最前）----
     if not cover and cfg.get("title"):
+        t_sty = sty.get("title") or {}
         p = doc.add_paragraph()
-        _align(p, cfg.get("title_align") or "center")
+        _align(p, cfg.get("title_align") or t_sty.get("align") or "center")
         r = p.add_run(str(cfg["title"]))
         r.bold = True
-        r.font.size = _pt(22)
-        _set_fonts(r._r.get_or_add_rPr(), ascii_font, ea_font)
+        r.font.size = _pt(cfg.get("title_size") or t_sty.get("size", 22))
+        _set_fonts(r._r.get_or_add_rPr(), ascii_font, t_sty.get("ea", ea_font))
         if cfg.get("subtitle"):
             p = doc.add_paragraph()
             _align(p, "center")
@@ -321,6 +505,9 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
 
     # ---- 目录 ----
     toc = cfg.get("toc") or {}
+    if toc.get("enabled") is None:
+        toc = dict(toc)
+        toc["enabled"] = bool(sty.get("toc"))
     if toc.get("enabled"):
         if toc.get("title"):
             p = doc.add_paragraph()
@@ -342,10 +529,10 @@ def _build(doc, cfg: dict, ctx: dict) -> None:
     for i, b in enumerate(blocks):
         if not isinstance(b, dict):
             raise Biz(f"[blocks[{i}] 无效] 每个块必须是对象")
-        _block(doc, b, ctx, ascii_font, ea_font)
+        _block(doc, b, ctx, ascii_font, ea_font, sty)
 
 
-def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str) -> None:
+def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str, sty: dict | None = None) -> None:
     t = (b.get("type") or "").strip().lower()
 
     if t in ("heading", "h"):
@@ -379,6 +566,7 @@ def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str) -> None:
         for it in items:
             p = doc.add_paragraph(style="List Bullet")
             _align(p, b.get("align") or "left")
+            _no_indent(p)
             p.add_run(str(it))
         return
 
@@ -389,6 +577,7 @@ def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str) -> None:
         for it in items:
             p = doc.add_paragraph(style="List Number")
             _align(p, b.get("align") or "left")
+            _no_indent(p)
             p.add_run(str(it))
         return
 
@@ -416,9 +605,11 @@ def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str) -> None:
 
     if t == "code":
         p = doc.add_paragraph()
+        _no_indent(p)
         r = p.add_run(str(b.get("text") or ""))
+        code_size = float(b.get("size") or (sty or {}).get("code_size") or 9.5)
         r.font.name = "Consolas"
-        r.font.size = _pt(float(b.get("size") or 9.5))
+        r.font.size = _pt(code_size)
         _set_fonts(r._r.get_or_add_rPr(), "Consolas", ea_font)
         _shade(p._p, "F5F5F5")
         return
@@ -426,6 +617,7 @@ def _block(doc, b: dict, ctx: dict, ascii_font: str, ea_font: str) -> None:
     if t == "quote":
         p = doc.add_paragraph()
         _align(p, b.get("align") or "left")
+        _no_indent(p)
         r = p.add_run(str(b.get("text") or ""))
         r.italic = True
         r.font.color.rgb = _rgb(0x59, 0x59, 0x59)
@@ -499,6 +691,7 @@ def _table(doc, b: dict) -> None:
             cell.text = ""
             p = cell.paragraphs[0]
             _align(p, b.get("header_align") or "center")
+            _no_indent(p)
             r = p.add_run(str(h))
             r.bold = True
             _shade(cell._tc, "F2F2F2")
@@ -516,6 +709,7 @@ def _table(doc, b: dict) -> None:
             cell.text = ""
             p = cell.paragraphs[0]
             _align(p, b.get("align") or "left")
+            _no_indent(p)
             p.add_run(str(val)[:MAX_CELL_CHARS])
 
     if b.get("caption"):
@@ -595,6 +789,39 @@ def _read(p: Path, max_chars: int) -> str:
     if len(text) > max_chars:
         text = text[:max_chars] + "\n…（内容过多已截断）"
     return summary + "\n\n" + (text or "（正文为空）")
+
+
+# --------------------------------------------------------------------------
+# 版式预设的解析
+# --------------------------------------------------------------------------
+def _resolve_preset(cfg: dict) -> dict:
+    """把 cfg.preset 解析成一份版式参数（用户的显式值优先）。
+
+    返回的是**深拷贝**：预设表是模块级常量，不能被就地改掉
+    （否则第一次调用改了字体，第二次调用就全乱了）。
+    """
+    import copy
+
+    raw = str(cfg.get("preset") or "").strip()
+    key = PRESET_ALIASES.get(raw.lower(), raw.lower()) if raw else "default"
+    base = PRESETS.get(key)
+    if base is None:
+        raise Biz(
+            f"[preset 无效] 可用：{PRESET_CHOICES}；收到 {raw!r}"
+        )
+    sty = copy.deepcopy(base)
+
+    # 显式值覆盖预设：字体
+    fonts = sty["fonts"]
+    if cfg.get("font_ascii"):
+        fonts["ascii"] = str(cfg["font_ascii"])
+    if cfg.get("font_ea"):
+        fonts["ea"] = str(cfg["font_ea"])
+    # 显式值覆盖预设：标题字号
+    if cfg.get("title_size"):
+        sty["title"] = dict(sty.get("title") or {})
+        sty["title"]["size"] = float(cfg["title_size"])
+    return sty
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +1014,9 @@ def _tool_create(args: dict, ctx: dict) -> str:
     cfg = args.get("doc") or {}
     if not isinstance(cfg, dict):
         raise Biz("[doc 无效] doc 必须是对象（结构描述）")
+    # preset 可以写在顶层（args.preset）或 doc 里，两个都认，顶层只是兜底
+    if args.get("preset") and not cfg.get("preset"):
+        cfg = {**cfg, "preset": args["preset"]}
     blocks = cfg.get("blocks")
     if not blocks:
         raise Biz("[缺少 blocks] doc.blocks 是必填：文档的段落/表格/图片等结构")
@@ -795,12 +1025,17 @@ def _tool_create(args: dict, ctx: dict) -> str:
     from docx import Document
 
     doc = Document()
-    _build(doc, cfg, ctx)
+    sty = _resolve_preset(cfg)
+    _build(doc, cfg, ctx, sty)
     p.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(p))
     size_kb = p.stat().st_size / 1024
+    preset_name = str(cfg.get("preset") or "").strip()
+    preset_label = PRESETS.get(
+        PRESET_ALIASES.get(preset_name.lower(), preset_name.lower()), PRESETS["default"]
+    )["label"]
     return (
-        f"已生成 {rel}（{size_kb:.1f} KB）。"
+        f"已生成 {rel}（{size_kb:.1f} KB），版式：{preset_label}。"
         "注意：目录/页码是 Word 域，首次打开需在 Word 里按 Ctrl+A 再按 F9 更新；"
         "需要核对内容可用 word__read 回读。"
     )
