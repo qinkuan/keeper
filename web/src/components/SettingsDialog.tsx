@@ -21,6 +21,7 @@ import { Modal } from "./ui/Modal";
 import { toast } from "./ui/Toast";
 import { CoreAgentEditor } from "./CoreAgentEditor";
 import { DelegateeSettings } from "./DelegateeSettings";
+import { MySpaceSettings } from "./MySpaceSettings";
 
 import {
   apiGetSettings,
@@ -49,7 +50,8 @@ export type SettingsSection =
   | "a2a"
   | "debug"
   | "delegatee"
-  | "mention";
+  | "mention"
+  | "space";
 
 /** 侧栏弹出菜单用它渲染条目（label/描述集中在这里，菜单与标题不会写错） */
 export const SETTINGS_SECTIONS: {
@@ -57,6 +59,11 @@ export const SETTINGS_SECTIONS: {
   label: string;
   desc: string;
 }[] = [
+  {
+    key: "space",
+    label: "我的空间",
+    desc: "文件浏览与 @ 检索用的那个目录",
+  },
   {
     key: "core",
     label: "核心 agent",
@@ -334,9 +341,9 @@ export function SettingsDialog({
       title={title}
       width={620}
       footer={
-        // delegatee / mention 段自带保存逻辑（后者是纯前端 localStorage），
-        // 不需要弹窗底部的统一「保存 / 重新加载」
-        section === "delegatee" || section === "mention" ? (
+        // delegatee / mention / space 段自带保存逻辑（mention 是纯前端 localStorage，
+        // space 走自己的「我的空间」端点），不需要弹窗底部的统一「保存 / 重新加载」
+        section === "delegatee" || section === "mention" || section === "space" ? (
           <></>
         ) : (
           <>
@@ -861,6 +868,8 @@ export function SettingsDialog({
           {section === "delegatee" && <DelegateeSettings />}
 
           {section === "mention" && <MentionSettings />}
+
+          {section === "space" && <MySpaceSettings />}
         </div>
       )}
     </Modal>

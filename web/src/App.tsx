@@ -151,8 +151,9 @@ const SIDEBAR_WIDTH_COLLAPSED = 52;
  *
  * 「上下文」（长任务下上下文怎么治理）、「协作」（调对端时的超时与熔断）、
  * 「子 agent」（每个子 agent 独立的模型与插件）、「输入 @ 快捷项」——
- * 这四段都低频、偏排障或面向高级用户。普通用户的设置里只留「核心 agent」
- * （默认落点 + 人设）那一段，不该被一堆用不上的开关淹没。
+ * 这四段都低频、偏排障或面向高级用户。普通用户的设置里只留「我的空间」
+ * （换掉那个目录）与「核心 agent」（默认落点 + 人设）那两段，
+ * 不该被一堆用不上的开关淹没。
  *
  * 「调试」段本身不在这个表里：它是"调试模式的开关页"，逻辑写在渲染处。
  */
@@ -530,8 +531,8 @@ export default function App() {
               >
                 {/* 设置：带子菜单。子菜单由 Radix 在**悬停**时自动展开——
                     这比"点开子菜单"少一次点击，也符合桌面应用的习惯。
-                    「我的空间」是单独的顶层菜单项（直接开配置页），
-                    不再归在「设置」子菜单里。 */}
+                    「我的空间」也在这个子菜单里（改空间目录是一件低频事，
+                    不值得占一个顶层菜单项）。 */}
                 <DropdownMenu.Sub>
                   <DropdownMenuSubTrigger
                     className="flex cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-[13px] outline-none transition-colors duration-100 data-[highlighted]:bg-brand/12 data-[highlighted]:ring-1 data-[highlighted]:ring-brand/40"
