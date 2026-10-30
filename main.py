@@ -179,6 +179,11 @@ def make_app():
     from keeper.docx.api import router as docx_router
 
     app.include_router(docx_router)
+    # PDF 预览走服务端渲染（页 → PNG）：浏览器里的 pdf.js 遇到未嵌入字体的
+    # PDF 会把中文整片丢掉，PDFium 有 CJK 回退。
+    from keeper.pdfpage.api import router as pdfpage_router
+
+    app.include_router(pdfpage_router)
     # 可观测：用量聚合查询（/metrics/...），数据来自 llm_calls 事实表
     app.include_router(metrics_router)
     # 效果评估：读历史基线 + 触发评测（评测本体跑在子进程里，见 keeper/evals/api.py）

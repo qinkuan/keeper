@@ -1950,6 +1950,30 @@ export function apiGetDocxIr(path: string) {
   return apiGet<DocxDocument>("/documents/docx", { path });
 }
 
+/**
+ * PDF 元信息：页数 + 首页尺寸（pt）。
+ *
+ * 预览走服务端渲染（页 → PNG），见 /documents/pdf/page。
+ */
+export function apiGetPdfInfo(path: string) {
+  return apiGet<{ pages: number; width: number; height: number }>(
+    "/documents/pdf/info",
+    { path }
+  );
+}
+
+/**
+ * 某一页的渲染图 URL（服务端出 PNG）。
+ *
+ * `pxWidth` 是**像素**宽（一般传 CSS 宽 × devicePixelRatio，保证高清屏不糊）。
+ */
+export function apiPdfPageUrl(path: string, page: number, pxWidth: number) {
+  return (
+    `/documents/pdf/page?path=${encodeURIComponent(path)}` +
+    `&page=${page}&width=${Math.max(64, Math.round(pxWidth))}`
+  );
+}
+
 /** 「我的空间」：在系统文件管理器里打开（定位到）本空间 / 某文件（等同 PyCharm 的 Reveal）。 */
 export function apiOpenMySpace(path: string, allowDir: boolean) {
   return apiPost<{ ok: boolean }>("/user-spaces/mine/open", {

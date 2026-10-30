@@ -889,7 +889,8 @@ function FileViewer({
     return (
       <PdfViewer
         name={f.name}
-        loadBytes={loadBytes}
+        /* 服务端渲染整页 PNG（浏览器里的 pdf.js 会把未嵌入字体的中文丢掉） */
+        path={path}
         jumpToPage={jump?.page ? { page: jump.page, seq: jump.seq } : null}
       />
     );
