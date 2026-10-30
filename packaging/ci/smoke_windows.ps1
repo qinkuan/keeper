@@ -11,6 +11,12 @@
     4. bash 插件能执行一条命令（Windows 上用内置 busybox sh / Git Bash / cmd）
     5. 插件绑定用 junction 建得起来（Windows 上没有开发者模式也能建目录联接）
     6. 打包好的桌面 app 能起来，并把内核拉起来
+    7. SQLite FTS5 可用（关键词检索的地基）
+    8. jieba 分词可用（中文检索的前提）
+    9. 检索端点 /search/query 可用（关键词模式）
+    10. litert 原生库可加载（向量检索运行时；没装就跳过）
+    11. PDF 页面渲染可用（pypdfium2；没装就跳过）
+
 
   注意：这些检查跑在 **Windows Server 2022** 上，那台机器本身可能装了
   Python/Node —— 所以每一步都用**绝对路径**指向内置的运行时，不靠 PATH 猜。
@@ -102,14 +108,37 @@ Step "3. 随包的真 node 能跑（没有就跳过）" {
 }
 
 Step "4. bash 插件能执行命令（Windows 上用内置 POSIX shell）" {
-  $plugin = Join-Path $PSScriptRoot "..\..\plugins\bash\bin\bash_server"
-  if (-not (Test-Path $plugin)) { throw "找不到 bash 插件：$plugin" }
+  # 插件 bin 的**文件名会变**（bash_server → bash_server.py，2026-10 那次 CI 就是
+  # 因为这里写死了旧名字而红了一项）。所以要跑哪个文件，从插件清单里读出来，
+  # 而不是把文件名钉死在这儿；读不到再退回 glob 找。
+  $pluginDir = Join-Path $PSScriptRoot "..\..\plugins\bash"
+  $plugin = $null
+  $manifest = Join-Path $pluginDir "keeper-plugin.json"
+  if (Test-Path $manifest) {
+    try {
+      $m = Get-Content $manifest -Raw | ConvertFrom-Json
+      $cmd = [string]$m.bin[0].command
+      if ($cmd) {
+        $rel = ($cmd -replace '\$\{PLUGIN_ROOT\}', '') -replace '^[/\\]+', ''
+        $candidate = Join-Path $pluginDir $rel
+        if (Test-Path $candidate) { $plugin = $candidate }
+      }
+    } catch {
+      Write-Host "    （插件清单读不出来，退回 glob 找 bin）"
+    }
+  }
+  if (-not $plugin) {
+    $hit = Get-ChildItem -Path (Join-Path $pluginDir "bin") -Filter "bash_server*" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($hit) { $plugin = $hit.FullName }
+  }
+  if (-not $plugin) { throw "找不到 bash 插件的 bin（$pluginDir\bin\bash_server*）" }
   $ws = Join-Path $TmpHome "ws"; New-Item -ItemType Directory -Force -Path $ws | Out-Null
   $env:PATH = (Split-Path $KernelExe) + ";" + $env:PATH
   # 让插件用**随包的内置 POSIX shell**（busybox 的 sh.exe）—— 这才是这一步要验的
   # 东西：agent 写的命令在 Windows 上得是 POSIX 语法，不能退到 cmd.exe。
   # 内核平时就是通过 KEEPER_SHELL / KEEPER_SHELL_FLAG 注入给插件的
-  # （见 framework/shell.py 与 plugins/bash/bin/bash_server）。
+  # （见 framework/shell.py 与 plugins/bash/bin/bash_server.py）。
   $sh = Join-Path $DistDir "runtime\sh\sh.exe"
   $posix = $false
   if (Test-Path $sh) {
@@ -227,6 +256,45 @@ else:
     return
   }
   if ($out -notmatch "LITERT-OK") { throw "litert 原生库加载失败：$out" }
+  Write-Host $out.Trim()
+}
+
+Step "11. PDF 页面渲染可用（pypdfium2；没装就跳过）" {
+  # 「我的空间」预览 PDF 靠服务端把整页渲染成 PNG（pdfpage/render.py）。
+  # pypdfium2 的原生库（Windows: pdfium.dll）是 ctypes 按名加载的，**最容易在
+  # 打包时丢**——丢了的表现是「开发态能预览、装出来的版本一律渲染失败」。
+  # 这里在**冻结产物**里真渲染一页出来，别等用户发现。
+  if (-not (Test-Path $PyExe)) { throw "没有内置 python3.exe：$PyExe" }
+  $script = Join-Path $TmpHome "pdfium_test.py"
+  Set-Content -Path $script -Encoding utf8 -Value @'
+# 用 find_spec 判「装没装」而不是 try-import：装没装 → SKIP；
+# 装了却加载不了（PDFium 原生库没进包）→ 必须**报错**，不能被当成 SKIP 蒙过去。
+import importlib.util
+try:
+    spec = importlib.util.find_spec("pypdfium2")
+except Exception:
+    spec = None
+if spec is None:
+    print("PDFIUM-SKIP")
+else:
+    import os, tempfile
+    import pypdfium2 as pdfium
+    from keeper.pdfpage.render import render_page
+    doc = pdfium.PdfDocument.new()
+    doc.new_page(200, 300)
+    path = os.path.join(tempfile.mkdtemp(), "t.pdf")
+    doc.save(path)
+    doc.close()
+    png = render_page(path, 1, scale=1.0)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n", "渲染出来的不是 PNG"
+    print("PDFIUM-OK", len(png))
+'@
+  $out = & $PyExe $script 2>&1 | Out-String
+  if ($out -match "PDFIUM-SKIP") {
+    Write-Host "SKIP: 没装 pypdfium2（PDF 预览不可用）"
+    return
+  }
+  if ($out -notmatch "PDFIUM-OK") { throw "PDF 页面渲染不可用：$out" }
   Write-Host $out.Trim()
 }
 

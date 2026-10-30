@@ -150,6 +150,15 @@ node/busybox → electron-builder 出 nsis 安装包 → **跑一遍 Windows 冒
 4. bash 插件能执行一条命令
 5. 插件绑定（junction）在没有开发者模式时也建得起来
 6. 打包好的桌面 app 能起来并拉起内核
+7. SQLite FTS5（关键词检索的地基）
+8. jieba 分词（中文检索的前提）
+9. `/search/query` 端点（关键词模式）
+10. litert 原生库可加载（向量检索运行时；没装就跳过）
+11. PDF 页面渲染（pypdfium2 + PDFium 原生库；没装就跳过）
+
+> 插件 bin 的**文件名**（`bash_server` → `bash_server.py`）会随重构变，
+> 所以冒烟脚本不写死它：从 `plugins/bash/keeper-plugin.json` 的 `bin[].command`
+> 里读出真正要跑的那个文件（读不到再退回 glob 找）。
 
 本地有 Windows 机器时也可以直接跑：
 
@@ -237,6 +246,11 @@ Intel Mac 没有），所以不能进 `requirements.txt`（否则 Intel Mac 上
 
 Windows 冒烟里对应 4 项检查（`packaging/ci/smoke_windows.ps1` 第 7~10 项）：
 FTS5、jieba、`/search/query` 端点、litert 原生库可加载（没装则跳过）。
+
+> PDF 页面渲染（pypdfium2 + PDFium 原生库）是第 11 项：PDFium 的原生库
+> （Windows: `pdfium.dll`）是 ctypes 按名加载的，打包时最容易丢——丢了的表现是
+> 「开发态能预览 PDF、装出来的版本一律渲染失败」。所以 spec 里显式点名收，
+> 冒烟里再真渲染一页出来验一遍。
 
 
 ### 5.6 Windows 还剩的坑

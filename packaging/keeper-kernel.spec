@@ -129,6 +129,34 @@ try:
 except Exception as e:  # noqa: BLE001 没装 litert-lm 不该让构建失败
     print(f"[spec] litert-lm not available, skipping vector-search runtime: {e}")
 
+# ---- PDF 页面渲染：pypdfium2（PDFium 绑定）----
+# pdfpage/render.py 用 `import pypdfium2` 把 PDF 页渲染成 PNG（给「我的空间」
+# 预览 + agent 看 PDF 用）。
+# PyInstaller 能静态看到 `import pypdfium2`，但 **PDFium 的原生库**
+# （mac: libpdfium.dylib / Windows: pdfium.dll）躺在 pypdfium2_raw 包目录里、
+# 且是 ctypes 按名加载的——少了它，冻结产物里 import pypdfium2 直接抛
+# ImportError（"Could not find library 'pdfium'"），PDF 预览就全废。
+# 现在 PyInstaller 会顺手扫包目录把二进制带上，但那是实现细节、不是保证，
+# 所以这里**显式点名**收一遍（收重了也无害，PyInstaller 会去重）。
+try:
+    from PyInstaller.utils.hooks import (
+        collect_data_files as _collect_data,
+        collect_dynamic_libs as _collect_dyn,
+        collect_submodules as _collect_sub3,
+    )
+
+    hiddenimports += (
+        _collect_sub3("pypdfium2")
+        + _collect_sub3("pypdfium2_raw")
+        + _collect_sub3("pypdfium2_cfg")
+    )
+    binaries += _collect_dyn("pypdfium2_raw")
+    datas += _collect_data("pypdfium2", include_py_files=False)
+    datas += _collect_data("pypdfium2_raw", include_py_files=False)
+    print("[spec] pypdfium2 collected (PDF page rendering enabled)")
+except Exception as e:  # noqa: BLE001 缺依赖只该让 PDF 预览不可用
+    print(f"[spec] pypdfium2 not available, skipping PDF page rendering: {e}")
+
 # ---- 插件依赖（excel / pdf / word）：子进程的 import 静态分析看不见 ----
 # 插件 bin 是**另起的子进程**（keeper 用解释器拉起），PyInstaller 的 Analysis
 # 只看得到内核自己的 import，看不到插件脚本里的 `import openpyxl`。
