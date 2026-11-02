@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  keeper 桌面应用的图标源文件（矢量化）。
+
+  为什么单独放一份、不复用 official-web/favicon.svg：
+  - 网页 favicon 是**蓝色圆角方块 + 白 K**（深色底更醒目）；
+  - macOS 应用图标是**白色圆角方块 + 蓝色 K**（浅色底，贴近系统应用观感）。
+  两者共用一份会让其中一边妥协，所以分开维护，产物都进 desktop/build/。
+
+  改完这个文件后重跑一次：
+      .venv/bin/python packaging/make_app_icons.py
+
+  尺寸约定（viewBox 0 0 32 32）：
+  - 背景：铺满整幅（macOS 会用 squircle 遮罩裁切，**背景必须满**，否则四周透明）；
+  - K：宽约 39%、高约 54%，居中，留出系统加圆角后的呼吸空间；
+  - 笔画用 stroke + round 端点，风格与系统图标一致（圆润、粗壮）。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <!-- gradientUnits="userSpaceOnUse" 是必须的：默认的 objectBoundingBox 用
+         「元素包围盒」映射渐变，而竖笔是一条**纯直线**、包围盒面积为 0 →
+         按 SVG 规范这类元素**不渲染**（斜笔有面积所以没事）→ 竖笔会凭空消失。 -->
+    <linearGradient id="kk" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="32" y2="32">
+      <stop offset="0" stop-color="#4285f4"/>
+      <stop offset="1" stop-color="#2962d8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 白色圆角方块（Windows 版保留圆角；macOS 版由脚本去掉圆角、铺满整幅） -->
+  <rect width="32" height="32" rx="7.4" fill="#ffffff"/>
+
+  <!-- 蓝色 K：一条竖笔 + 两条斜笔，圆端点 -->
+  <g fill="none" stroke="url(#kk)" stroke-width="3.4"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.8 7.4 V24.6"/>
+    <path d="M9.8 16 L22.2 7.4"/>
+    <path d="M9.8 16 L22.2 24.6"/>
+  </g>
+</svg>

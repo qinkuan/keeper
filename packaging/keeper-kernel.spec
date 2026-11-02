@@ -22,7 +22,17 @@ llm/config.py 的 PROVIDER_MAP 在运行时才决定 import 哪个包，PyInstal
 静态分析看不见 → 不点名就会在运行时炸 "No module named langchain_openai"。
 """
 import sys
+import warnings
 from pathlib import Path
+
+# ---- 构建期的告警兜底 ----------------------------------------------
+# jieba 0.42.1（2020 年之后就没再更新）里有 Python 3.12+ 才新增的告警：
+#   SyntaxWarning: invalid escape sequence '\.' / '\s'
+# —— 那是它字符串里的老式转义写法（"([\u4E00-\u9FD5...&\._%\-]+)"）。
+# 运行时语义**完全不变**（反斜杠原样保留，正则含义一致），冻结产物里 jieba
+# 已是 .pyc、运行时也不会再报；但构建日志里会刺眼两行。
+# 这里在编译模块之前先静音（spec 是被 exec 的，PyInstaller 随后才编译依赖）。
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 # ---- 构建期日志的编码兜底 ----------------------------------------------
 # Windows 上 stdout 默认是 cp1252（控制台/重定向都是），print 中文会抛

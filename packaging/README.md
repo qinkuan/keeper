@@ -38,6 +38,7 @@ Keeper.app/Contents/Resources/
 | 文件 | 职责 |
 |---|---|
 | `packaging/build_macos.sh` | 一键流程：构建前端 → 跑 PyInstaller → 跑 electron-builder |
+| `packaging/make_app_icons.py` | 从 `official-web/favicon.svg` 生成应用图标（`desktop/build/icon.icns` + `icon.ico`），改图标源后跑一次即可 |
 | `packaging/keeper-kernel.spec` | 冻结规格：包路径、hiddenimports（provider 集成是运行时动态 import，不点名会炸）、排除掉的胖包 |
 | `packaging/launcher.py` | 冻结入口（仓库根**就是** `keeper` 包，`import keeper.x` 要的是它的父目录，spec 里用 `pathex` 解决） |
 | `desktop/electron-builder.yml` | 打包配置：appId、extraResources（内核 + 配置模板）、dmg 布局 |
@@ -281,8 +282,28 @@ FTS5、jieba、`/search/query` 端点、litert 原生库可加载（没装则跳
    并退出（这是**故意的**：两个内核会抢同一个 `~/.keeper` 数据库）。
 5. **只构建了 arm64**（Apple Silicon）。要给 Intel Mac 用，得在 Intel 机器上再构建
    一次（PyInstaller 不做 universal binary）。
-6. **图标还是 Electron 默认的**：`desktop/electron-builder.yml` 里没设 `mac.icon`，
-   把图标放进 `desktop/build/icon.icns` 并在配置里指一下即可。
+6. **图标已换成 keeper 自己的**（不再是 Electron 默认图标）：图标源是
+   `desktop/icon.svg`（**白底圆角方块 + 蓝色 K**，笔画圆润），用
+   `packaging/make_app_icons.py` 渲染成两个产物—— **产物提交进仓库**，CI 的
+   Windows runner 上没有 SVG 渲染器，图标得是现成的。改了 `desktop/icon.svg`
+   就在本机重跑一次：
+
+   ```bash
+   .venv/bin/python packaging/make_app_icons.py
+   ```
+
+   | 产物 | 平台 | 说明 |
+   |---|---|---|
+   | `desktop/build/icon.png` | macOS | 1024×1024 画布里放**图标本体 824×824**（白底圆角方块 + 蓝色 K），四周留透明边距 —— 这是 Apple 的应用图标规范：macOS **不会**去裁切第三方图标，尺寸得自己守规范，铺满 1024 会在 Dock 里比系统应用明显大一圈。圆角半径约 190px（规范 ~185px） |
+   | `desktop/build/icon.ico` | Windows | **铺满画布**的圆角白底（Windows 图标没有留白规范），自拼的 ICO 容器（16/24/32/48/64/128/256，条目全用 PNG 以保住透明圆角） |
+
+   > **不要用 `iconutil` 打 .icns**：它写出的条目长度字段是坏的（声明 4096、实际
+   > 几万字节），macOS 按长度读 → 只解出半张图，图标显示成「上下两半拼贴」。
+   > 系统自带的 `electron.icns`（app-builder 产的）是正常的。
+
+   > **SVG 里的渐变要用 `gradientUnits="userSpaceOnUse"`**：默认的
+   > `objectBoundingBox` 按元素包围盒映射，而竖笔是纯直线、包围盒面积为 0 →
+   > 按 SVG 规范**不渲染**（斜笔有面积所以看不出来）→ K 会只剩两条斜笔。
 
 ## 七、改代码后怎么重新出包
 

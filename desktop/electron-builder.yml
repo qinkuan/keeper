@@ -62,6 +62,14 @@ extraResources:
 asar: true
 
 mac:
+  # 应用图标：**keeper 自己的**，不是 Electron 默认图标（默认那个一眼就是
+  # "一个 Electron 应用"）。
+  # 给的是 **1024×1024 的方图（不带圆角）**——macOS 11+ 会自己给 App 图标套
+  # squircle 圆角遮罩，图标自带圆角会变成「圆角套圆角」、四角被啃掉一圈。
+  # .icns 由 electron-builder(app-builder) 转，它那条管线是 Electron 自己在用的。
+  # 图标源 official-web/favicon.svg，产物由 packaging/make_app_icons.py 生成
+  # 并提交进仓库（CI 的 Windows runner 上没有 SVG 渲染器）。
+  icon: build/icon.png
   category: public.app-category.productivity
   darkModeSupport: true
   target:
@@ -78,6 +86,10 @@ mac:
     NSHumanReadableCopyright: Keeper
 
 win:
+  # 同上：Windows 的 exe / 快捷方式 / 开始菜单都用 keeper 自己的图标。
+  # 必须是 **256×256 的 .ico**（嵌进 PE 资源），小尺寸不够会让资源管理器
+  # 显示成默认图标。
+  icon: build/icon.ico
   # 不设 category：electron-builder 26 对 Windows 的分类枚举校验很严，
   # 写错了会直接报 "Invalid configuration object"。
   target:

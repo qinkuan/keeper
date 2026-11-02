@@ -7,6 +7,18 @@
 <meta name="description" content="Keeper 是一个跑在你自己机器上的本地知识库 Agent——把「我的空间」变成 Agent 的知识库，读、找、改、交，数据全部留在本地。" />
 <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="apple-touch-icon" href="favicon.svg" />
+
+<!-- ===================== 下载链接配置（只改这里） ===================== -->
+<!-- 把下面的 "#" 换成真实安装包地址即可，改完刷新页面生效。                    -->
+<!-- 推荐用 GitHub Releases 的直接文件链接，例如：                            -->
+<!-- https://github.com/qinkuan/keeper/releases/download/v0.1.0/keeper-win.exe -->
+<script>
+  window.KEEPER_DOWNLOAD = {
+    windows: "https://keeper-desktop-1300449296.cos.ap-shanghai.myqcloud.com/Keeper-0.1.0-setup.exe",   // ← Windows 安装包（.exe）直链
+    mac:     "https://keeper-desktop-1300449296.cos.ap-shanghai.myqcloud.com/Keeper-0.1.0-arm64.dmg"    // ← macOS Apple 芯片（.dmg）直链
+  };
+</script>
+
 <style>
   /* 浅色主题（默认，对齐 Keeper web/src/theme.css 浅色 token） */
   :root {
@@ -209,7 +221,7 @@
 
 <!-- ============================================================
      说明：本页为 Keeper 官网（单页）。
-     · 下载链接：把下面的 href="#" 替换成你的真实安装包地址即可。
+     · 下载链接：改文件顶部「下载链接配置」里的 windows / mac 即可（不用动下面的按钮）。
      · 截图：把 .shot 里的占位提示替换为 <img src="screens/xxx.png" alt="...">
      · 文案均可按需要修改。
      ============================================================ -->
@@ -346,7 +358,7 @@
           <div><h3>Windows</h3></div>
         </div>
         <div class="meta">适用于 Windows 10 / 11 · 64 位（.exe 安装包）</div>
-        <a class="dl-btn" href="#">
+        <a class="dl-btn" id="dlWin" href="#">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
           下载 Windows 版
         </a>
@@ -360,7 +372,7 @@
           <div><h3>macOS（Apple 芯片）</h3></div>
         </div>
         <div class="meta">适用于 Apple Silicon（M 系列）· ARM64（.dmg 安装包）</div>
-        <a class="dl-btn" href="#">
+        <a class="dl-btn" id="dlMac" href="#">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
           下载 Mac ARM 版
         </a>
@@ -382,6 +394,7 @@
 </footer>
 
 <script>
+
   document.getElementById('year').textContent = new Date().getFullYear();
 
   // 主题切换：默认浅色，记忆用户选择（localStorage）
@@ -394,6 +407,13 @@
       var isDark = root.classList.toggle('dark');
       localStorage.setItem('keeper-theme', isDark ? 'dark' : 'light');
     });
+  })();
+
+  // 下载链接：把顶部 KEEPER_DOWNLOAD 配置绑到对应按钮
+  (function () {
+    var d = window.KEEPER_DOWNLOAD || {};
+    if (d.windows && d.windows !== '#') document.getElementById('dlWin').href = d.windows;
+    if (d.mac && d.mac !== '#') document.getElementById('dlMac').href = d.mac;
   })();
 </script>
 </body>
