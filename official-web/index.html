@@ -184,6 +184,52 @@
   .dl-card .dl-btn:hover { background: var(--accent-deep); }
   .dl-note { font-size: 12.5px; color: var(--text-dim); margin-top: 12px; text-align: center; }
 
+  /* 未签名提示：macOS 首次打开要去掉隔离标记 */
+  .gate-note {
+    margin-top: 18px; padding: 16px; text-align: left;
+    background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: 12px;
+  }
+  .gate-note .g-title {
+    display: flex; align-items: center; gap: 7px; font-size: 13.5px;
+    font-weight: 700; margin-bottom: 8px;
+  }
+  .gate-note .g-title svg { width: 16px; height: 16px; flex: none; }
+  .gate-note p { margin: 0 0 10px; font-size: 12.5px; line-height: 1.75; color: var(--text-dim); }
+  .gate-cmd {
+    display: flex; align-items: center; gap: 8px; padding: 9px 10px 9px 12px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 9px;
+  }
+  .gate-cmd code {
+    flex: 1; min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.7; color: var(--text);
+    /* 断行优先落在空格处（命令有两个空格分隔的参数），别把单词劈开 */
+    white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
+  }
+  .gate-copy {
+    flex: none; padding: 5px 11px; font-size: 12px; font-weight: 700; cursor: pointer;
+    color: var(--accent); background: transparent; border: 1px solid var(--border);
+    border-radius: 7px; transition: .16s;
+  }
+  .gate-copy:hover { border-color: var(--accent); color: var(--accent-deep); }
+  .gate-copy.done { color: #1f9d55; border-color: #1f9d55; }
+
+  /* 下载前的提示弹层 */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+    padding: 20px; background: rgba(10, 16, 28, .55); backdrop-filter: blur(3px);
+  }
+  .modal-mask[hidden] { display: none; }
+  .modal {
+    width: min(560px, 100%); padding: 26px; border-radius: 16px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    box-shadow: 0 24px 60px rgba(8, 14, 26, .28);
+  }
+  .modal h3 { font-size: 18px; margin-bottom: 10px; }
+  .modal p { font-size: 13.5px; line-height: 1.75; color: var(--text-dim); margin-bottom: 14px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .modal-actions .btn { padding: 10px 18px; font-size: 14px; }
+
   /* Videos */
   .videos { display: grid; grid-template-columns: 1fr; gap: 24px; }
   @media (max-width: 860px) { .videos { grid-template-columns: 1fr; } }
@@ -377,6 +423,19 @@
           下载 Mac ARM 版
         </a>
         <div class="dl-note">Intel Mac 暂不在分发范围，详见说明</div>
+
+        <!-- 没做 Apple 公证：首次打开要先去掉隔离标记 -->
+        <div class="gate-note">
+          <div class="g-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#e8a020" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4"/><path d="M12 17.3v.1"/></svg>
+            未做 Apple 公证，首次打开需要一步操作
+          </div>
+          <p>keeper 没有 Apple 开发者签名，下载后 macOS 会拦下「直接打开」。把 app 拖进「应用程序」文件夹后，在「终端」执行下面这行即可解除：</p>
+          <div class="gate-cmd">
+            <code>sudo xattr -rd com.apple.quarantine /Applications/Keeper.app</code>
+            <button type="button" class="gate-copy" data-cmd="sudo xattr -rd com.apple.quarantine /Applications/Keeper.app">复制</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -392,6 +451,22 @@
     </div>
   </div>
 </footer>
+
+<!-- 点「下载 Mac 版」时的提示：没做 Apple 公证，首次打开要去隔离标记 -->
+<div class="modal-mask" id="dlModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dlModalTitle">
+    <h3 id="dlModalTitle">macOS 首次打开需要先执行一条命令</h3>
+    <p>keeper 没有 Apple 开发者签名，下载后系统会拦下自动打开。把 <b>Keeper.app</b> 拖进「应用程序」文件夹后，在「终端」执行下面这行，再双击打开即可：</p>
+    <div class="gate-cmd">
+      <code>sudo xattr -rd com.apple.quarantine /Applications/Keeper.app</code>
+      <button type="button" class="gate-copy" data-cmd="sudo xattr -rd com.apple.quarantine /Applications/Keeper.app">复制</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="dlModalCancel" type="button">先不下载</button>
+      <button class="btn primary" id="dlModalOk" type="button">我知道了，开始下载</button>
+    </div>
+  </div>
+</div>
 
 <script>
 
@@ -414,6 +489,61 @@
     var d = window.KEEPER_DOWNLOAD || {};
     if (d.windows && d.windows !== '#') document.getElementById('dlWin').href = d.windows;
     if (d.mac && d.mac !== '#') document.getElementById('dlMac').href = d.mac;
+  })();
+
+  // 未签名提示：复制命令 + 点下载前先提示一次
+  (function () {
+    var CMD = 'sudo xattr -rd com.apple.quarantine /Applications/Keeper.app';
+
+    function fallbackCopy(text, cb) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); cb(); } catch (e) { /* 复制失败就当没复制 */ }
+      document.body.removeChild(ta);
+    }
+
+    // 「复制」按钮：把命令写进剪贴板，按钮上给个反馈
+    Array.prototype.forEach.call(document.querySelectorAll('.gate-copy'), function (btn) {
+      btn.addEventListener('click', function () {
+        var text = btn.getAttribute('data-cmd') || CMD;
+        var done = function () {
+          var old = btn.textContent;
+          btn.textContent = '已复制';
+          btn.classList.add('done');
+          setTimeout(function () { btn.textContent = old; btn.classList.remove('done'); }, 1600);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
+        } else {
+          fallbackCopy(text, done);
+        }
+      });
+    });
+
+    // 点「下载 Mac 版」→ 先弹提示（说明要去隔离标记），确认后才真的下载
+    var link = document.getElementById('dlMac');
+    var modal = document.getElementById('dlModal');
+    if (!link || !modal) return;
+    var url = link.getAttribute('href');
+    if (!url || url === '#') return;   // 还没配下载链接 → 不拦
+
+    link.addEventListener('click', function (e) {
+      e.preventDefault();
+      modal.hidden = false;
+      document.getElementById('dlModalOk').onclick = function () {
+        modal.hidden = true;
+        window.location.href = url;
+      };
+      document.getElementById('dlModalCancel').onclick = function () { modal.hidden = true; };
+      modal.onclick = function (e) { if (e.target === modal) modal.hidden = true; };
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape') modal.hidden = true;
+      });
+    });
   })();
 </script>
 </body>
