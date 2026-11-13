@@ -64,11 +64,11 @@ asar: true
 mac:
   # 应用图标：**keeper 自己的**，不是 Electron 默认图标（默认那个一眼就是
   # "一个 Electron 应用"）。
-  # 给的是 **1024×1024 的方图（不带圆角）**——macOS 11+ 会自己给 App 图标套
-  # squircle 圆角遮罩，图标自带圆角会变成「圆角套圆角」、四角被啃掉一圈。
-  # .icns 由 electron-builder(app-builder) 转，它那条管线是 Electron 自己在用的。
-  # 图标源 official-web/favicon.svg，产物由 packaging/make_app_icons.py 生成
-  # 并提交进仓库（CI 的 Windows runner 上没有 SVG 渲染器）。
+  # 给的是 1024×1024 的图，白底圆角方块**缩到 80.5% 居中**（本体 824×824 + 四周
+  # 透明边距）——Apple 的规范尺寸，铺满 1024 会在 Dock 里比系统应用大一圈。
+  # .icns 由 electron-builder(app-builder) 转（iconutil 产出的 icns 会渲染错乱）。
+  # 图标源 desktop/icon.svg（白底圆角 + 蓝 K），产物由 packaging/make_app_icons.py
+  # 生成并提交进仓库（CI 的 Windows runner 上没有 SVG 渲染器）。
   icon: build/icon.png
   category: public.app-category.productivity
   darkModeSupport: true

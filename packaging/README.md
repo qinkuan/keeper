@@ -1,17 +1,20 @@
-# 打包成 macOS 可安装应用
+# 打包成可分发的桌面应用（macOS / Windows）
 
-把 keeper 打成一个能双击安装的 `.app` / `.dmg`：目标机**不需要装 Node，也不需要装 Python**。
+把 keeper 打成能双击安装的 `.dmg` / `.exe`：目标机**不需要装 Node，也不需要装 Python**。
 
 ```bash
-./packaging/build_macos.sh      # 全流程（前端 → 冻结内核 → 出 dmg）
+./packaging/build_macos.sh              # macOS 全流程（前端 → 冻结内核 → 出 dmg）
+pwsh ./packaging/build_windows.ps1      # Windows 全流程（CI 走 .github/workflows/build-windows.yml）
 ```
 
 产物：
 
 | 路径 | 是什么 |
 |---|---|
-| `desktop/release/Keeper-<版本>-arm64.dmg` | 分发用：双击 → 拖进「应用程序」 |
+| `desktop/release/Keeper-<版本>-arm64.dmg` | macOS 分发用：双击 → 拖进「应用程序」 |
 | `desktop/release/mac-arm64/Keeper.app` | 未压缩的 app，可直接 `open` 调试 |
+| `desktop/release/Keeper-<版本>-setup.exe` | Windows NSIS 安装程序 |
+| `desktop/release/win-unpacked/` | 未打包的 Windows 应用目录（调试用） |
 
 ## 一、环境是怎么被打进去的
 
@@ -38,16 +41,24 @@ Keeper.app/Contents/Resources/
 | 文件 | 职责 |
 |---|---|
 | `packaging/build_macos.sh` | 一键流程：构建前端 → 跑 PyInstaller → 跑 electron-builder |
-| `packaging/make_app_icons.py` | 从 `official-web/favicon.svg` 生成应用图标（`desktop/build/icon.icns` + `icon.ico`），改图标源后跑一次即可 |
-| `packaging/keeper-kernel.spec` | 冻结规格：包路径、hiddenimports（provider 集成是运行时动态 import，不点名会炸）、排除掉的胖包 |
+| `packaging/make_app_icons.py` | 从 `desktop/icon.svg` 生成应用图标（`desktop/build/icon.png` + `icon.ico`），改图标源后跑一次即可 |
+| `packaging/keeper-kernel.spec` | 冻结规格：包路径、hiddenimports（provider 集成是运行时动态 import，不点名会炸）、pypdfium2 原生库收集、排除掉的胖包 |
 | `packaging/launcher.py` | 冻结入口（仓库根**就是** `keeper` 包，`import keeper.x` 要的是它的父目录，spec 里用 `pathex` 解决） |
-| `desktop/electron-builder.yml` | 打包配置：appId、extraResources（内核 + 配置模板）、dmg 布局 |
+| `packaging/ci/smoke_windows.ps1` | Windows 冒烟 11 项（内核 / python3 / node / bash 插件 / junction / 桌面 app / FTS5 / jieba / 检索 / litert / PDF 渲染） |
+| `desktop/electron-builder.yml` | 打包配置：appId、extraResources（内核 + 配置模板）、dmg 布局、`mac.icon` / `win.icon` |
 | `desktop/sidecar.js` | 运行时找内核：打包形态找 `Resources/kernel/keeper-kernel`，开发形态找仓库 `.venv` |
 
 ## 三、签名与公证
 
-没有开发者证书时产物**未签名**：本机正常打开；给别人用第一次要右键→打开（或
-`xattr -dr com.apple.quarantine /Applications/Keeper.app`）。
+没有开发者证书时产物**未签名**：本机正常打开；从网上下载后 macOS 会加隔离标记，
+第一次要右键→打开，或在「终端」执行：
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/Keeper.app
+```
+
+官网 `official-web/index.html` 的 macOS 下载卡片里有这条命令的**常驻提示**和一键复制，
+点「下载 Mac ARM 版」时还会弹一次提示；签名/公证配好后记得把这两处撤掉。
 
 有 Apple Developer ID 证书时：
 
@@ -245,8 +256,8 @@ Intel Mac 没有），所以不能进 `requirements.txt`（否则 Intel Mac 上
 一大串传递依赖；而下载本质就是「按 URL 拉一个大文件」，httpx 已在依赖里，
 还能报进度、下到一半断线不留半个文件冒充「已就绪」。
 
-Windows 冒烟里对应 4 项检查（`packaging/ci/smoke_windows.ps1` 第 7~10 项）：
-FTS5、jieba、`/search/query` 端点、litert 原生库可加载（没装则跳过）。
+Windows 冒烟里检索相关的 4 项（`packaging/ci/smoke_windows.ps1` 第 7~10 项，
+全套共 11 项）：FTS5、jieba、`/search/query` 端点、litert 原生库可加载（没装则跳过）。
 
 > PDF 页面渲染（pypdfium2 + PDFium 原生库）是第 11 项：PDFium 的原生库
 > （Windows: `pdfium.dll`）是 ctypes 按名加载的，打包时最容易丢——丢了的表现是

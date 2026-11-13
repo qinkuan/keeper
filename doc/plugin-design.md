@@ -15,8 +15,14 @@
 ├── bash/                   ← 本机插件
 ├── excel/
 ├── pdf/
-└── plugin-installer/
+├── word/
+├── plugin-installer/
+└── plugin-authoring/       ← 只有 SKILL.md，没有 bin
 ```
+
+仓库 `plugins/` 下就是这 6 个参考插件；它们的 bin 已统一成 `.py`
+（`bash_server.py` / `excel.py` / `pdf.py` / `word.py` / `installer.py`）——
+Windows 没有 shebang，`framework/runtime.py` 会按扩展名选解释器。
 
 **加插件 = 往这个目录里放文件**。放进去即生效，刷新页面就能看到。
 这比「在界面上点安装」更符合本机单用户应用的定位——插件是本机文件，不是网络资源。
@@ -44,13 +50,13 @@
   "mcpServers": {
     "shell": {
       "summary": "在本机执行命令并返回输出",
-      "command": "${PLUGIN_ROOT}/bin/bash-mcp"
+      "command": "${PLUGIN_ROOT}/bin/bash_server.py"
     }
   },
   "bin": [
     {
       "summary": "一次性执行命令",
-      "command": "${PLUGIN_ROOT}/bin/run",
+      "command": "${PLUGIN_ROOT}/bin/bash_server.py",
       "tools": [{ "name": "run", "description": "执行一条命令" }]
     }
   ],

@@ -112,7 +112,10 @@ keeper 是一个**跑在自己机器上**的 agent 内核 + 桌面应用，围�
 | `chart` | vega-lite / echarts 渲染，容器可缩放平移；失败可下载 spec |
 | `mermaid` | 流程图，支持 `[seq]` 占位自动替换成步骤序号 |
 | `table` | CSV / JSON 解析成可排序表格，数字列按数值排 |
-| `file` | 文件卡片：Markdown 可切预览/源码，代码有 diff 视图，html / pdf / 视频走新窗口，图片内联缩放平移 |
+| `file` | 文件卡片：Markdown 可切预览/源码，代码有 diff 视图，html / pdf / 视频走浏览器新窗口，图片内联缩放平移 |
+
+> 这里的 `file` 是**会话里的交付块**，和下面「我的空间」的页面内预览是两条路径：
+> 交付块里的 PDF / HTML / 视频走新窗口，空间里的 PDF 走内核渲染的整页 PNG。
 | `map` / `audio` | 提示「下载后查看」 |
 
 Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码块也直接渲染成图。
@@ -182,13 +185,17 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 | **代码** | 按语言映射高亮，可编辑保存 |
 | **JSON / YAML / XML / TOML / CSV / TSV** | Monaco 高亮，可编辑保存 |
 | **Excel / 表格**（xlsx / xls / csv / tsv） | SheetJS 表格预览 —— 详见下表 |
-| **PDF** | pdf.js 渲染到 canvas，纵向滚动翻页，最多预览前 200 页并提示下载 |
+| **PDF** | **服务端渲染整页 PNG**（内核 `pdfpage/` 用 PDFium，自带 CJK 回退字体），前端贴 `<img>` 虚拟滚动；按容器宽度自适应、可跳页；每批占位 200 页、上限 2000 页。端点 `GET /documents/pdf/info`、`/pdf/page` |
 | **图片**（png/jpg/gif/webp/svg） | 内联预览，滚轮/捏合缩放、拖拽平移、双击放大/复位 |
 | **图表**（Vega / Mermaid，.vg.json / .mmd / .mermaid） | 渲染成图，可缩放平移、双击复位 |
-| **Office 文档**（docx / docm / pptx / pptm） | **不做页面内预览**，只给「用系统应用打开」（保真 100%，见 Roadmap ①） |
+| **Word**（docx / docm） | 自研只读渲染（`docx/`，`GET /documents/docx`）：段落/表格/图片/编号/样式继承，按 A4 版面呈现；浮动定位、SmartArt、公式、修订不还原 |
+| **PowerPoint**（pptx / pptm） | **不做页面内预览**，只给「用系统应用打开」（保真 100%，见 Roadmap ①） |
 | **HTML** | 不内嵌，给「在浏览器中打开」（可缩放/全屏/另存） |
 | **视频** | 浏览器原生播放器 |
-| **音频 / 其它二进制 / 超 2MB** | 降级为信息卡，提示下载后查看 |
+| **音频 / 其它二进制** | 降级为信息卡，提示下载后查看 |
+
+> PDF 与 docx 有各自的体积上限（100MB / 30MB），不走「超 2MB 降级」那条老规则；
+> 其余类型超 2MB 仍降级为信息卡。
 
 #### Excel / 表格预览细节
 
@@ -290,12 +297,12 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 
 | 要做的 | 现状 |
 |---|---|
-| **docx / pptx 预览与编辑** | 根本打不开（办公场景的默认格式） |
-| **PDF 批注、圈选、裁页合并** | 只能看 |
+| **docx / pptx 预览与编辑** | docx 已能**只读预览**（`docx/` + `DocxViewer`），回写编辑未做；pptx 仍只能「用系统应用打开」 |
+| **PDF 批注、圈选、裁页合并** | 只能看（已改服务端 PDFium 整页渲染，中文不再丢失） |
 | **图片编辑**（裁剪 / 旋转 / 标注） | 只能看 |
 | **音频转写 / 视频抽帧字幕** | 没有处理 |
 | **统一编辑协议**（各格式 → 统一文档模型 → 回写） | 每种格式各写一套 |
-| **大文件分级降级** | 超 2MB 直接只给元数据 |
+| **大文件分级降级** | PDF（100MB）、docx（30MB）已有独立上限，其余类型超 2MB 直接只给元数据 |
 | **版本与撤销** | 改错了只能靠 agent 再改回来 |
 | **任意文件 diff** | 只有 git 仓库内的文件有 |
 
@@ -351,7 +358,8 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 | 插件安装器、来源校验 | [`doc/plugin-design.md`](doc/plugin-design.md) |
 | 跨团队角色编排 | [`doc/collaboration-contract.md`](doc/collaboration-contract.md) |
 | 入站认证的风险与恢复路径 | [`doc/security.md`](doc/security.md) |
-| 桌面端打包分发、托盘、自启 | [`desktop/README.md`](desktop/README.md) |
+| 桌面端打包分发（dmg / nsis / 图标） | [`packaging/README.md`](packaging/README.md) |
+| 托盘、自启、自动更新 | [`desktop/README.md`](desktop/README.md)（尚未实现） |
 
 **明确不做**：多租户 / 账号体系 / 云端同步 —— keeper 定位是**本机单用户**应用，
 数据主权在用户本地。
@@ -392,7 +400,11 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 | git / ssh | 任意 | 只有手动从 git 拉插件源码时才需要 | 可选 |
 
 **Python 依赖**全部列在 [`requirements.txt`](requirements.txt)，`start_keeper.sh` 会自动建
-`.venv` 并安装（仅首次或 `requirements.txt` 变化时）。
+`.venv` 并安装（仅首次或 `requirements.txt` 变化时）。其中
+`pypdfium2>=5.14,<6` 是**硬依赖**：PDF 页面渲染（`pdfpage/`，供「我的空间」预览和
+agent 的 `kb.read_pdf`）靠它带的 PDFium 原生库，自带 CJK 回退字体；许可友好
+（Apache/BSD），项目明确不用 AGPL 的 PyMuPDF。打包时 `keeper-kernel.spec` 会显式
+收集它的原生库（Windows `pdfium.dll`），冒烟测试里真渲染一页验证。
 
 > **一个可选依赖**：`litert-lm`（本地 embedding 运行时，检索层的向量通道）**不在**
 > `requirements.txt` 里——它只有平台相关的 wheel，**Intel Mac 没有**，写进硬依赖会
@@ -406,6 +418,9 @@ Markdown 正文里的 ` ```mermaid ` / ` ```vega-lite ` / ` ```echarts ` 代码�
 |---|---|---|
 | `web/` | 前端依赖（React / Vite / Tailwind / Monaco / ECharts…） | `web/build_web.sh` 或 `cd web && npm install` |
 | `desktop/` | Electron（唯一的依赖） | `desktop/start_desktop.sh` 首次自动装 |
+
+> `web/` 里**不再有 `pdfjs-dist`**：PDF 预览改服务端渲染后已移除（主 chunk 少了
+> ~450KB），文本/Markdown/表格/图表仍分别用 Monaco / react-markdown / xlsx / Vega·Mermaid。
 
 > 前端产物（`web/dist`）不存在时，内核**只提供 API**，页面是空白 / 404。
 > 这是桌面端最常见的「起不来」，启动脚本已自动帮你构建。
@@ -714,9 +729,12 @@ KEEPER_PORT=9090 npm run dev
 | `/manage/delegatees/*` | 子 agent（各自独立模型 + 插件） |
 | `/manage/settings/*` | 用户设置读写（写回 `~/.keeper/settings.yaml`） |
 | `/manage/sessions/trash` | 会话回收站（软删除会话的列表与恢复） |
-| `/agents/{agent_id}/*` | 会话：对话、能力开关、我的空间文件、时间线、附件 |
+| `/agents/{agent_id}/*` | 会话：对话、能力开关、时间线、附件、知识库文件访问 |
 | `/user-spaces/*` | 我的空间：浏览 / 读写 / 重命名 / 删除 / 导入导出 |
+| `/documents/docx` | Word（docx/docm）只读渲染：拿到结构化 IR 交给前端 `DocxViewer` 画 |
+| `/documents/pdf/info`、`/documents/pdf/page` | PDF 页数·尺寸 / 整页 PNG（服务端 PDFium 渲染，带 1 小时缓存头；越界 403） |
 | `/search/*` | 检索层：索引管理（模型 / 建索引 / 清索引 / 配置）+ 混合检索 + 文档与切片维护 |
+| `/schema/*` | 数据库表结构（`/schema/tables`，`doc/database.md` 由它生成） |
 | `/metrics/*` | 可观测：用量、耗时、错误、提问率、重复调用 |
 | `/framework/*` | 本机运行时（python / node）检测 |
 | `/evals/*` | 评测 |
@@ -737,15 +755,20 @@ KEEPER_PORT=9090 npm run dev
 | 组件 | 形态 | 说明 |
 |---|---|---|
 | `mcpServers` | MCP | 常驻子进程，有跨调用状态（如索引缓存） |
-| `bin` | 可执行文件 | 一次性进程，语言无关，stdin/stdout JSON 协议 |
+| `bin` | 脚本文件（仓库里的参考插件已统一 `.py`） | 一次性进程，语言无关，stdin/stdout JSON 协议；Windows 没有 shebang，由 `framework/runtime.py` 按扩展名选解释器 |
 | `skill` / `skills` | SKILL.md | 纯知识，只注入 prompt |
 
 清单格式有两种（自动识别）：`keeper-plugin.json` 或 `.claude-plugin/plugin.json`。
 路径用 `${PLUGIN_ROOT}` / `${AGENT_SPACE}` 变量，**不要硬编码绝对路径**。
 
-仓库里带了 5 个参考插件（`plugins/`，只作参考，运行时读的是 `~/.keeper/plugins`）：
-`bash`（执行 shell，文件读写都走它）、`excel`、`pdf`、`plugin-installer`、
-`plugin-authoring`。
+仓库里带了 6 个参考插件（`plugins/`，只作参考，运行时读的是 `~/.keeper/plugins`）：
+`bash`（执行 shell，文件读写都走它）、`excel`、`pdf`、`word`、`plugin-installer`、
+`plugin-authoring`。其中 `word` 的 `word__create` 支持**版式预设**（`preset`）：
+`gongwen` 公文 / `contract` 合同 / `report` 报告 / `tech` 技术文档 / `default`，
+模型只需指定版式名，不必自己发明字号行距；显式传 `font_ascii` / `font_ea` /
+`title_size` 可覆盖预设。`word__edit` 做受限回写。详见
+[`plugins/word/skills/SKILL.md`](plugins/word/skills/SKILL.md) 与
+[`doc/roadmap.md`](doc/roadmap.md) ④.5。
 
 插件走**子进程**而不是 import：第三方代码进主进程等于把 keeper 的全部权限交给它。
 
@@ -755,18 +778,38 @@ KEEPER_PORT=9090 npm run dev
 
 能直接 `python` 跑完出结论的脚本，不引测试框架：
 
+24 个脚本，按主题分组（可分主题跑）：
+
 ```bash
-python tests/test_plugin_lib.py      # 插件库：清单解析、链接增删、幂等
-python tests/test_guard.py           # 安全守卫：白名单放行、绕过拦截
-python tests/test_planner_parse.py   # ReAct 文本协议解析
+# 协议 / 安全 / 会话
+python tests/test_protocol.py            # ReAct 标签协议
+python tests/test_planner_parse.py       # ReAct 文本协议解析
+python tests/test_guard.py               # 安全守卫：白名单放行、绕过拦截
 python tests/test_hallucination_guard.py
-python tests/test_protocol.py        # ReAct 标签协议
-python tests/test_search.py          # 检索层：切片 / 索引 / 混合检索
-python tests/test_kb_pdf.py          # 知识库工具：PDF 页码 / 渲染 / 召回
-python tests/test_session_link.py    # 会话空间里「我的空间」软链接
+python tests/test_session_link.py        # 会话空间里「我的空间」软链接
 python tests/test_session_link_guard.py  # 链接的越界 / 成环防护
-python tests/test_workspace_note.py  # 注入 system prompt 的环境说明
+python tests/test_workspace_note.py      # 注入 system prompt 的环境说明
+python tests/test_context_externalize.py
+python tests/test_log_daily.py; python tests/test_log_noise.py
+python tests/test_sub_session_billing.py
+
+# 插件 / 检索 / 知识库 / 模型
+python tests/test_plugin_lib.py          # 插件库：清单解析、链接增删、幂等
+python tests/test_search.py              # 检索层：切片 / 索引 / 混合检索
+python tests/test_kb_pdf.py              # 知识库工具：PDF 页码 / 渲染 / 召回
+python tests/test_attachment_upload.py; python tests/test_upload_endpoint.py
+python tests/test_auto_bind_plugins.py
+
+# 文档预览 / Word 插件 / 打包兼容
+python tests/test_pdf_page_api.py        # /documents/pdf/info、/pdf/page + 路径越界
+python tests/test_docx_ir.py; python tests/test_docx_search.py
+python tests/test_word_plugin_preset.py  # 五套版式预设 + 显式覆盖
+python tests/test_word_plugin_edit.py
+python tests/test_windows_script_launch.py; python tests/test_installer_windows_compat.py
 ```
+
+> `test_pdf_page_api.py` 用 `KEEPER_SETTINGS` 指到临时 `settings.yaml` 做隔离；
+> `test_word_plugin_preset.py` 直接读生成的 docx 校验字号/行距/缩进。
 
 ---
 
@@ -798,7 +841,9 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 |---|---|
 | **全貌 + 模块↔文档对照** | [`architecture.md`](doc/architecture.md) |
 | **怎么跑起来 / 怎么配** | 本文 README + [`desktop/README.md`](desktop/README.md) |
-| **未来要做什么** | [`roadmap.md`](doc/roadmap.md)（三个方向） |
+| **打包分发 / 应用图标 / 冒烟测试** | [`packaging/README.md`](packaging/README.md)（mac dmg + Windows nsis + CI 冒烟 11 项） |
+| **未来要做什么 + 已落地记录** | [`roadmap.md`](doc/roadmap.md)（三个方向，含 ①.7 PDF 服务端渲染、④.5 Word 版式预设） |
+| **官网下载页** | [`official-web/index.html`](official-web/index.html)（下载直链配置 + macOS 未公证提示与点击弹层） |
 | 产品定位 | [`positioning.md`](doc/positioning.md) |
 | 安全边界与已知缺口 | [`security.md`](doc/security.md) |
 | 会话存储 | [`session-design.md`](doc/session-design.md) |
@@ -811,9 +856,9 @@ cd web && ./deploy.sh    # 构建前端 → dist/keeper-web-*.zip
 | 工具与安全守卫 | [`tools.md`](doc/tools.md) |
 | 模型预设 / 绑定 / 计价 | [`llm.md`](doc/llm.md) |
 | 插件库与绑定 | [`plugin-design.md`](doc/plugin-design.md) |
-| **我的空间**（展示编辑 + 向量搜索） | [`user-space.md`](doc/user-space.md) |
+| **我的空间**（展示编辑 + 向量搜索；PDF / docx 只读预览） | [`user-space.md`](doc/user-space.md) |
 | **检索层**（切片 / 索引 / 混合检索） | [`indexing.md`](doc/indexing.md) |
-| **知识库读取**（PDF 页面截图 / `kb.*` 工具） | [`kb-pdf-pages.md`](doc/kb-pdf-pages.md) |
+| **知识库读取**（PDF 页面截图 / `kb.*` 工具 / 预览端点） | [`kb-pdf-pages.md`](doc/kb-pdf-pages.md) |
 | 跨端协作 | [`collaboration-contract.md`](doc/collaboration-contract.md) |
 | 可观测 | [`observability-design.md`](doc/observability-design.md) |
 | 评测 | [`evals.md`](doc/evals.md) |

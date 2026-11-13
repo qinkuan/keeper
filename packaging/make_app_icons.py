@@ -10,14 +10,14 @@ win: electron.ico）—— 装出来的应用在访达 / 任务栏 / 开始菜�
 keeper 的样式图标是一份矢量源：``desktop/icon.svg``
 （白色圆角方块 + 蓝色 K）。两个平台要的图还不一样：
 
-- **macOS**：要一张 1024×1024、**不带圆角、铺满**的方图（icon.png）。
-  圆角是**系统加的**（macOS 11+ 会给 App 图标套一层 squircle 遮罩）——自己带
-  圆角就会变成「圆角套圆角」，四个角被啃掉一圈。.icns 不自己拼，交给
-  **electron-builder**（app-builder）转：它那条管线产出的 icns 是 Electron 自
-  己也在用的（已被 macOS 验证过）。曾试过 iconutil，它写出的 icns 条目长度
-  字段是坏的，macOS 读出来是「半张图上下拼贴」，不能用。
-- **Windows**：.ico，圆角要**自己带**（Windows 不加遮罩）。ICO 容器自己拼
-  （条目全用 PNG，保住透明圆角；用 BMP 条目的话四角会变黑角）。
+- **macOS**：一张 1024×1024 的图，**白底圆角方块整体缩到 80.5% 居中**
+  （图标本体 824×824，四周透明边距）——这是 Apple 的应用图标规范：macOS 不会
+  去裁切第三方图标，尺寸得自己守规范，铺满 1024 在 Dock 里会比系统应用大一圈。
+  `.icns` 不自己拼，交给 **electron-builder**（app-builder）转：它那条管线产出的
+  icns 是 Electron 自己也在用的。曾试过 iconutil，它写出的 icns 条目长度字段是
+  坏的，macOS 读出来是「半张图上下拼贴」，不能用。
+- **Windows**：.ico，**铺满画布**的圆角白底（Windows 没有留白规范）。ICO 容器
+  自己拼（条目全用 PNG，保住透明圆角；用 BMP 条目的话四角会变黑角）。
 
 SVG → PNG 用 **Playwright 的 Chromium**（本机已装）：它能正确处理 SVG 里的
 渐变、圆角与字体，比自己手写光栅化靠谱得多。
@@ -27,7 +27,8 @@ SVG → PNG 用 **Playwright 的 Chromium**（本机已装）：它能正确处�
 
 - CI 的 Windows runner 上没有 Playwright，不该在打包时临时生成图标
   （渲染器/字体不同会得到不一致的图标）；
-- 改了 favicon.svg 之后手动跑一次本脚本即可重新生成。
+- 改了 `desktop/icon.svg` 之后手动跑一次本脚本即可重新生成
+  （网页 favicon 是另一份 `official-web/favicon.svg`，不要混）。
 
 用法::
 

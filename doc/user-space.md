@@ -85,13 +85,14 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 | 代码 | 按语言映射高亮 | ✅ | `monacoLang.ts` |
 | JSON / YAML / XML / TOML / CSV / TSV | Monaco 高亮 | ✅ | `viewers.ts` |
 | **Excel**（xlsx/xls/csv/tsv） | SheetJS 表格，多 sheet | ✅ 单元格可改，公式格式保留 | `SheetViewer` + `SheetGrid` |
-| PDF | pdf.js 渲染 canvas，纵向翻页 | ❌ | `PdfViewer` |
+| PDF | **服务端 PDFium 整页渲染成 PNG**（`GET /documents/pdf/info`、`/pdf/page`），前端贴 `<img>` 虚拟滚动；中文不再因未嵌入字体而丢失 | ❌ | `PdfViewer` |
 | 图片 | 内联，缩放平移、双击复位 | ❌ | `ImageViewer` + `PanZoomStage` |
 | 图表（Vega / Mermaid） | 渲染成图，缩放平移、双击复位 | ❌ | `DiagramView` + `PanZoomStage` |
-| Office（docx / docm / pptx / pptm） | **不做页面内预览**，「用系统应用打开」 | ❌ | `officeTypes.ts` |
+| Word（docx / docm） | 自研只读渲染（`GET /documents/docx` → IR → `DocxViewer` 画 A4 版面） | ❌ | `DocxViewer` + `docx/` |
+| PowerPoint（pptx / pptm） | **不做页面内预览**，「用系统应用打开」 | ❌ | `officeTypes.ts` |
 | HTML | 不内嵌，「在浏览器中打开」 | ❌ | — |
 | 视频 | 浏览器原生播放器 | ❌ | — |
-| 音频 / 其它二进制 / 超 2MB | 信息卡 + 下载 | ❌ | `viewers.ts` |
+| 音频 / 其它二进制 | 信息卡 + 下载 | ❌ | `viewers.ts` |
 | 会话产物块 | chart / mermaid / table 内联渲染 | ❌ | `BlockView` |
 
 ### 文件类型图标（已实现）
@@ -172,10 +173,10 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 | 现在 | 问题 |
 |---|---|
 | PDF 只能看 | 没法标一句、圈一段、裁掉两页 |
-| docx / pptx 打不开 | Office 文档是办公场景的默认格式，不能不支持 |
+| docx 只能看、pptx 打不开 | docx 已有只读预览但**不能回写编辑**；pptx 仍只能用系统应用打开 |
 | 图片只能看 | 截图标注是高频动作 |
 | 音频 / 视频没处理 | 会议录音、录屏是「我的空间」里的常见内容 |
-| 2MB 以上直接拒绝 | 大日志、大 CSV 很常见 |
+| 多数类型超 2MB 只给元数据 | 大日志、大 CSV 很常见（PDF/docx 已有各自的更高上限） |
 | 没有版本 | 改错了只能靠 agent 再改回来 |
 
 ### 设计
@@ -213,7 +214,8 @@ system prompt（`agent/process.py::_workspace_note` → `agent/planner.py` 的
 
 PDF 不是块模型，是「页面 + 批注」：
 
-- 渲染：pdf.js 已有，只缺**交互层**
+- 渲染：**服务端 PDFium 整页 PNG 已有**（`pdfpage/`），交互层要按页面坐标去锚；
+  不再依赖 pdf.js（它画不了未嵌入字体的中文）
 - 批注：页面坐标锚点（page + x/y/w/h + 原文快照），支持高亮、矩形、箭头、手写
 - 导出：把批注烘焙进新 PDF，或导出为「批注 + 原文件」的 sidecar（`.annotations.json`）
 - 裁页 / 合并 / 拆页：用 `pypdf`（纯 Python）
@@ -267,7 +269,7 @@ PDF 不是块模型，是「页面 + 批注」：
 
 | 阶段 | 内容 | 理由 |
 |---|---|---|
-| **P1** | 统一文档模型 + docx 读写 | Office 文档是最大缺口，块模型也能顺带服务 md/docx/html |
+| **P1** | 统一文档模型 + docx **回写** | docx 只读预览已落地，缺的是「改完写回」；块模型也能顺带服务 md/docx/html |
 | **P2** | 图片编辑 + 版本/撤销 | 纯前端，无新依赖，见效快 |
 | **P3** | PDF 批注 + 裁页 | 依赖 PDF 坐标模型，pypdf 纯 Python |
 | **P4** | 大文件分级降级 | 主要是接口改造，不难但要改前后端协议 |
@@ -406,7 +408,7 @@ API 嵌入作为可选项，且要在界面上说清「启用后文件内容会�
 |---|---|---|
 | **P1** | 文本类索引（md / txt / 代码）+ 向量库落地 + `search` 工具 | 先证明「语义能找到」，跨模态是增量 |
 | **P2** | 混合检索（+ FTS5 + RRF）+ 结构化过滤 | 纯向量不够用，这一步决定好不好用 |
-| **P3** | 表格 / PDF 分块与索引 | 复用已有解析能力（SheetJS / pdf.js 之外的 Python 侧） |
+| **P3** | 表格 / PDF 分块与索引 | 复用 Python 侧的解析能力（docx IR、`search/ingest/pdf.py`、PDFium 渲染），不必依赖前端的 SheetJS / pdf.js |
 | **P4** | 图片视觉嵌入 | 需要图文同空间模型，依赖更重 |
 | **P5** | 音视频转写后索引 | 依赖方向 ① 的转写能力 |
 | **P6** | `@我的空间` 候选换成语义匹配 | 交互层的最后一环 |
@@ -417,11 +419,12 @@ API 嵌入作为可选项，且要在界面上说清「启用后文件内容会�
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **docx / pptx 支持** | ❌ 未做 | 见 3.2 |
-| **PDF 批注与裁页** | ❌ 未做 | 见 3.3 |
+| **docx 支持** | 🟡 部分 | 只读预览已落地（`docx/` + `DocxViewer`）；回写编辑未做，见 3.2 |
+| **pptx 支持** | ❌ 未做 | 只给「用系统应用打开」，见 3.2 |
+| **PDF 批注与裁页** | ❌ 未做 | 整页渲染已改服务端 PDFium，只缺交互层，见 3.3 |
 | **图片编辑** | ❌ 未做 | 见 3.4 |
 | **音视频转写与抽帧** | ❌ 未做 | 见 3.5 |
-| **大文件分级降级** | ❌ 未做 | 见 3.6；现在超 2MB 直接只给元数据 |
+| **大文件分级降级** | 🟡 部分 | PDF（100MB）、docx（30MB）已有独立上限；其余类型超 2MB 仍只给元数据，见 3.6 |
 | **版本与撤销** | ❌ 未做 | 见 3.7 |
 | **任意文件 diff** | ❌ 未做 | 见 3.8；现在只有 git 仓库内的文件有 |
 | **索引器 / 向量检索** | 🟡 部分 | 检索层已落地（`search/`，见 [`indexing.md`](indexing.md)）：Markdown + PDF 切片、向量 + 关键词混合检索、「搜索」页、agent 侧 `kb.*` 工具（见 [`kb-pdf-pages.md`](kb-pdf-pages.md)）。跨模态（图片 / 代码 / 表格 / 音视频）与结构化过滤仍未做 |

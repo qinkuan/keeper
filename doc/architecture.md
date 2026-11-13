@@ -72,7 +72,9 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 │           memory/   记忆存储 / 检索 / 摘要 / 召回工具            │
 │           search/   文档切片 / 索引 / 向量+关键词混合检索        │
 │           knowledge/ 知识库工具（kb.search / kb.read_*）        │
-│           pdfpage/  PDF 页面渲染（给 agent 看的那张图）          │
+│           pdfpage/  PDF 页面渲染（agent 截图 + /documents/pdf/*  │
+│                     空间预览端点）                              │
+│           docx/     docx → IR（GET /documents/docx，空间预览）  │
 │           peer/ a2a/  对外协作（我→对端 / 对端→我）             │
 ├─────────────────────────────────────────────────────────────┤
 │ 支撑层    store/    数据库与 ORM 模型                          │
@@ -84,7 +86,8 @@ keeper 是**本地知识库 agent**：把「我的空间」变成 agent 的知�
 │           evals/    评测闭环                                   │
 ├─────────────────────────────────────────────────────────────┤
 │ 交付      web/      React 前端（构建产物由 keeper 同源托管）    │
-│           plugins/  参考插件（bash/excel/pdf/plugin-*）         │
+│           plugins/  参考插件（bash/excel/pdf/word/plugin-*）    │
+│           packaging/ 冻结内核、出包、CI 冒烟                   │
 │           deploy.sh / start_keeper.sh   打包与启动             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -211,6 +214,12 @@ MCP 组件或 bin 组件）。
 
 检索层负责「找到哪一页」，`knowledge/` 负责「把这一页给模型看」。详见
 [`kb-pdf-pages.md`](kb-pdf-pages.md)。
+
+`pdfpage/render.py` 有**两个消费方**：agent 侧 `kb.read_pdf` 拿页面截图，以及
+「我的空间」的 PDF 预览（`pdfpage/api.py` 的 `GET /documents/pdf/info`、`/pdf/page`，
+浏览器贴 `<img>` 虚拟滚动）。后者是为绕开 pdf.js 画不出未嵌入字体中文的问题
+（见 [`roadmap.md`](roadmap.md) ①.7）；Word 预览同理走 `docx/` 的
+`GET /documents/docx`。
 
 - `knowledge/tools.py`：三个工具 —— `kb.search`（召回并定位）、`kb.read_pdf`（按页读，
   返回那几页的**截图**）、`kb.read_markdown`（按行读原文）。在 `tools/collect.py` 里
@@ -476,7 +485,7 @@ ImportError 落在所有 `try` 之外，而另一侧安然无恙。**两份代�
 | `agent/context_store.py` | [`context.md`](context.md) | 外部化、压缩、水位 |
 | `zonefilesystem/` | [`user-space.md`](user-space.md) | 我的空间、文件展示与编辑、**向量跨模态搜索规划** |
 | `search/` | [`indexing.md`](indexing.md) | 文档切片、索引、向量 + 关键词混合检索 |
-| `knowledge/` + `pdfpage/` | [`kb-pdf-pages.md`](kb-pdf-pages.md) | `kb.*` 工具、PDF 页面渲染、把资料交给 agent |
+| `knowledge/` + `pdfpage/` + `docx/` | [`kb-pdf-pages.md`](kb-pdf-pages.md) + [`user-space.md`](user-space.md) | `kb.*` 工具、PDF 页面渲染、把资料交给 agent；`/documents/pdf/*` 与 `/documents/docx` 空间预览 |
 | `viewer/` | [`artifact-design.md`](artifact-design.md) | 交付块模型与渲染 |
 | `observability/` | [`observability-design.md`](observability-design.md) | 事实表、指标、定价 |
 | `evals/` | [`evals.md`](evals.md) | 用例集、基线、报告 |

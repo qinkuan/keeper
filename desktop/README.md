@@ -90,12 +90,26 @@ keeper 的不可替代资产都在 Python 侧：jieba 中文分词（FTS5 检索
 - **不给页面 node 权限**：`nodeIntegration: false`。第三方插件的 Web 内容不该能
   读写 `~/.keeper`；原生能力只经 preload 白名单暴露。
 
+## 打包分发（已完成）
+
+`packaging/` 已把内核冻成自包含可执行文件，再用 electron-builder 出
+mac `dmg` / Windows `nsis` 安装包，目标机**不需要装 Python 或 Node**：
+
+- 配置：[`electron-builder.yml`](electron-builder.yml)（`extraResources` 带内核 + 配置模板，
+  `mac.icon` / `win.icon` 指向自有图标）
+- 图标源：[`icon.svg`](icon.svg)（白底圆角方块 + 蓝色 K），产物 `build/icon.png` / `icon.ico`
+  由 `packaging/make_app_icons.py` 生成并提交
+- 全流程与排错：[`../packaging/README.md`](../packaging/README.md)
+- Windows 打包后有 11 项冒烟测试（`packaging/ci/smoke_windows.ps1`）
+
+> 应用**未做 Apple 签名与公证**：mac 下载后首次打开要先去掉隔离标记，
+> `sudo xattr -rd com.apple.quarantine /Applications/Keeper.app`；
+> 官网 `official-web/index.html` 的下载卡片有常驻提示，点下载时还会弹一次。
+
 ## 还没做
 
 | 项 | 说明 |
 |---|---|
-| **打包成 .app / .exe** | 现在依赖系统里的 Python 和 `keeper/.venv`，还不是可分发的单文件应用。下一步是 PyInstaller 把内核打进 `resources/`，再加 `electron-builder` 配置 |
-| **应用图标** | 现在用 Electron 默认图标 |
 | **托盘** | 常驻菜单（最小化到托盘、开机项入口、退出） |
 | **开机自启** | 登录后自动拉起 |
 | **自动更新** | 版本检查与替换 |

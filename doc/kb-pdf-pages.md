@@ -5,7 +5,12 @@ Markdown 给**文本**。
 
 实现位置：
 
-- 渲染：`pdfpage/render.py`
+- 渲染：`pdfpage/render.py`（PDFium → PNG，纯 Python 编码，不引 Pillow / PyMuPDF）
+- **空间预览端点**：`pdfpage/api.py` —— `GET /documents/pdf/info`（页数/尺寸）、
+  `GET /documents/pdf/page`（整页 PNG，1 小时缓存头，路径越界 403）。
+  这两条端点复用同一个 `render_page()`，但消费方是浏览器里的 `PdfViewer`（贴 `<img>`
+  虚拟滚动），不是 agent；服务端渲染是为了绕开 pdf.js 没有 CJK 回退字体、
+  未嵌入字体的中文整片丢失的问题。详见 [`roadmap.md`](roadmap.md) ①.7。
 - 工具：`knowledge/tools.py`
 - 精确页码（切片侧）：`search/ingest/pdf.py`
 - 精确页码（存储侧）：`search/store/db.py`

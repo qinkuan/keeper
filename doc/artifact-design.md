@@ -125,7 +125,7 @@ HTML 产物额外加 CSP 兜底（`default-src 'none'`、`connect-src 'none'`）
 
 | kind | 展示 |
 |---|---|
-| `file` | 按扩展名 / MIME 决定：图片内联预览、文本用 Monaco 高亮、PDF 走 pdf.js、其它给下载 |
+| `file` | 按扩展名 / MIME 决定：图片内联预览、文本用 Monaco 高亮，PDF / HTML / 视频交给**浏览器新窗口**，其它给下载 |
 | `chart` | ECharts / Vega-Lite 渲染 |
 | `mermaid` | mermaid 渲染 |
 | `table` | 表格渲染（可下载） |
